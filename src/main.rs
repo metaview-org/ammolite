@@ -1,11 +1,44 @@
 #[macro_use]
 extern crate vulkano;
+#[macro_use]
+extern crate vulkano_shader_derive;
+extern crate image;
+
+use std::sync::Arc;
 
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBuffer};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBuffer, DynamicState};
 use vulkano::device::{Device, DeviceExtensions};
 use vulkano::instance::{Instance, InstanceExtensions, PhysicalDevice, QueueFamily, Features};
 use vulkano::sync::GpuFuture;
+use vulkano::format::Format;
+use vulkano::image::{Dimensions, StorageImage};
+use vulkano::framebuffer::{Framebuffer, Subpass};
+use vulkano::pipeline::GraphicsPipeline;
+use vulkano::pipeline::viewport::Viewport;
+use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
+use image::{ImageBuffer, Rgba};
+
+#[derive(Copy, Clone)]
+struct Vertex {
+    position: [f32; 2],
+}
+
+impl_vertex!(Vertex, position);
+
+mod vs {
+    #[derive(VulkanoShader)]
+    #[ty = "vertex"]
+    #[path = "src/shaders/vertex.vert"]
+    struct Dummy;
+}
+
+mod fs {
+    #[derive(VulkanoShader)]
+    #[ty = "fragment"]
+    #[path = "src/shaders/fragment.frag"]
+    struct Dummy;
+}
 
 fn main() {
     /*
@@ -52,36 +85,87 @@ fn main() {
      * some data that you are never going to modify you should use an ImmutableBuffer.
      */
 
-    let in_data = 0..64;
-    let in_buffer = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), in_data)
-        .expect("Failed to create buffer.");
-    let out_data = (0..64).map(|_| 0);
-    let out_buffer = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), out_data)
-        .expect("Failed to create buffer.");
+    print!("\n");
 
-    /*
-     * Example Operation
-     */
+    let vertices = vec![
+        Vertex { position: [-0.5, -0.5 ] },
+        Vertex { position: [ 0.0,  0.5 ] },
+        Vertex { position: [ 0.5, -0.25] },
+    ];
 
-    // In order to execute commands efficiently, we store them in a command buffer and send them
-    // to the device altogether.
-    // Note that we specify the queue family when creating a command buffer.
-    let command_buffer = AutoCommandBufferBuilder::new(device.clone(), queue.family())
-        .expect("Could not create a command buffer builder.")
-        .copy_buffer(in_buffer.clone(), out_buffer.clone()).unwrap()
-        .build().expect("Could not build a command buffer.");
+    let vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(),
+                                                       BufferUsage::all(),
+                                                       vertices.into_iter()).unwrap();
+
+    let image = StorageImage::new(device.clone(), Dimensions::Dim2d { width: 1024, height: 1024 },
+                                  Format::R8G8B8A8Unorm, Some(queue.family())).unwrap();
+
+    // A special GPU mode highly-optimized for rendering
+    let render_pass = Arc::new(single_pass_renderpass! { device.clone(),
+        attachments: {
+            color: {
+                load: Clear,
+                store: Store, // for temporary images, use DontCare
+                format: Format::R8G8B8A8Unorm,
+                samples: 1,
+            }
+        },
+        pass: {
+            color: [color],
+            depth_stencil: {}
+        }
+    }.unwrap());
+
+    let framebuffer = Arc::new(Framebuffer::start(render_pass.clone())
+                               .add(image.clone()).unwrap()
+                               .build().unwrap());
+
+    let vs = vs::Shader::load(device.clone()).expect("Failed to create shader module.");
+    let fs = fs::Shader::load(device.clone()).expect("Failed to create shader module.");
+
+    let pipeline = Arc::new(GraphicsPipeline::start()
+        // Specifies the Vertex type
+        .vertex_input_single_buffer::<Vertex>()
+        .vertex_shader(vs.main_entry_point(), ())
+        // Configures the builder so that we use one viewport, and that the state of this viewport
+        // is dynamic. This makes it possible to change the viewport for each draw command. If the
+        // viewport state wasn't dynamic, then we would have to create a new pipeline object if we
+        // wanted to draw to another image of a different size.
+        //
+        // Note: If you configure multiple viewports, you can use geometry shaders to choose which
+        // viewport the shape is going to be drawn to. This topic isn't covered here.
+        .viewports_dynamic_scissors_irrelevant(1)
+        .fragment_shader(fs.main_entry_point(), ())
+        .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
+        .build(device.clone())
+        .unwrap());
+
+    let buf = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(),
+                                             (0 .. 1024 * 1024 * 4).map(|_| 0u8))
+        .expect("failed to create buffer");
+
+    let dynamic_state = DynamicState {
+        viewports: Some(vec![Viewport {
+            origin: [0.0, 0.0],
+            dimensions: [1024.0, 1024.0],
+            depth_range: 0.0..1.0,
+        }]),
+        .. DynamicState::none()
+    };
+
+    let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
+        .begin_render_pass(framebuffer.clone(), false, vec![[0.0, 0.0, 1.0, 1.0].into()]).unwrap()
+        .draw(pipeline.clone(), dynamic_state, vertex_buffer.clone(), (), ()).unwrap()
+        .end_render_pass().unwrap()
+        .copy_image_to_buffer(image.clone(), buf.clone()).unwrap()
+        .build().unwrap();
 
     let future = command_buffer.execute(queue.clone()).unwrap();
 
-    // Wait for the execution to complete
     future.then_signal_fence_and_flush().unwrap()
         .wait(None).unwrap();
 
-    for value in out_buffer.read().unwrap().iter() {
-        print!("{} ", value);
-    }
-
-    print!("\n");
-
-    println!("Hello, world!");
+    let buffer_content = buf.read().unwrap();
+    let image = ImageBuffer::<Rgba<u8>, _>::from_raw(1024, 1024, &buffer_content[..]).unwrap();
+    image.save("triangle.png").unwrap();
 }

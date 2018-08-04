@@ -1,0 +1,7 @@
+[package]
+name = "metaview"
+version = "0.1.0"
+authors = ["Jakub Hlusička <limeth@protonmail.com>"]
+
+[dependencies]
+vulkano = "0.9.0"

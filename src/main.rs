@@ -9,19 +9,23 @@ extern crate winit;
 use std::sync::Arc;
 use std::mem;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
+use vulkano::buffer::cpu_pool::CpuBufferPool;
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBuffer, DynamicState};
-use vulkano::device::{Device, DeviceExtensions};
+use vulkano::device::{Device, DeviceExtensions, Queue};
 use vulkano::instance::{Instance, InstanceExtensions, PhysicalDevice, QueueFamily, Features};
 use vulkano::sync::{FlushError, GpuFuture};
 use vulkano::format::Format;
-use vulkano::image::{Dimensions, StorageImage};
-use vulkano::framebuffer::{Framebuffer, Subpass};
+use vulkano::image::{Dimensions, StorageImage, AttachmentImage, ImageUsage};
+use vulkano::image::swapchain::SwapchainImage;
+use vulkano::framebuffer::{Framebuffer, RenderPass, RenderPassDesc, Subpass};
 use vulkano::pipeline::GraphicsPipeline;
 use vulkano::pipeline::viewport::Viewport;
+use vulkano::pipeline::vertex::SingleBufferDefinition;
+use vulkano::descriptor::PipelineLayoutAbstract;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
-use vulkano::swapchain::{self, PresentMode, SurfaceTransform, Swapchain, AcquireError, SwapchainCreationError};
+use vulkano::swapchain::{self, PresentMode, SurfaceTransform, Swapchain, AcquireError, SwapchainCreationError, Surface};
 use vulkano_win::VkSurfaceBuild;
-use winit::{EventsLoop, WindowBuilder};
+use winit::{EventsLoop, WindowBuilder, Window};
 use image::{ImageBuffer, Rgba};
 
 #[derive(Copy, Clone)]
@@ -31,34 +35,50 @@ struct Vertex {
 
 impl_vertex!(Vertex, position);
 
-mod vs {
+#[derive(Copy, Clone)]
+struct Time {
+    position: [f32; 1],
+}
+
+impl_vertex!(Time, position);
+
+mod screen_vs {
     #[derive(VulkanoShader)]
     #[ty = "vertex"]
-    #[path = "src/shaders/vertex.vert"]
+    #[path = "src/shaders/screen.vert"]
     #[allow(dead_code)]
     struct Dummy;
 }
 
-mod fs {
+mod screen_fs {
     #[derive(VulkanoShader)]
     #[ty = "fragment"]
-    #[path = "src/shaders/fragment.frag"]
+    #[path = "src/shaders/screen.frag"]
     #[allow(dead_code)]
     struct Dummy;
 }
 
-fn main() {
-    /*
-     * Initialization
-     */
+mod main_vs {
+    #[derive(VulkanoShader)]
+    #[ty = "vertex"]
+    #[path = "src/shaders/main.vert"]
+    #[allow(dead_code)]
+    struct Dummy;
+}
 
-    // TODO: Explore method arguments
-    let extensions = vulkano_win::required_extensions();
-    let instance = Instance::new(None, &extensions, None)
-        .expect("Failed to create a Vulkan instance.");
+mod main_fs {
+    #[derive(VulkanoShader)]
+    #[ty = "fragment"]
+    #[path = "src/shaders/main.frag"]
+    #[allow(dead_code)]
+    struct Dummy;
+}
 
+const screen_dimensions: [u32; 2] = [3840, 1080];
+
+fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surface<Window>>, [u32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Arc<Swapchain<Window>>, Vec<Arc<SwapchainImage<Window>>>) {
     // TODO: Better device selection & SLI support
-    let physical_device = PhysicalDevice::enumerate(&instance).next().expect("No physical device available.");
+    let physical_device = PhysicalDevice::enumerate(instance).next().expect("No physical device available.");
 
     // Queues are like CPU threads, queue families are groups of queues with certain capabilities.
     println!("Available queue families:");
@@ -105,7 +125,7 @@ fn main() {
     // println!("queues: {}", queues.len());
     let queue = queues.next().unwrap();
 
-    let (mut swapchain, mut images) = {
+    let (swapchain, images) = {
         let capabilities = window.capabilities(physical_device)
             .expect("Failed to retrieve surface capabilities.");
 
@@ -123,28 +143,12 @@ fn main() {
                        None).expect("failed to create swapchain")
     };
 
-    /*
-     * Buffer Creation
-     *
-     * Vulkano does not provide a generic Buffer struct which you could create with Buffer::new.
-     * Instead, it provides several different structs that all represent buffers, each of these
-     * structs being optimized for a certain kind of usage. For example, if you want to
-     * continuously upload data you should use a CpuBufferPool, while on the other hand if you have
-     * some data that you are never going to modify you should use an ImmutableBuffer.
-     */
+    (events_loop, window, dimensions, device, queue_family, queue, swapchain, images)
+}
 
-    let vertices = vec![
-        Vertex { position: [-0.5, -0.5 ] },
-        Vertex { position: [ 0.0,  0.5 ] },
-        Vertex { position: [ 0.5, -0.25] },
-    ];
-
-    let vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(),
-                                                       BufferUsage::all(),
-                                                       vertices.into_iter()).unwrap();
-
-    let image = StorageImage::new(device.clone(), Dimensions::Dim2d { width: 1024, height: 1024 },
-                                  Format::R8G8B8A8Unorm, Some(queue.family())).unwrap();
+fn vulkan_main_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Arc<GraphicsPipeline<SingleBufferDefinition<Vertex>, Box<dyn PipelineLayoutAbstract + Send + Sync>, Arc<RenderPass<impl RenderPassDesc>>>> {
+    let main_vs = main_vs::Shader::load(device.clone()).expect("Failed to create shader module.");
+    let main_fs = main_fs::Shader::load(device.clone()).expect("Failed to create shader module.");
 
     // A special GPU mode highly-optimized for rendering
     let render_pass = Arc::new(single_pass_renderpass! { device.clone(),
@@ -162,13 +166,11 @@ fn main() {
         }
     }.unwrap());
 
-    let vs = vs::Shader::load(device.clone()).expect("Failed to create shader module.");
-    let fs = fs::Shader::load(device.clone()).expect("Failed to create shader module.");
-
-    let pipeline = Arc::new(GraphicsPipeline::start()
+    Arc::new(GraphicsPipeline::start()
+        // .with_pipeline_layout(device.clone(), pipeline_layout)
         // Specifies the Vertex type
         .vertex_input_single_buffer::<Vertex>()
-        .vertex_shader(vs.main_entry_point(), ())
+        .vertex_shader(main_vs.main_entry_point(), ())
         // Configures the builder so that we use one viewport, and that the state of this viewport
         // is dynamic. This makes it possible to change the viewport for each draw command. If the
         // viewport state wasn't dynamic, then we would have to create a new pipeline object if we
@@ -177,12 +179,131 @@ fn main() {
         // Note: If you configure multiple viewports, you can use geometry shaders to choose which
         // viewport the shape is going to be drawn to. This topic isn't covered here.
         .viewports_dynamic_scissors_irrelevant(1)
-        .fragment_shader(fs.main_entry_point(), ())
+        .fragment_shader(main_fs.main_entry_point(), ())
         .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
         .build(device.clone())
-        .unwrap());
+        .unwrap())
+}
 
-    let mut framebuffers: Option<Vec<Arc<Framebuffer<_, _>>>> = None;
+fn vulkan_screen_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Arc<GraphicsPipeline<SingleBufferDefinition<Vertex>, Box<dyn PipelineLayoutAbstract + Send + Sync>, Arc<RenderPass<impl RenderPassDesc>>>> {
+    // A special GPU mode highly-optimized for rendering
+    let screen_vs = screen_vs::Shader::load(device.clone()).expect("Failed to create shader module.");
+    let screen_fs = screen_fs::Shader::load(device.clone()).expect("Failed to create shader module.");
+
+    let render_pass = Arc::new(single_pass_renderpass! { device.clone(),
+        attachments: {
+            color: {
+                load: Clear,
+                store: Store, // for temporary images, use DontCare
+                format: swapchain.format(),
+                samples: 1,
+            }
+        },
+        pass: {
+            color: [color],
+            depth_stencil: {}
+        }
+    }.unwrap());
+
+    // let pipeline_layout = PipelineLayour
+
+    Arc::new(GraphicsPipeline::start()
+        // .with_pipeline_layout(device.clone(), pipeline_layout)
+        // Specifies the Vertex type
+        .vertex_input_single_buffer::<Vertex>()
+        .vertex_shader(screen_vs.main_entry_point(), ())
+        // Configures the builder so that we use one viewport, and that the state of this viewport
+        // is dynamic. This makes it possible to change the viewport for each draw command. If the
+        // viewport state wasn't dynamic, then we would have to create a new pipeline object if we
+        // wanted to draw to another image of a different size.
+        //
+        // Note: If you configure multiple viewports, you can use geometry shaders to choose which
+        // viewport the shape is going to be drawn to. This topic isn't covered here.
+        .viewports(vec![Viewport {
+            origin: [0.0, 0.0],
+            dimensions: [screen_dimensions[0] as f32, screen_dimensions[1] as f32],
+            depth_range: 0.0 .. 1.0,
+        }])
+        .fragment_shader(screen_fs.main_entry_point(), ())
+        .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
+        .build(device.clone())
+        .unwrap())
+}
+
+fn main() {
+    /*
+     * Initialization
+     */
+
+    // TODO: Explore method arguments
+    let extensions = vulkano_win::required_extensions();
+    let instance = Instance::new(None, &extensions, None)
+        .expect("Failed to create a Vulkan instance.");
+
+    let (mut events_loop, window, mut dimensions, device, queue_family, queue, mut swapchain, mut images) = vulkan_initialize(&instance);
+
+    /*
+     * Buffer Creation
+     *
+     * Vulkano does not provide a generic Buffer struct which you could create with Buffer::new.
+     * Instead, it provides several different structs that all represent buffers, each of these
+     * structs being optimized for a certain kind of usage. For example, if you want to
+     * continuously upload data you should use a CpuBufferPool, while on the other hand if you have
+     * some data that you are never going to modify you should use an ImmutableBuffer.
+     */
+
+    let main_vertices = vec![
+        Vertex { position: [-0.5, -0.5 ] },
+        Vertex { position: [ 0.0,  0.5 ] },
+        Vertex { position: [ 0.5, -0.25] },
+    ];
+
+    let main_vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(),
+                                                       BufferUsage::all(),
+                                                       main_vertices.into_iter()).unwrap();
+
+    let screen_vertices = vec![
+        Vertex { position: [-1.0, -1.0] },
+        Vertex { position: [-1.0,  1.0] },
+        Vertex { position: [ 1.0,  1.0] },
+    ];
+
+    let screen_vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(),
+                                                       BufferUsage::all(),
+                                                       screen_vertices.into_iter()).unwrap();
+
+
+    let main_pipeline = vulkan_main_pipeline(&device, &swapchain);
+    let screen_pipeline = vulkan_screen_pipeline(&device, &swapchain);
+
+    // let time_buffer = CpuBufferPool::<Time>::uniform_buffer(device.clone());
+
+    // let descriptor_set = Arc::new(PersistentDescriptorSet::start(pipeline.clone(), 0)
+    //     .add_buffer(time_buffer).unwrap()
+    //     .build().unwrap()
+    // );
+
+    let screen_image = AttachmentImage::with_usage(
+        device.clone(),
+        screen_dimensions.clone(),
+        swapchain.format(),
+        ImageUsage {
+            sampled: true,
+            .. ImageUsage::none()
+        }
+    ).unwrap();
+    let main_descriptor_set = Arc::new(PersistentDescriptorSet::start(main_pipeline.clone(), 0)
+        .add_image(screen_image.clone()).unwrap()
+        .build().unwrap());
+
+    let mut screen_framebuffers: Vec<Arc<Framebuffer<_, _>>> = images.iter().map(|_| {
+        Arc::new(
+            Framebuffer::start(screen_pipeline.render_pass().clone())
+            .add(screen_image.clone()).unwrap()
+            .build().unwrap()
+        )
+    }).collect();
+    let mut main_framebuffers: Option<Vec<Arc<Framebuffer<_, _>>>> = None;
 
     // We need to keep track of whether the swapchain is invalid for the current window,
     // for example when the window is resized.
@@ -223,20 +344,20 @@ fn main() {
             mem::replace(&mut swapchain, new_swapchain);
             mem::replace(&mut images, new_images);
 
-            framebuffers = None;
+            main_framebuffers = None;
 
             recreate_swapchain = false;
         }
         //
         // Because framebuffers contains an Arc on the old swapchain, we need to
         // recreate framebuffers as well.
-        if framebuffers.is_none() {
-            let new_framebuffers = Some(images.iter().map(|image| {
-                Arc::new(Framebuffer::start(render_pass.clone())
+        if main_framebuffers.is_none() {
+            let new_main_framebuffers = Some(images.iter().map(|image| {
+                Arc::new(Framebuffer::start(main_pipeline.render_pass().clone())
                          .add(image.clone()).unwrap()
                          .build().unwrap())
             }).collect::<Vec<_>>());
-            mem::replace(&mut framebuffers, new_framebuffers);
+            mem::replace(&mut main_framebuffers, new_main_framebuffers);
         }
 
         // Before we can draw on the output, we have to *acquire* an image from the swapchain. If
@@ -258,6 +379,17 @@ fn main() {
             Err(err) => panic!("{:?}", err)
         };
 
+        let screen_command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
+            .begin_render_pass(screen_framebuffers[image_num].clone(),
+                               false,
+                               vec![[0.0, 1.0, 0.0, 1.0].into()]).unwrap()
+            .draw(screen_pipeline.clone(),
+                  DynamicState::none(),
+                  screen_vertex_buffer.clone(),
+                  (), ()).unwrap()
+            .end_render_pass().unwrap()
+            .build().unwrap();
+
         let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
             // Before we can draw, we have to *enter a render pass*. There are two methods to do
             // this: `draw_inline` and `draw_secondary`. The latter is a bit more advanced and is
@@ -266,14 +398,14 @@ fn main() {
             // The third parameter builds the list of values to clear the attachments with. The API
             // is similar to the list of attachments when building the framebuffers, except that
             // only the attachments that use `load: Clear` appear in the list.
-            .begin_render_pass(framebuffers.as_ref().unwrap()[image_num].clone(), false,
+            .begin_render_pass(main_framebuffers.as_ref().unwrap()[image_num].clone(), false,
                                vec![[0.0, 0.0, 1.0, 1.0].into()])
             .unwrap()
             // We are now inside the first subpass of the render pass. We add a draw command.
             //
             // The last two parameters contain the list of resources to pass to the shaders.
             // Since we used an `EmptyPipeline` object, the objects have to be `()`.
-            .draw(pipeline.clone(),
+            .draw(main_pipeline.clone(),
                   DynamicState {
                       line_width: None,
                       // TODO: Find a way to do this without having to dynamically allocate a Vec every frame.
@@ -284,7 +416,7 @@ fn main() {
                       }]),
                       scissors: None,
                   },
-                  vertex_buffer.clone(), (), ())
+                  main_vertex_buffer.clone(), main_descriptor_set.clone(), ())
             .unwrap()
             // We leave the render pass by calling `draw_end`. Note that if we had multiple
             // subpasses we could have called `next_inline` (or `next_secondary`) to jump to the
@@ -295,7 +427,9 @@ fn main() {
             .build().unwrap();
 
         let result = previous_frame_end.join(acquire_future)
-            .then_execute(queue.clone(), command_buffer).expect("DERP")
+            .then_execute(queue.clone(), screen_command_buffer).unwrap()
+            .then_signal_fence()
+            .then_execute_same_queue(command_buffer).unwrap()
 
             // The color output is now expected to contain our triangle. But in order to show it on
             // the screen, we have to *present* the image by calling `present`.

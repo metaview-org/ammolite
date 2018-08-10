@@ -24,6 +24,7 @@ use vulkano::pipeline::vertex::SingleBufferDefinition;
 use vulkano::descriptor::PipelineLayoutAbstract;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::swapchain::{self, PresentMode, SurfaceTransform, Swapchain, AcquireError, SwapchainCreationError, Surface};
+use vulkano::sampler::{Sampler, SamplerAddressMode, BorderColor, MipmapMode, Filter};
 use vulkano_win::VkSurfaceBuild;
 use winit::{EventsLoop, WindowBuilder, Window};
 use image::{ImageBuffer, Rgba};
@@ -283,6 +284,11 @@ fn main() {
     //     .build().unwrap()
     // );
 
+    let main_dimensions_buffer = CpuAccessibleBuffer::from_data(
+        device.clone(),
+        BufferUsage::uniform_buffer_transfer_destination(),
+        [dimensions[0] as f32, dimensions[1] as f32],
+    ).unwrap();
     let screen_image = AttachmentImage::with_usage(
         device.clone(),
         screen_dimensions.clone(),
@@ -292,9 +298,25 @@ fn main() {
             .. ImageUsage::none()
         }
     ).unwrap();
-    let main_descriptor_set = Arc::new(PersistentDescriptorSet::start(main_pipeline.clone(), 0)
-        .add_image(screen_image.clone()).unwrap()
-        .build().unwrap());
+    let screen_sampler = Sampler::new(
+        device.clone(),
+        Filter::Nearest,  // magnifying filter
+        Filter::Linear,  // minifying filter
+        MipmapMode::Nearest,
+        SamplerAddressMode::ClampToBorder(BorderColor::IntTransparentBlack),
+        SamplerAddressMode::ClampToBorder(BorderColor::IntTransparentBlack),
+        SamplerAddressMode::ClampToBorder(BorderColor::IntTransparentBlack),
+        0.0,  // mip_lod_bias
+        1.0,  // anisotropic filtering (1.0 = off, anything higher = on)
+        1.0,  // min_lod
+        1.0,  // max_lod
+    ).unwrap();
+    let main_descriptor_set = Arc::new(
+        PersistentDescriptorSet::start(main_pipeline.clone(), 0)
+            .add_buffer(main_dimensions_buffer.clone()).unwrap()
+            .add_sampled_image(screen_image.clone(), screen_sampler.clone()).unwrap()
+            .build().unwrap()
+    );
 
     let mut screen_framebuffers: Vec<Arc<Framebuffer<_, _>>> = images.iter().map(|_| {
         Arc::new(
@@ -391,6 +413,7 @@ fn main() {
             .build().unwrap();
 
         let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
+            .update_buffer(main_dimensions_buffer.clone(), [dimensions[0] as f32, dimensions[1] as f32]).unwrap()
             // Before we can draw, we have to *enter a render pass*. There are two methods to do
             // this: `draw_inline` and `draw_secondary`. The latter is a bit more advanced and is
             // not covered here.

@@ -14,7 +14,7 @@ use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBuffer, DynamicSt
 use vulkano::device::{Device, DeviceExtensions, Queue};
 use vulkano::instance::{Instance, InstanceExtensions, PhysicalDevice, QueueFamily, Features};
 use vulkano::sync::{FlushError, GpuFuture};
-use vulkano::format::Format;
+use vulkano::format::{Format, FormatTy};
 use vulkano::image::{Dimensions, StorageImage, AttachmentImage, ImageUsage};
 use vulkano::image::swapchain::SwapchainImage;
 use vulkano::framebuffer::{Framebuffer, RenderPass, RenderPassDesc, Subpass};
@@ -31,7 +31,7 @@ use image::{ImageBuffer, Rgba};
 
 #[derive(Copy, Clone)]
 struct Vertex {
-    position: [f32; 2],
+    position: [f32; 3],
 }
 
 impl_vertex!(Vertex, position);
@@ -253,10 +253,26 @@ fn main() {
      * some data that you are never going to modify you should use an ImmutableBuffer.
      */
 
+    // let main_vertices = vec![
+    //     Vertex { position: [-0.5, -0.5,  0.0] },
+    //     Vertex { position: [ 0.0,  0.5,  0.0] },
+    //     Vertex { position: [ 0.5, -0.25, 0.0] },
+    // ];
+
     let main_vertices = vec![
-        Vertex { position: [-0.5, -0.5 ] },
-        Vertex { position: [ 0.0,  0.5 ] },
-        Vertex { position: [ 0.5, -0.25] },
+        Vertex { position: [-0.5, -0.5,  0.0] },
+        Vertex { position: [ 0.5, -0.5,  0.0] },
+        Vertex { position: [ 0.5,  0.5,  0.0] },
+        Vertex { position: [ 0.5,  0.5,  0.0] },
+        Vertex { position: [-0.5,  0.5,  0.0] },
+        Vertex { position: [-0.5, -0.5,  0.0] },
+
+        Vertex { position: [-0.5, -0.5, -0.5] },
+        Vertex { position: [ 0.5, -0.5, -0.5] },
+        Vertex { position: [ 0.5,  0.5, -0.5] },
+        Vertex { position: [ 0.5,  0.5, -0.5] },
+        Vertex { position: [-0.5,  0.5, -0.5] },
+        Vertex { position: [-0.5, -0.5, -0.5] },
     ];
 
     let main_vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(),
@@ -264,9 +280,12 @@ fn main() {
                                                        main_vertices.into_iter()).unwrap();
 
     let screen_vertices = vec![
-        Vertex { position: [-1.0, -1.0] },
-        Vertex { position: [-1.0,  1.0] },
-        Vertex { position: [ 1.0,  1.0] },
+        Vertex { position: [-1.0, -1.0,  0.0] },
+        Vertex { position: [-1.0,  1.0,  0.0] },
+        Vertex { position: [ 1.0,  1.0,  0.0] },
+        // Vertex { position: [ 1.0,  1.0,  0.0] },
+        // Vertex { position: [ 1.0, -1.0,  0.0] },
+        // Vertex { position: [-1.0, -1.0,  0.0] },
     ];
 
     let screen_vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(),
@@ -298,15 +317,20 @@ fn main() {
             .. ImageUsage::none()
         }
     ).unwrap();
+    let border_color = match swapchain.format().ty() {
+        FormatTy::Uint | FormatTy::Sint => BorderColor::IntTransparentBlack,
+                                      _ => BorderColor::FloatTransparentBlack,
+    };
     let screen_sampler = Sampler::new(
         device.clone(),
         Filter::Nearest,  // magnifying filter
         Filter::Linear,  // minifying filter
         MipmapMode::Nearest,
-        SamplerAddressMode::ClampToBorder(BorderColor::IntTransparentBlack),
-        SamplerAddressMode::ClampToBorder(BorderColor::IntTransparentBlack),
-        SamplerAddressMode::ClampToBorder(BorderColor::IntTransparentBlack),
+        SamplerAddressMode::ClampToBorder(border_color),
+        SamplerAddressMode::ClampToBorder(border_color),
+        SamplerAddressMode::ClampToBorder(border_color),
         0.0,  // mip_lod_bias
+        // TODO: Turn anisotropic filtering on for better screen readability
         1.0,  // anisotropic filtering (1.0 = off, anything higher = on)
         1.0,  // min_lod
         1.0,  // max_lod

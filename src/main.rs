@@ -3,7 +3,6 @@ extern crate vulkano;
 #[macro_use]
 extern crate vulkano_shader_derive;
 extern crate vulkano_win;
-extern crate image;
 extern crate winit;
 
 use std::sync::Arc;
@@ -33,6 +32,11 @@ struct Vertex {
 }
 
 impl_vertex!(Vertex, position);
+
+#[derive(Copy, Clone)]
+struct MainUBO {
+
+}
 
 mod screen_vs {
     #[derive(VulkanoShader)]
@@ -78,8 +82,8 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
     let events_loop = EventsLoop::new();
     let window = VkSurfaceBuild::build_vk_surface(WindowBuilder::new(), &events_loop, instance.clone()).unwrap();
 
-    let mut dimensions = {
-        let (width, height) = window.window().get_inner_size().unwrap();
+    let mut dimensions: [u32; 2] = {
+        let (width, height) = window.window().get_inner_size().unwrap().into();
         [width, height]
     };
 
@@ -304,7 +308,14 @@ fn main() {
     // TODO: Explore method arguments
     let extensions = vulkano_win::required_extensions();
     let instance = Instance::new(None, &extensions, None)
-    .expect("Failed to create a Vulkan instance.");
+        .expect("Failed to create a Vulkan instance.");
+
+    let layers = vulkano::instance::layers_list().unwrap()
+        .map(|l| l.name().to_string());
+
+    for layer in layers {
+        println!("\t{}", layer);
+    }
 
     let (mut events_loop, window, mut dimensions, device, queue_family, queue, mut swapchain, mut images) = vulkan_initialize(&instance);
 
@@ -450,10 +461,9 @@ fn main() {
         previous_frame_end.cleanup_finished();
 
         if recreate_swapchain {
-            // Get the new dimensions for the viewport/framebuffers.
             dimensions = {
-                let (new_width, new_height) = window.window().get_inner_size().unwrap();
-                [new_width, new_height]
+                let (width, height) = window.window().get_inner_size().unwrap().into();
+                [width, height]
             };
 
             let (new_swapchain, new_images) = match swapchain.recreate_with_dimension(dimensions) {
@@ -511,7 +521,7 @@ fn main() {
                                false,
                                vec![[0.0, 1.0, 0.0, 1.0].into()]).unwrap()
             .draw_indexed(screen_pipeline.clone(),
-                  DynamicState::none(),
+                  &DynamicState::none(),
                   screen_vertex_device_buffer.clone(),
                   screen_index_device_buffer.clone(),
                   (), ()).unwrap()
@@ -538,7 +548,7 @@ fn main() {
             // The last two parameters contain the list of resources to pass to the shaders.
             // Since we used an `EmptyPipeline` object, the objects have to be `()`.
             .draw_indexed(main_pipeline.clone(),
-                  DynamicState {
+                  &DynamicState {
                       line_width: None,
                       // TODO: Find a way to do this without having to dynamically allocate a Vec every frame.
                       viewports: Some(vec![Viewport {
@@ -601,8 +611,8 @@ fn main() {
         let mut done = false;
         events_loop.poll_events(|ev| {
             match ev {
-                winit::Event::WindowEvent { event: winit::WindowEvent::Closed, .. } => done = true,
-                winit::Event::WindowEvent { event: winit::WindowEvent::Resized(_, _), .. } => recreate_swapchain = true,
+                winit::Event::WindowEvent { event: winit::WindowEvent::CloseRequested, .. } => done = true,
+                winit::Event::WindowEvent { event: winit::WindowEvent::Resized(_), .. } => recreate_swapchain = true,
                 _ => ()
             }
         });

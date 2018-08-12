@@ -33,11 +33,6 @@ struct Vertex {
 
 impl_vertex!(Vertex, position);
 
-#[derive(Copy, Clone)]
-struct MainUBO {
-
-}
-
 mod screen_vs {
     #[derive(VulkanoShader)]
     #[ty = "vertex"]
@@ -68,6 +63,20 @@ mod main_fs {
     #[path = "src/shaders/main.frag"]
     #[allow(dead_code)]
     struct Dummy;
+}
+
+use main_fs::ty::*;
+
+impl MainUBO {
+    pub fn new(dimensions: [f32; 2], model: [[f32; 4]; 4], view: [[f32; 4]; 4], projection: [[f32; 4]; 4]) -> MainUBO {
+        MainUBO {
+            dimensions,
+            _dummy0: Default::default(),
+            model,
+            view,
+            projection,
+        }
+    }
 }
 
 const SCREEN_DIMENSIONS: [u32; 2] = [3840, 1080];
@@ -391,11 +400,26 @@ fn main() {
     //     .build().unwrap()
     // );
 
-    let (main_dimensions_staging_buffer, main_dimensions_device_buffer) = create_staging_buffers_data(
+    let mut main_ubo = MainUBO::new(
+        [dimensions[0] as f32, dimensions[1] as f32],
+        [[1.0, 0.0, 0.0, 0.0],
+         [0.0, 1.0, 0.0, 0.0],
+         [0.0, 0.0, 1.0, 0.0],
+         [0.0, 0.0, 0.0, 1.0]],
+        [[1.0, 0.0, 0.0, 0.0],
+         [0.0, 1.0, 0.0, 0.0],
+         [0.0, 0.0, 1.0, 0.0],
+         [0.0, 0.0, 0.0, 1.0]],
+        [[1.0, 0.0, 0.0, 0.0],
+         [0.0, 1.0, 0.0, 0.0],
+         [0.0, 0.0, 1.0, 0.0],
+         [0.0, 0.0, 0.0, 1.0]],
+    );
+    let (main_ubo_staging_buffer, main_ubo_device_buffer) = create_staging_buffers_data(
         &device,
         queue_family,
         BufferUsage::uniform_buffer(),
-        [dimensions[0] as f32, dimensions[1] as f32],
+        main_ubo.clone(),
     );
 
     let screen_image = AttachmentImage::with_usage(
@@ -427,7 +451,7 @@ fn main() {
     ).unwrap();
     let main_descriptor_set = Arc::new(
         PersistentDescriptorSet::start(main_pipeline.clone(), 0)
-            .add_buffer(main_dimensions_device_buffer.clone()).unwrap()
+            .add_buffer(main_ubo_device_buffer.clone()).unwrap()
             .add_sampled_image(screen_image.clone(), screen_sampler.clone()).unwrap()
             .build().unwrap()
     );
@@ -465,6 +489,8 @@ fn main() {
                 let (width, height) = window.window().get_inner_size().unwrap().into();
                 [width, height]
             };
+
+            main_ubo.dimensions = [dimensions[0] as f32, dimensions[1] as f32];
 
             let (new_swapchain, new_images) = match swapchain.recreate_with_dimension(dimensions) {
                 Ok(r) => r,
@@ -529,8 +555,8 @@ fn main() {
             .build().unwrap();
 
         let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
-            .update_buffer(main_dimensions_staging_buffer.clone(), [dimensions[0] as f32, dimensions[1] as f32]).unwrap()
-            .copy_buffer(main_dimensions_staging_buffer.clone(), main_dimensions_device_buffer.clone()).unwrap()
+            .update_buffer(main_ubo_staging_buffer.clone(), main_ubo.clone()).unwrap()
+            .copy_buffer(main_ubo_staging_buffer.clone(), main_ubo_device_buffer.clone()).unwrap()
             .copy_buffer(main_vertex_staging_buffer.clone(), main_vertex_device_buffer.clone()).unwrap()
             .copy_buffer(main_index_staging_buffer.clone(), main_index_device_buffer.clone()).unwrap()
             // Before we can draw, we have to *enter a render pass*. There are two methods to do

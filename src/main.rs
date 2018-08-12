@@ -8,14 +8,13 @@ extern crate winit;
 
 use std::sync::Arc;
 use std::mem;
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
-use vulkano::buffer::cpu_pool::CpuBufferPool;
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBuffer, DynamicState};
+use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
 use vulkano::device::{Device, DeviceExtensions, Queue};
-use vulkano::instance::{Instance, InstanceExtensions, PhysicalDevice, QueueFamily, Features};
+use vulkano::instance::{Instance, PhysicalDevice, QueueFamily, Features};
 use vulkano::sync::{FlushError, GpuFuture};
-use vulkano::format::{Format, FormatTy};
-use vulkano::image::{Dimensions, StorageImage, AttachmentImage, ImageUsage};
+use vulkano::format::FormatTy;
+use vulkano::image::{AttachmentImage, ImageUsage};
 use vulkano::image::swapchain::SwapchainImage;
 use vulkano::framebuffer::{Framebuffer, RenderPass, RenderPassDesc, Subpass};
 use vulkano::pipeline::GraphicsPipeline;
@@ -27,7 +26,6 @@ use vulkano::swapchain::{self, PresentMode, SurfaceTransform, Swapchain, Acquire
 use vulkano::sampler::{Sampler, SamplerAddressMode, BorderColor, MipmapMode, Filter};
 use vulkano_win::VkSurfaceBuild;
 use winit::{EventsLoop, WindowBuilder, Window};
-use image::{ImageBuffer, Rgba};
 
 #[derive(Copy, Clone)]
 struct Vertex {
@@ -35,13 +33,6 @@ struct Vertex {
 }
 
 impl_vertex!(Vertex, position);
-
-#[derive(Copy, Clone)]
-struct Time {
-    position: [f32; 1],
-}
-
-impl_vertex!(Time, position);
 
 mod screen_vs {
     #[derive(VulkanoShader)]
@@ -75,7 +66,7 @@ mod main_fs {
     struct Dummy;
 }
 
-const screen_dimensions: [u32; 2] = [3840, 1080];
+const SCREEN_DIMENSIONS: [u32; 2] = [3840, 1080];
 
 fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surface<Window>>, [u32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Arc<Swapchain<Window>>, Vec<Arc<SwapchainImage<Window>>>) {
     // TODO: Better device selection & SLI support
@@ -84,7 +75,7 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
     // Queues are like CPU threads, queue families are groups of queues with certain capabilities.
     println!("Available queue families:");
 
-    let mut events_loop = EventsLoop::new();
+    let events_loop = EventsLoop::new();
     let window = VkSurfaceBuild::build_vk_surface(WindowBuilder::new(), &events_loop, instance.clone()).unwrap();
 
     let mut dimensions = {
@@ -186,6 +177,80 @@ fn vulkan_main_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>
         .unwrap())
 }
 
+fn create_staging_buffers_data<T>(device: &Arc<Device>, queue_family: QueueFamily, usage: BufferUsage, data: T)
+    -> (Arc<CpuAccessibleBuffer<T>>, Arc<DeviceLocalBuffer<T>>)
+    where T: Sized + 'static {
+    let staging_buffer = CpuAccessibleBuffer::<T>::from_data(
+        device.clone(),
+        BufferUsage {
+            transfer_destination: true,
+            transfer_source: true,
+            .. usage.clone()
+        },
+        data,
+    ).unwrap();
+    let device_buffer = DeviceLocalBuffer::<T>::new(
+        device.clone(),
+        BufferUsage {
+            transfer_destination: true,
+            .. usage.clone()
+        },
+        vec![queue_family],
+    ).unwrap();
+
+    (staging_buffer, device_buffer)
+}
+
+fn create_staging_buffers_iter<T, I>(device: &Arc<Device>, queue_family: QueueFamily, usage: BufferUsage, iterator: I)
+    -> (Arc<CpuAccessibleBuffer<[T]>>, Arc<DeviceLocalBuffer<[T]>>)
+    where T: Clone + 'static,
+          I: ExactSizeIterator<Item=T> {
+    let iterator_len = iterator.len();
+    let staging_buffer = CpuAccessibleBuffer::<[T]>::from_iter(
+        device.clone(),
+        BufferUsage {
+            transfer_destination: true,
+            transfer_source: true,
+            .. usage.clone()
+        },
+        iterator,
+    ).unwrap();
+    let device_buffer = DeviceLocalBuffer::<[T]>::array(
+        device.clone(),
+        iterator_len,
+        BufferUsage {
+            transfer_destination: true,
+            .. usage.clone()
+        },
+        vec![queue_family],
+    ).unwrap();
+
+    (staging_buffer, device_buffer)
+}
+
+fn create_vertex_index_buffers<V, I, VI, II>(device: &Arc<Device>, queue_family: QueueFamily, vertex_iterator: VI, index_iterator: II)
+    -> ((Arc<CpuAccessibleBuffer<[V]>>, Arc<DeviceLocalBuffer<[V]>>),
+        (Arc<CpuAccessibleBuffer<[I]>>, Arc<DeviceLocalBuffer<[I]>>))
+    where V: vulkano::pipeline::vertex::Vertex + Clone + 'static,
+          I: vulkano::pipeline::input_assembly::Index + Clone + 'static,
+          VI: ExactSizeIterator<Item=V>,
+          II: ExactSizeIterator<Item=I> {
+    (
+        create_staging_buffers_iter(
+            &device,
+            queue_family,
+            BufferUsage::vertex_buffer(),
+            vertex_iterator,
+        ),
+        create_staging_buffers_iter(
+            &device,
+            queue_family,
+            BufferUsage::index_buffer(),
+            index_iterator,
+        ),
+    )
+}
+
 fn vulkan_screen_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Arc<GraphicsPipeline<SingleBufferDefinition<Vertex>, Box<dyn PipelineLayoutAbstract + Send + Sync>, Arc<RenderPass<impl RenderPassDesc>>>> {
     // A special GPU mode highly-optimized for rendering
     let screen_vs = screen_vs::Shader::load(device.clone()).expect("Failed to create shader module.");
@@ -222,7 +287,7 @@ fn vulkan_screen_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window
         // viewport the shape is going to be drawn to. This topic isn't covered here.
         .viewports(vec![Viewport {
             origin: [0.0, 0.0],
-            dimensions: [screen_dimensions[0] as f32, screen_dimensions[1] as f32],
+            dimensions: [SCREEN_DIMENSIONS[0] as f32, SCREEN_DIMENSIONS[1] as f32],
             depth_range: 0.0 .. 1.0,
         }])
         .fragment_shader(screen_fs.main_entry_point(), ())
@@ -234,12 +299,12 @@ fn vulkan_screen_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window
 fn main() {
     /*
      * Initialization
-     */
+*/
 
     // TODO: Explore method arguments
     let extensions = vulkano_win::required_extensions();
     let instance = Instance::new(None, &extensions, None)
-        .expect("Failed to create a Vulkan instance.");
+    .expect("Failed to create a Vulkan instance.");
 
     let (mut events_loop, window, mut dimensions, device, queue_family, queue, mut swapchain, mut images) = vulkan_initialize(&instance);
 
@@ -251,47 +316,59 @@ fn main() {
      * structs being optimized for a certain kind of usage. For example, if you want to
      * continuously upload data you should use a CpuBufferPool, while on the other hand if you have
      * some data that you are never going to modify you should use an ImmutableBuffer.
-     */
+*/
 
-    // let main_vertices = vec![
-    //     Vertex { position: [-0.5, -0.5,  0.0] },
-    //     Vertex { position: [ 0.0,  0.5,  0.0] },
-    //     Vertex { position: [ 0.5, -0.25, 0.0] },
-    // ];
-
-    let main_vertices = vec![
+    let main_vertices = [
         Vertex { position: [-0.5, -0.5,  0.0] },
         Vertex { position: [ 0.5, -0.5,  0.0] },
         Vertex { position: [ 0.5,  0.5,  0.0] },
-        Vertex { position: [ 0.5,  0.5,  0.0] },
         Vertex { position: [-0.5,  0.5,  0.0] },
-        Vertex { position: [-0.5, -0.5,  0.0] },
 
         Vertex { position: [-0.5, -0.5, -0.5] },
         Vertex { position: [ 0.5, -0.5, -0.5] },
         Vertex { position: [ 0.5,  0.5, -0.5] },
-        Vertex { position: [ 0.5,  0.5, -0.5] },
         Vertex { position: [-0.5,  0.5, -0.5] },
-        Vertex { position: [-0.5, -0.5, -0.5] },
     ];
 
-    let main_vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(),
-                                                       BufferUsage::all(),
-                                                       main_vertices.into_iter()).unwrap();
+    let main_indices = [
+        0, 1, 2,
+        2, 3, 0,
 
-    let screen_vertices = vec![
+        4, 5, 6,
+        6, 7, 4u16,
+    ];
+
+    let (
+        (main_vertex_staging_buffer, main_vertex_device_buffer),
+        (main_index_staging_buffer, main_index_device_buffer),
+    ) = create_vertex_index_buffers(
+        &device,
+        queue_family,
+        main_vertices.into_iter().cloned(),
+        main_indices.into_iter().cloned(),
+    );
+
+    let screen_vertices = [
         Vertex { position: [-1.0, -1.0,  0.0] },
         Vertex { position: [-1.0,  1.0,  0.0] },
         Vertex { position: [ 1.0,  1.0,  0.0] },
-        // Vertex { position: [ 1.0,  1.0,  0.0] },
-        // Vertex { position: [ 1.0, -1.0,  0.0] },
-        // Vertex { position: [-1.0, -1.0,  0.0] },
+        Vertex { position: [ 1.0, -1.0,  0.0] },
     ];
 
-    let screen_vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(),
-                                                       BufferUsage::all(),
-                                                       screen_vertices.into_iter()).unwrap();
+    let screen_indices = [
+        0, 1, 2u16,
+        // 2, 3, 0u16,
+    ];
 
+    let (
+        (screen_vertex_staging_buffer, screen_vertex_device_buffer),
+        (screen_index_staging_buffer, screen_index_device_buffer),
+    ) = create_vertex_index_buffers(
+        &device,
+        queue_family,
+        screen_vertices.into_iter().cloned(),
+        screen_indices.into_iter().cloned(),
+    );
 
     let main_pipeline = vulkan_main_pipeline(&device, &swapchain);
     let screen_pipeline = vulkan_screen_pipeline(&device, &swapchain);
@@ -303,14 +380,16 @@ fn main() {
     //     .build().unwrap()
     // );
 
-    let main_dimensions_buffer = CpuAccessibleBuffer::from_data(
-        device.clone(),
-        BufferUsage::uniform_buffer_transfer_destination(),
+    let (main_dimensions_staging_buffer, main_dimensions_device_buffer) = create_staging_buffers_data(
+        &device,
+        queue_family,
+        BufferUsage::uniform_buffer(),
         [dimensions[0] as f32, dimensions[1] as f32],
-    ).unwrap();
+    );
+
     let screen_image = AttachmentImage::with_usage(
         device.clone(),
-        screen_dimensions.clone(),
+        SCREEN_DIMENSIONS.clone(),
         swapchain.format(),
         ImageUsage {
             sampled: true,
@@ -337,12 +416,12 @@ fn main() {
     ).unwrap();
     let main_descriptor_set = Arc::new(
         PersistentDescriptorSet::start(main_pipeline.clone(), 0)
-            .add_buffer(main_dimensions_buffer.clone()).unwrap()
+            .add_buffer(main_dimensions_device_buffer.clone()).unwrap()
             .add_sampled_image(screen_image.clone(), screen_sampler.clone()).unwrap()
             .build().unwrap()
     );
 
-    let mut screen_framebuffers: Vec<Arc<Framebuffer<_, _>>> = images.iter().map(|_| {
+    let screen_framebuffers: Vec<Arc<Framebuffer<_, _>>> = images.iter().map(|_| {
         Arc::new(
             Framebuffer::start(screen_pipeline.render_pass().clone())
             .add(screen_image.clone()).unwrap()
@@ -426,18 +505,24 @@ fn main() {
         };
 
         let screen_command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
+            .copy_buffer(screen_vertex_staging_buffer.clone(), screen_vertex_device_buffer.clone()).unwrap()
+            .copy_buffer(screen_index_staging_buffer.clone(), screen_index_device_buffer.clone()).unwrap()
             .begin_render_pass(screen_framebuffers[image_num].clone(),
                                false,
                                vec![[0.0, 1.0, 0.0, 1.0].into()]).unwrap()
-            .draw(screen_pipeline.clone(),
+            .draw_indexed(screen_pipeline.clone(),
                   DynamicState::none(),
-                  screen_vertex_buffer.clone(),
+                  screen_vertex_device_buffer.clone(),
+                  screen_index_device_buffer.clone(),
                   (), ()).unwrap()
             .end_render_pass().unwrap()
             .build().unwrap();
 
         let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
-            .update_buffer(main_dimensions_buffer.clone(), [dimensions[0] as f32, dimensions[1] as f32]).unwrap()
+            .update_buffer(main_dimensions_staging_buffer.clone(), [dimensions[0] as f32, dimensions[1] as f32]).unwrap()
+            .copy_buffer(main_dimensions_staging_buffer.clone(), main_dimensions_device_buffer.clone()).unwrap()
+            .copy_buffer(main_vertex_staging_buffer.clone(), main_vertex_device_buffer.clone()).unwrap()
+            .copy_buffer(main_index_staging_buffer.clone(), main_index_device_buffer.clone()).unwrap()
             // Before we can draw, we have to *enter a render pass*. There are two methods to do
             // this: `draw_inline` and `draw_secondary`. The latter is a bit more advanced and is
             // not covered here.
@@ -452,7 +537,7 @@ fn main() {
             //
             // The last two parameters contain the list of resources to pass to the shaders.
             // Since we used an `EmptyPipeline` object, the objects have to be `()`.
-            .draw(main_pipeline.clone(),
+            .draw_indexed(main_pipeline.clone(),
                   DynamicState {
                       line_width: None,
                       // TODO: Find a way to do this without having to dynamically allocate a Vec every frame.
@@ -463,7 +548,10 @@ fn main() {
                       }]),
                       scissors: None,
                   },
-                  main_vertex_buffer.clone(), main_descriptor_set.clone(), ())
+                  main_vertex_device_buffer.clone(),
+                  main_index_device_buffer.clone(),
+                  main_descriptor_set.clone(),
+                  ())
             .unwrap()
             // We leave the render pass by calling `draw_end`. Note that if we had multiple
             // subpasses we could have called `next_inline` (or `next_secondary`) to jump to the

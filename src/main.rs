@@ -309,6 +309,129 @@ fn vulkan_screen_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window
         .unwrap())
 }
 
+type Mat4 = [[f32; 4]; 4];
+type Vec3 = [f32; 3];
+
+macro_rules! mat4 {
+    {
+        $m00:expr, $m10:expr, $m20:expr, $m30:expr;
+        $m01:expr, $m11:expr, $m21:expr, $m31:expr;
+        $m02:expr, $m12:expr, $m22:expr, $m32:expr;
+        $m03:expr, $m13:expr, $m23:expr, $m33:expr$(;)*
+    } => {
+        [[$m00, $m01, $m02, $m03],
+         [$m10, $m11, $m12, $m13],
+         [$m20, $m21, $m22, $m23],
+         [$m30, $m31, $m32, $m33]]
+    }
+}
+
+fn negate_vector(vector: &mut Vec3) {
+    for component in vector {
+        *component = -*component;
+    }
+}
+
+fn identity_matrix() -> Mat4 {
+    mat4![1.0, 0.0, 0.0, 0.0;
+          0.0, 1.0, 0.0, 0.0;
+          0.0, 0.0, 1.0, 0.0;
+          0.0, 0.0, 0.0, 1.0]
+}
+
+fn multiply_matrices(a: &Mat4, b: &Mat4) -> Mat4 {
+    let mut result = identity_matrix();
+
+    for result_row in 0..4 {
+        for result_column in 0..4 {
+            let mut result_cell = 0.0;
+
+            for cell_index in 0..4 {
+                result_cell += a[cell_index][result_row] * b[result_column][cell_index];
+            }
+
+            result[result_column][result_row] = result_cell;
+        }
+    }
+
+    result
+}
+
+fn scale_matrix(matrix: &mut Mat4, scale: f32) {
+    for i in 0..3 {
+        matrix[i][i] *= scale;
+    }
+}
+
+fn translate_matrix(matrix: &mut Mat4, translation: &Vec3) {
+    for i in 0..3 {
+        matrix[3][i] = translation[i];
+    }
+}
+
+fn rotate_matrix(matrix: &mut Mat4, euler_angles: &Vec3) {
+    let e = euler_angles;
+
+    if e[0] != 0.0 {
+        let a = e[0];
+        *matrix = multiply_matrices(
+            &mat4![1.0,     0.0,      0.0, 0.0;
+                   0.0, a.cos(), -a.sin(), 0.0;
+                   0.0, a.sin(),  a.cos(), 0.0;
+                   0.0,     0.0,      0.0, 1.0],
+            matrix
+        );
+    }
+
+    if e[1] != 0.0 {
+        let b = e[1];
+        *matrix = multiply_matrices(
+            &mat4![ b.cos(), 0.0, b.sin(), 0.0;
+                        0.0, 1.0,     0.0, 0.0;
+                   -b.sin(), 0.0, b.cos(), 0.0;
+                        0.0, 0.0,     0.0, 1.0],
+            matrix
+        );
+    }
+
+    if e[2] != 0.0 {
+        let c = e[2];
+        *matrix = multiply_matrices(
+            &mat4![c.cos(), -c.sin(), 0.0, 0.0;
+                   c.sin(),  c.cos(), 0.0, 0.0;
+                       0.0,      0.0, 1.0, 0.0;
+                       0.0,      0.0, 0.0, 1.0],
+            matrix
+        );
+    }
+}
+
+fn construct_model_matrix(scale: f32, translation: &Vec3, rotation: &Vec3) -> Mat4 {
+    let mut result = identity_matrix();
+
+    scale_matrix(&mut result, scale);
+    rotate_matrix(&mut result, rotation);
+    translate_matrix(&mut result, translation);
+
+    result
+}
+
+fn construct_view_matrix(camera_translation: &Vec3, camera_rotation: &Vec3) -> Mat4 {
+    let mut translation = camera_translation.clone();
+    let mut rotation = camera_rotation.clone();
+
+    negate_vector(&mut translation);
+    negate_vector(&mut rotation);
+    construct_model_matrix(1.0, &translation, &rotation)
+}
+
+fn construct_ortographic_projection_matrix(near_plane: f32, far_plane: f32) -> Mat4 {
+    mat4![1.0, 0.0,                            0.0,         0.0;
+          0.0, 1.0,                            0.0,         0.0;
+          0.0, 0.0, 1.0 / (far_plane - near_plane), -near_plane;
+          0.0, 0.0,                            0.0,         1.0]
+}
+
 fn main() {
     /*
      * Initialization
@@ -402,18 +525,9 @@ fn main() {
 
     let mut main_ubo = MainUBO::new(
         [dimensions[0] as f32, dimensions[1] as f32],
-        [[1.0, 0.0, 0.0, 0.0],
-         [0.0, 1.0, 0.0, 0.0],
-         [0.0, 0.0, 1.0, 0.0],
-         [0.0, 0.0, 0.0, 1.0]],
-        [[1.0, 0.0, 0.0, 0.0],
-         [0.0, 1.0, 0.0, 0.0],
-         [0.0, 0.0, 1.0, 0.0],
-         [0.0, 0.0, 0.0, 1.0]],
-        [[1.0, 0.0, 0.0, 0.0],
-         [0.0, 1.0, 0.0, 0.0],
-         [0.0, 0.0, 1.0, 0.0],
-         [0.0, 0.0, 0.0, 1.0]],
+        identity_matrix(),
+        identity_matrix(),
+        identity_matrix(),
     );
     let (main_ubo_staging_buffer, main_ubo_device_buffer) = create_staging_buffers_data(
         &device,
@@ -468,6 +582,7 @@ fn main() {
     // We need to keep track of whether the swapchain is invalid for the current window,
     // for example when the window is resized.
     let mut recreate_swapchain = false;
+    let mut iteration = 0;
 
     // In the loop below we are going to submit commands to the GPU. Submitting a command produces
     // an object that implements the `GpuFuture` trait, which holds the resources for as long as
@@ -539,6 +654,16 @@ fn main() {
             },
             Err(err) => panic!("{:?}", err)
         };
+
+        let mut main_ubo = MainUBO::new(
+            [dimensions[0] as f32, dimensions[1] as f32],
+            construct_model_matrix(1.0,
+                                   &[0.0, 0.0, 10.0],
+                                   &[iteration as f32 * 0.01, iteration as f32 * 0.01, 0.0]),
+            construct_view_matrix(&[(iteration as f32 * 0.02).cos(), 0.0, 0.0],
+                                  &[0.0, 0.0, 0.0]),
+            construct_ortographic_projection_matrix(0.0, 1000.0),
+        );
 
         let screen_command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
             .copy_buffer(screen_vertex_staging_buffer.clone(), screen_vertex_device_buffer.clone()).unwrap()
@@ -643,5 +768,6 @@ fn main() {
             }
         });
         if done { return; }
+        iteration += 1;
     }
 }

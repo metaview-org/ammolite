@@ -326,12 +326,14 @@ macro_rules! mat4 {
     }
 }
 
+#[inline]
 fn negate_vector(vector: &mut Vec3) {
     for component in vector {
         *component = -*component;
     }
 }
 
+#[inline]
 fn identity_matrix() -> Mat4 {
     mat4![1.0, 0.0, 0.0, 0.0;
           0.0, 1.0, 0.0, 0.0;
@@ -339,6 +341,7 @@ fn identity_matrix() -> Mat4 {
           0.0, 0.0, 0.0, 1.0]
 }
 
+#[inline]
 fn multiply_matrices(a: &Mat4, b: &Mat4) -> Mat4 {
     let mut result = identity_matrix();
 
@@ -357,18 +360,21 @@ fn multiply_matrices(a: &Mat4, b: &Mat4) -> Mat4 {
     result
 }
 
+#[inline]
 fn scale_matrix(matrix: &mut Mat4, scale: f32) {
     for i in 0..3 {
         matrix[i][i] *= scale;
     }
 }
 
+#[inline]
 fn translate_matrix(matrix: &mut Mat4, translation: &Vec3) {
     for i in 0..3 {
         matrix[3][i] = translation[i];
     }
 }
 
+#[inline]
 fn rotate_matrix(matrix: &mut Mat4, euler_angles: &Vec3) {
     let e = euler_angles;
 
@@ -425,11 +431,44 @@ fn construct_view_matrix(camera_translation: &Vec3, camera_rotation: &Vec3) -> M
     construct_model_matrix(1.0, &translation, &rotation)
 }
 
-fn construct_ortographic_projection_matrix(near_plane: f32, far_plane: f32) -> Mat4 {
-    mat4![1.0, 0.0,                            0.0,         0.0;
-          0.0, 1.0,                            0.0,         0.0;
-          0.0, 0.0, 1.0 / (far_plane - near_plane), -near_plane;
-          0.0, 0.0,                            0.0,         1.0]
+fn construct_orthographic_projection_matrix(near_plane: f32, far_plane: f32, dimensions: [f32; 2]) -> Mat4 {
+    let z_n = near_plane;
+    let z_f = far_plane;
+
+    // Scale the X/Y-coordinates according to the dimensions. Translate and scale the Z-coordinate.
+    mat4![1.0 / dimensions[0],                  0.0,               0.0,                0.0;
+                          0.0, -1.0 / dimensions[1],               0.0,                0.0;
+                          0.0,                  0.0, 1.0 / (z_f - z_n), -z_n / (z_f - z_n);
+                          0.0,                  0.0,               0.0,                1.0]
+}
+
+fn construct_perspective_projection_matrix(near_plane: f32, far_plane: f32, aspect_ratio: f32, fov_rad: f32) -> Mat4 {
+    // The resulting `(x, y, z, w)` vector gets normalized following the execution of the vertex
+    // shader to `(x/w, y/w, z/w)` (W-division). This makes it possible to create a perspective
+    // projection matrix.
+    // We copy the Z coordinate to the W coordinate so as to divide all coordinates by Z.
+    let z_n = near_plane;
+    let z_f = far_plane;
+    // With normalization, it is actually `1 / (z * tan(FOV / 2))`, which is the width of the
+    // screen at that point in space of the vector.
+    // The X coordinate needs to be divided by the aspect ratio to make it independent of the
+    // window size.
+    // The Y coordinate is negated so as to adjust the vectors to the Vulkan coordinate system,
+    // which has the Y axis pointing downwards, contrary to OpenGL.
+    let f = 1.0 / (fov_rad / 2.0).tan();
+
+    // We derive the coefficients for the Z coordinate from the following equation:
+    // `f(z) = A*z + B`, because we know we need to translate and scale the Z coordinate.
+    // The equation changes to the following, after the W-division:
+    // `f(z) = A + B/z`
+    // And must satisfy the following conditions:
+    // `f(z_near) = 0`
+    // `f(z_far) = 1`
+    // Solving for A and B gives us the necessary coefficients to construct the matrix.
+    mat4![f / aspect_ratio, 0.0,                0.0,                       0.0;
+                       0.0,  -f,                0.0,                       0.0;
+                       0.0, 0.0, -z_f / (z_n - z_f), (z_n * z_f) / (z_n - z_f);
+                       0.0, 0.0,                1.0,                       0.0]
 }
 
 fn main() {
@@ -658,11 +697,12 @@ fn main() {
         let mut main_ubo = MainUBO::new(
             [dimensions[0] as f32, dimensions[1] as f32],
             construct_model_matrix(1.0,
-                                   &[0.0, 0.0, 10.0],
+                                   &[0.0, 0.0, 2.0],
                                    &[iteration as f32 * 0.01, iteration as f32 * 0.01, 0.0]),
             construct_view_matrix(&[(iteration as f32 * 0.02).cos(), 0.0, 0.0],
                                   &[0.0, 0.0, 0.0]),
-            construct_ortographic_projection_matrix(0.0, 1000.0),
+            construct_perspective_projection_matrix(0.1, 1000.0, dimensions[0] as f32 / dimensions[1] as f32, std::f32::consts::FRAC_PI_2),
+            // construct_orthographic_projection_matrix(0.1, 1000.0, [dimensions[0] as f32 / dimensions[1] as f32, 1.0]),
         );
 
         let screen_command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()

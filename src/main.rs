@@ -4,16 +4,19 @@ extern crate vulkano;
 extern crate vulkano_shader_derive;
 extern crate vulkano_win;
 extern crate winit;
+extern crate image;
 
 use std::sync::Arc;
 use std::mem;
+use std::ops::Deref;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
 use vulkano::device::{Device, DeviceExtensions, Queue};
 use vulkano::instance::{Instance, PhysicalDevice, QueueFamily, Features};
 use vulkano::sync::{FlushError, GpuFuture};
-use vulkano::format::FormatTy;
-use vulkano::image::{AttachmentImage, ImageUsage};
+use vulkano::format::{FormatTy, R8G8B8A8Unorm};
+use vulkano::image::{AttachmentImage, ImageUsage, Dimensions, ImageLayout};
+use vulkano::image::immutable::{ImmutableImage, ImmutableImageInitialization};
 use vulkano::image::swapchain::SwapchainImage;
 use vulkano::framebuffer::{Framebuffer, RenderPass, RenderPassDesc, Subpass};
 use vulkano::pipeline::GraphicsPipeline;
@@ -25,13 +28,22 @@ use vulkano::swapchain::{self, PresentMode, SurfaceTransform, Swapchain, Acquire
 use vulkano::sampler::{Sampler, SamplerAddressMode, BorderColor, MipmapMode, Filter};
 use vulkano_win::VkSurfaceBuild;
 use winit::{EventsLoop, WindowBuilder, Window};
+use image::{ImageBuffer, DynamicImage, Pixel, Primitive};
 
 #[derive(Copy, Clone)]
-struct Vertex {
+struct MainVertex {
+    position: [f32; 3],
+    tex_coord: [f32; 2],
+}
+
+impl_vertex!(MainVertex, position, tex_coord);
+
+#[derive(Copy, Clone)]
+struct ScreenVertex {
     position: [f32; 3],
 }
 
-impl_vertex!(Vertex, position);
+impl_vertex!(ScreenVertex, position);
 
 mod screen_vs {
     #[derive(VulkanoShader)]
@@ -85,9 +97,6 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
     // TODO: Better device selection & SLI support
     let physical_device = PhysicalDevice::enumerate(instance).next().expect("No physical device available.");
 
-    // Queues are like CPU threads, queue families are groups of queues with certain capabilities.
-    println!("Available queue families:");
-
     let events_loop = EventsLoop::new();
     let window = VkSurfaceBuild::build_vk_surface(WindowBuilder::new(), &events_loop, instance.clone()).unwrap();
 
@@ -96,19 +105,22 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
         [width, height]
     };
 
-    /*
-     * Device Creation
-     */
+    // Queues are like CPU threads, queue families are groups of queues with certain capabilities.
+    // println!("Available queue families:");
 
-    for queue_family in physical_device.queue_families() {
-        println!("\tFamily #{} -- queues: {}, supports graphics: {}, supports compute: {}, supports transfers: {}, supports sparse binding: {}", queue_family.id(), queue_family.queues_count(), queue_family.supports_graphics(), queue_family.supports_compute(), queue_family.supports_transfers(), queue_family.supports_sparse_binding());
-    }
+    // for queue_family in physical_device.queue_families() {
+    //     println!("\tFamily #{} -- queues: {}, supports graphics: {}, supports compute: {}, supports transfers: {}, supports sparse binding: {}", queue_family.id(), queue_family.queues_count(), queue_family.supports_graphics(), queue_family.supports_compute(), queue_family.supports_transfers(), queue_family.supports_sparse_binding());
+    // }
 
     let queue_family = physical_device.queue_families()
         .find(|&queue| {
             queue.supports_graphics() && window.is_supported(queue).unwrap_or(false)
         })
         .expect("Couldn't find a graphical queue family.");
+
+    /*
+     * Device Creation
+     */
 
     // Create a device with a single queue
     let (device, mut queues) = {
@@ -151,7 +163,7 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
     (events_loop, window, dimensions, device, queue_family, queue, swapchain, images)
 }
 
-fn vulkan_main_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Arc<GraphicsPipeline<SingleBufferDefinition<Vertex>, Box<dyn PipelineLayoutAbstract + Send + Sync>, Arc<RenderPass<impl RenderPassDesc>>>> {
+fn vulkan_main_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Arc<GraphicsPipeline<SingleBufferDefinition<MainVertex>, Box<dyn PipelineLayoutAbstract + Send + Sync>, Arc<RenderPass<impl RenderPassDesc>>>> {
     let main_vs = main_vs::Shader::load(device.clone()).expect("Failed to create shader module.");
     let main_fs = main_fs::Shader::load(device.clone()).expect("Failed to create shader module.");
 
@@ -173,8 +185,8 @@ fn vulkan_main_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>
 
     Arc::new(GraphicsPipeline::start()
         // .with_pipeline_layout(device.clone(), pipeline_layout)
-        // Specifies the Vertex type
-        .vertex_input_single_buffer::<Vertex>()
+        // Specifies the vertex type
+        .vertex_input_single_buffer::<MainVertex>()
         .vertex_shader(main_vs.main_entry_point(), ())
         // Configures the builder so that we use one viewport, and that the state of this viewport
         // is dynamic. This makes it possible to change the viewport for each draw command. If the
@@ -188,6 +200,57 @@ fn vulkan_main_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>
         .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
         .build(device.clone())
         .unwrap())
+}
+
+fn create_staging_buffer_image<P, C>(device: &Arc<Device>, queue_family: QueueFamily, image: &ImageBuffer<P, C>)
+    -> (Arc<CpuAccessibleBuffer<[u8]>>, Arc<ImmutableImage<R8G8B8A8Unorm>>, ImmutableImageInitialization<R8G8B8A8Unorm>, Arc<Sampler>)
+    where P: Pixel<Subpixel=u8> + 'static,
+          C: Deref<Target=[u8]> {
+    // There should be a check whether the hardware supports the image format.
+    // let pixel_size = P::channel_count() as usize * mem::size_of::<u8>();
+    // let image_size = pixel_size * image.len();
+    let staging_buffer = CpuAccessibleBuffer::<[u8]>::from_iter(
+        device.clone(),
+        BufferUsage {
+            transfer_destination: true,
+            transfer_source: true,
+            .. BufferUsage::none()
+        },
+        Vec::from(&**image).into_iter(),
+    ).unwrap();
+    let (texture_image, initialization) = ImmutableImage::uninitialized(
+        device.clone(),
+        Dimensions::Dim2d {
+            width: image.width(),
+            height: image.height(),
+        },
+        R8G8B8A8Unorm,
+        1,
+        ImageUsage {
+            transfer_destination: true,
+            sampled: true,
+            .. ImageUsage::none()
+        },
+        ImageLayout::General, // TODO: Should be Undefined, figure out a way to create memory
+                              //       access barriers and transition the layout.
+        vec![queue_family], // TODO: Figure out a way not to use a Vec
+    ).unwrap();
+    let sampler = Sampler::new(
+        device.clone(),
+        Filter::Linear,  // magnifying filter
+        Filter::Linear,  // minifying filter
+        MipmapMode::Linear,
+        SamplerAddressMode::ClampToEdge,
+        SamplerAddressMode::ClampToEdge,
+        SamplerAddressMode::ClampToEdge,
+        0.0,  // mip_lod_bias
+        // TODO: Turn anisotropic filtering on for better screen readability
+        1.0,  // anisotropic filtering (1.0 = off, anything higher = on)
+        1.0,  // min_lod
+        1.0,  // max_lod
+    ).unwrap();
+
+    (staging_buffer, texture_image, initialization, sampler)
 }
 
 fn create_staging_buffers_data<T>(device: &Arc<Device>, queue_family: QueueFamily, usage: BufferUsage, data: T)
@@ -208,7 +271,7 @@ fn create_staging_buffers_data<T>(device: &Arc<Device>, queue_family: QueueFamil
             transfer_destination: true,
             .. usage.clone()
         },
-        vec![queue_family],
+        vec![queue_family], // TODO: Figure out a way not to use a Vec
     ).unwrap();
 
     (staging_buffer, device_buffer)
@@ -264,7 +327,7 @@ fn create_vertex_index_buffers<V, I, VI, II>(device: &Arc<Device>, queue_family:
     )
 }
 
-fn vulkan_screen_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Arc<GraphicsPipeline<SingleBufferDefinition<Vertex>, Box<dyn PipelineLayoutAbstract + Send + Sync>, Arc<RenderPass<impl RenderPassDesc>>>> {
+fn vulkan_screen_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Arc<GraphicsPipeline<SingleBufferDefinition<ScreenVertex>, Box<dyn PipelineLayoutAbstract + Send + Sync>, Arc<RenderPass<impl RenderPassDesc>>>> {
     // A special GPU mode highly-optimized for rendering
     let screen_vs = screen_vs::Shader::load(device.clone()).expect("Failed to create shader module.");
     let screen_fs = screen_fs::Shader::load(device.clone()).expect("Failed to create shader module.");
@@ -288,8 +351,8 @@ fn vulkan_screen_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window
 
     Arc::new(GraphicsPipeline::start()
         // .with_pipeline_layout(device.clone(), pipeline_layout)
-        // Specifies the Vertex type
-        .vertex_input_single_buffer::<Vertex>()
+        // Specifies the vertex type
+        .vertex_input_single_buffer::<ScreenVertex>()
         .vertex_shader(screen_vs.main_entry_point(), ())
         // Configures the builder so that we use one viewport, and that the state of this viewport
         // is dynamic. This makes it possible to change the viewport for each draw command. If the
@@ -481,13 +544,6 @@ fn main() {
     let instance = Instance::new(None, &extensions, None)
         .expect("Failed to create a Vulkan instance.");
 
-    let layers = vulkano::instance::layers_list().unwrap()
-        .map(|l| l.name().to_string());
-
-    for layer in layers {
-        println!("\t{}", layer);
-    }
-
     let (mut events_loop, window, mut dimensions, device, queue_family, queue, mut swapchain, mut images) = vulkan_initialize(&instance);
 
     /*
@@ -501,15 +557,15 @@ fn main() {
 */
 
     let main_vertices = [
-        Vertex { position: [-0.5, -0.5,  0.0] },
-        Vertex { position: [ 0.5, -0.5,  0.0] },
-        Vertex { position: [ 0.5,  0.5,  0.0] },
-        Vertex { position: [-0.5,  0.5,  0.0] },
+        MainVertex { position: [-0.5, -0.5,  0.0], tex_coord: [0.0, 1.0] },
+        MainVertex { position: [ 0.5, -0.5,  0.0], tex_coord: [1.0, 1.0] },
+        MainVertex { position: [ 0.5,  0.5,  0.0], tex_coord: [1.0, 0.0] },
+        MainVertex { position: [-0.5,  0.5,  0.0], tex_coord: [0.0, 0.0] },
 
-        Vertex { position: [-0.5, -0.5, -0.5] },
-        Vertex { position: [ 0.5, -0.5, -0.5] },
-        Vertex { position: [ 0.5,  0.5, -0.5] },
-        Vertex { position: [-0.5,  0.5, -0.5] },
+        MainVertex { position: [-0.5, -0.5, -0.5], tex_coord: [0.0, 1.0] },
+        MainVertex { position: [ 0.5, -0.5, -0.5], tex_coord: [1.0, 1.0] },
+        MainVertex { position: [ 0.5,  0.5, -0.5], tex_coord: [1.0, 0.0] },
+        MainVertex { position: [-0.5,  0.5, -0.5], tex_coord: [0.0, 0.0] },
     ];
 
     let main_indices = [
@@ -531,10 +587,10 @@ fn main() {
     );
 
     let screen_vertices = [
-        Vertex { position: [-1.0, -1.0,  0.0] },
-        Vertex { position: [-1.0,  1.0,  0.0] },
-        Vertex { position: [ 1.0,  1.0,  0.0] },
-        Vertex { position: [ 1.0, -1.0,  0.0] },
+        ScreenVertex { position: [-1.0, -1.0,  0.0] },
+        ScreenVertex { position: [-1.0,  1.0,  0.0] },
+        ScreenVertex { position: [ 1.0,  1.0,  0.0] },
+        ScreenVertex { position: [ 1.0, -1.0,  0.0] },
     ];
 
     let screen_indices = [
@@ -562,6 +618,13 @@ fn main() {
     //     .build().unwrap()
     // );
 
+    let texture = image::open("resources/texture.jpg").unwrap().to_rgba();
+    let (
+        texture_staging_buffer,
+        texture_device_image,
+        texture_device_image_initialization,
+        texture_device_sampler,
+    ) = create_staging_buffer_image(&device, queue_family, &texture);
     let mut main_ubo = MainUBO::new(
         [dimensions[0] as f32, dimensions[1] as f32],
         identity_matrix(),
@@ -606,6 +669,7 @@ fn main() {
         PersistentDescriptorSet::start(main_pipeline.clone(), 0)
             .add_buffer(main_ubo_device_buffer.clone()).unwrap()
             .add_sampled_image(screen_image.clone(), screen_sampler.clone()).unwrap()
+            .add_sampled_image(texture_device_image.clone(), texture_device_sampler.clone()).unwrap()
             .build().unwrap()
     );
 
@@ -630,6 +694,14 @@ fn main() {
     // Destroying the `GpuFuture` blocks until the GPU is finished executing it. In order to avoid
     // that, we store the submission of the previous frame here.
     let mut previous_frame_end: Box<dyn GpuFuture> = Box::new(vulkano::sync::now(device.clone()));
+
+    let init_command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
+        .copy_buffer_to_image(texture_staging_buffer.clone(), texture_device_image_initialization).unwrap()
+        .build().unwrap();
+
+    previous_frame_end = Box::new(previous_frame_end
+        .then_execute(queue.clone(), init_command_buffer).unwrap()
+        .then_signal_fence_and_flush().unwrap());
 
     loop {
         // It is important to call this function from time to time, otherwise resources will keep
@@ -694,7 +766,7 @@ fn main() {
             Err(err) => panic!("{:?}", err)
         };
 
-        let mut main_ubo = MainUBO::new(
+        let main_ubo = MainUBO::new(
             [dimensions[0] as f32, dimensions[1] as f32],
             construct_model_matrix(1.0,
                                    &[0.0, 0.0, 2.0],

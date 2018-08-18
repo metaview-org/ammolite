@@ -5,6 +5,10 @@ extern crate vulkano_shader_derive;
 extern crate vulkano_win;
 extern crate winit;
 extern crate image;
+extern crate typenum;
+
+#[macro_use]
+pub mod math;
 
 use std::sync::Arc;
 use std::mem;
@@ -29,6 +33,8 @@ use vulkano::sampler::{Sampler, SamplerAddressMode, BorderColor, MipmapMode, Fil
 use vulkano_win::VkSurfaceBuild;
 use winit::{EventsLoop, WindowBuilder, Window};
 use image::{ImageBuffer, DynamicImage, Pixel, Primitive};
+use math::matrix::*;
+use math::vector::*;
 
 #[derive(Copy, Clone)]
 struct MainVertex {
@@ -372,137 +378,29 @@ fn vulkan_screen_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window
         .unwrap())
 }
 
-type Mat4 = [[f32; 4]; 4];
-type Vec3 = [f32; 3];
-
-macro_rules! mat4 {
-    {
-        $m00:expr, $m10:expr, $m20:expr, $m30:expr;
-        $m01:expr, $m11:expr, $m21:expr, $m31:expr;
-        $m02:expr, $m12:expr, $m22:expr, $m32:expr;
-        $m03:expr, $m13:expr, $m23:expr, $m33:expr$(;)*
-    } => {
-        [[$m00, $m01, $m02, $m03],
-         [$m10, $m11, $m12, $m13],
-         [$m20, $m21, $m22, $m23],
-         [$m30, $m31, $m32, $m33]]
-    }
-}
-
-#[inline]
-fn negate_vector(vector: &mut Vec3) {
-    for component in vector {
-        *component = -*component;
-    }
-}
-
-#[inline]
-fn identity_matrix() -> Mat4 {
-    mat4![1.0, 0.0, 0.0, 0.0;
-          0.0, 1.0, 0.0, 0.0;
-          0.0, 0.0, 1.0, 0.0;
-          0.0, 0.0, 0.0, 1.0]
-}
-
-#[inline]
-fn multiply_matrices(a: &Mat4, b: &Mat4) -> Mat4 {
-    let mut result = identity_matrix();
-
-    for result_row in 0..4 {
-        for result_column in 0..4 {
-            let mut result_cell = 0.0;
-
-            for cell_index in 0..4 {
-                result_cell += a[cell_index][result_row] * b[result_column][cell_index];
-            }
-
-            result[result_column][result_row] = result_cell;
-        }
-    }
-
-    result
-}
-
-#[inline]
-fn scale_matrix(matrix: &mut Mat4, scale: f32) {
-    for i in 0..3 {
-        matrix[i][i] *= scale;
-    }
-}
-
-#[inline]
-fn translate_matrix(matrix: &mut Mat4, translation: &Vec3) {
-    for i in 0..3 {
-        matrix[3][i] = translation[i];
-    }
-}
-
-#[inline]
-fn rotate_matrix(matrix: &mut Mat4, euler_angles: &Vec3) {
-    let e = euler_angles;
-
-    if e[0] != 0.0 {
-        let a = e[0];
-        *matrix = multiply_matrices(
-            &mat4![1.0,     0.0,      0.0, 0.0;
-                   0.0, a.cos(), -a.sin(), 0.0;
-                   0.0, a.sin(),  a.cos(), 0.0;
-                   0.0,     0.0,      0.0, 1.0],
-            matrix
-        );
-    }
-
-    if e[1] != 0.0 {
-        let b = e[1];
-        *matrix = multiply_matrices(
-            &mat4![ b.cos(), 0.0, b.sin(), 0.0;
-                        0.0, 1.0,     0.0, 0.0;
-                   -b.sin(), 0.0, b.cos(), 0.0;
-                        0.0, 0.0,     0.0, 1.0],
-            matrix
-        );
-    }
-
-    if e[2] != 0.0 {
-        let c = e[2];
-        *matrix = multiply_matrices(
-            &mat4![c.cos(), -c.sin(), 0.0, 0.0;
-                   c.sin(),  c.cos(), 0.0, 0.0;
-                       0.0,      0.0, 1.0, 0.0;
-                       0.0,      0.0, 0.0, 1.0],
-            matrix
-        );
-    }
-}
-
 fn construct_model_matrix(scale: f32, translation: &Vec3, rotation: &Vec3) -> Mat4 {
-    let mut result = identity_matrix();
+    let mut result = Mat4::identity();
 
-    scale_matrix(&mut result, scale);
-    rotate_matrix(&mut result, rotation);
-    translate_matrix(&mut result, translation);
+    result.scale(scale);
+    result.rotate(rotation);
+    result.translate(translation);
 
     result
 }
 
-fn construct_view_matrix(camera_translation: &Vec3, camera_rotation: &Vec3) -> Mat4 {
-    let mut translation = camera_translation.clone();
-    let mut rotation = camera_rotation.clone();
-
-    negate_vector(&mut translation);
-    negate_vector(&mut rotation);
-    construct_model_matrix(1.0, &translation, &rotation)
+fn construct_view_matrix(translation: &Vec3, rotation: &Vec3) -> Mat4 {
+    construct_model_matrix(1.0, &-translation, &-rotation)
 }
 
-fn construct_orthographic_projection_matrix(near_plane: f32, far_plane: f32, dimensions: [f32; 2]) -> Mat4 {
+fn construct_orthographic_projection_matrix(near_plane: f32, far_plane: f32, dimensions: Vec2) -> Mat4 {
     let z_n = near_plane;
     let z_f = far_plane;
 
     // Scale the X/Y-coordinates according to the dimensions. Translate and scale the Z-coordinate.
-    mat4![1.0 / dimensions[0],                  0.0,               0.0,                0.0;
-                          0.0, -1.0 / dimensions[1],               0.0,                0.0;
-                          0.0,                  0.0, 1.0 / (z_f - z_n), -z_n / (z_f - z_n);
-                          0.0,                  0.0,               0.0,                1.0]
+    mat4!([1.0 / dimensions[0],                  0.0,               0.0,                0.0,
+                           0.0, -1.0 / dimensions[1],               0.0,                0.0,
+                           0.0,                  0.0, 1.0 / (z_f - z_n), -z_n / (z_f - z_n),
+                           0.0,                  0.0,               0.0,                1.0])
 }
 
 fn construct_perspective_projection_matrix(near_plane: f32, far_plane: f32, aspect_ratio: f32, fov_rad: f32) -> Mat4 {
@@ -528,10 +426,10 @@ fn construct_perspective_projection_matrix(near_plane: f32, far_plane: f32, aspe
     // `f(z_near) = 0`
     // `f(z_far) = 1`
     // Solving for A and B gives us the necessary coefficients to construct the matrix.
-    mat4![f / aspect_ratio, 0.0,                0.0,                       0.0;
-                       0.0,  -f,                0.0,                       0.0;
-                       0.0, 0.0, -z_f / (z_n - z_f), (z_n * z_f) / (z_n - z_f);
-                       0.0, 0.0,                1.0,                       0.0]
+    mat4!([f / aspect_ratio, 0.0,                0.0,                       0.0,
+                        0.0,  -f,                0.0,                       0.0,
+                        0.0, 0.0, -z_f / (z_n - z_f), (z_n * z_f) / (z_n - z_f),
+                        0.0, 0.0,                1.0,                       0.0])
 }
 
 fn main() {
@@ -627,9 +525,9 @@ fn main() {
     ) = create_staging_buffer_image(&device, queue_family, &texture);
     let mut main_ubo = MainUBO::new(
         [dimensions[0] as f32, dimensions[1] as f32],
-        identity_matrix(),
-        identity_matrix(),
-        identity_matrix(),
+        Mat4::identity().into(),
+        Mat4::identity().into(),
+        Mat4::identity().into(),
     );
     let (main_ubo_staging_buffer, main_ubo_device_buffer) = create_staging_buffers_data(
         &device,
@@ -769,12 +667,12 @@ fn main() {
         let main_ubo = MainUBO::new(
             [dimensions[0] as f32, dimensions[1] as f32],
             construct_model_matrix(1.0,
-                                   &[0.0, 0.0, 2.0],
-                                   &[iteration as f32 * 0.01, iteration as f32 * 0.01, 0.0]),
-            construct_view_matrix(&[(iteration as f32 * 0.02).cos(), 0.0, 0.0],
-                                  &[0.0, 0.0, 0.0]),
-            construct_perspective_projection_matrix(0.1, 1000.0, dimensions[0] as f32 / dimensions[1] as f32, std::f32::consts::FRAC_PI_2),
-            // construct_orthographic_projection_matrix(0.1, 1000.0, [dimensions[0] as f32 / dimensions[1] as f32, 1.0]),
+                                   &[0.0, 0.0, 2.0].into(),
+                                   &[iteration as f32 * 0.01, iteration as f32 * 0.01, 0.0].into()).into(),
+            construct_view_matrix(&[(iteration as f32 * 0.02).cos(), 0.0, 0.0].into(),
+                                  &[0.0, 0.0, 0.0].into()).into(),
+            construct_perspective_projection_matrix(0.1, 1000.0, dimensions[0] as f32 / dimensions[1] as f32, std::f32::consts::FRAC_PI_2).into(),
+            // construct_orthographic_projection_matrix(0.1, 1000.0, [dimensions[0] as f32 / dimensions[1] as f32, 1.0].into()).into(),
         );
 
         let screen_command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()

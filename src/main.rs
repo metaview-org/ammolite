@@ -11,14 +11,13 @@ extern crate typenum;
 pub mod math;
 
 use std::sync::Arc;
-use std::mem;
 use std::ops::Deref;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
 use vulkano::device::{Device, DeviceExtensions, Queue};
 use vulkano::instance::{Instance, PhysicalDevice, QueueFamily, Features};
 use vulkano::sync::{FlushError, GpuFuture};
-use vulkano::format::{FormatTy, R8G8B8A8Unorm};
+use vulkano::format::{self, Format, FormatTy};
 use vulkano::image::{AttachmentImage, ImageUsage, Dimensions, ImageLayout};
 use vulkano::image::immutable::{ImmutableImage, ImmutableImageInitialization};
 use vulkano::image::swapchain::SwapchainImage;
@@ -26,13 +25,14 @@ use vulkano::framebuffer::{Framebuffer, RenderPass, RenderPassDesc, Subpass};
 use vulkano::pipeline::GraphicsPipeline;
 use vulkano::pipeline::viewport::Viewport;
 use vulkano::pipeline::vertex::SingleBufferDefinition;
+use vulkano::pipeline::depth_stencil::DepthStencil;
 use vulkano::descriptor::PipelineLayoutAbstract;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::swapchain::{self, PresentMode, SurfaceTransform, Swapchain, AcquireError, SwapchainCreationError, Surface};
 use vulkano::sampler::{Sampler, SamplerAddressMode, BorderColor, MipmapMode, Filter};
 use vulkano_win::VkSurfaceBuild;
 use winit::{EventsLoop, WindowBuilder, Window};
-use image::{ImageBuffer, DynamicImage, Pixel, Primitive};
+use image::{ImageBuffer, Pixel};
 use math::matrix::*;
 use math::vector::*;
 
@@ -169,6 +169,11 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
     (events_loop, window, dimensions, device, queue_family, queue, swapchain, images)
 }
 
+// fn vulkan_find_supported_format(physical_device: &Arc<PhysicalDevice>, candidates: &[Format]) -> Option<Format> {
+//     // TODO: Querying available formats is not implemented (exposed) in vulkano.
+//     unimplemented!()
+// }
+
 fn vulkan_main_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Arc<GraphicsPipeline<SingleBufferDefinition<MainVertex>, Box<dyn PipelineLayoutAbstract + Send + Sync>, Arc<RenderPass<impl RenderPassDesc>>>> {
     let main_vs = main_vs::Shader::load(device.clone()).expect("Failed to create shader module.");
     let main_fs = main_fs::Shader::load(device.clone()).expect("Failed to create shader module.");
@@ -181,11 +186,20 @@ fn vulkan_main_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>
                 store: Store, // for temporary images, use DontCare
                 format: swapchain.format(),
                 samples: 1,
+            },
+            depth_stencil: {
+                load: Clear,
+                store: DontCare,
+                format: Format::D32Sfloat,
+                samples: 1,
+                initial_layout: ImageLayout::Undefined,
+                final_layout: ImageLayout::DepthStencilAttachmentOptimal,
+                // initial_layout: ImageLayout::DepthStencilAttachmentOptimal,
             }
         },
         pass: {
             color: [color],
-            depth_stencil: {}
+            depth_stencil: { depth_stencil }
         }
     }.unwrap());
 
@@ -202,6 +216,7 @@ fn vulkan_main_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>
         // Note: If you configure multiple viewports, you can use geometry shaders to choose which
         // viewport the shape is going to be drawn to. This topic isn't covered here.
         .viewports_dynamic_scissors_irrelevant(1)
+        .depth_stencil(DepthStencil::simple_depth_test())
         .fragment_shader(main_fs.main_entry_point(), ())
         .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
         .build(device.clone())
@@ -209,7 +224,7 @@ fn vulkan_main_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>
 }
 
 fn create_staging_buffer_image<P, C>(device: &Arc<Device>, queue_family: QueueFamily, image: &ImageBuffer<P, C>)
-    -> (Arc<CpuAccessibleBuffer<[u8]>>, Arc<ImmutableImage<R8G8B8A8Unorm>>, ImmutableImageInitialization<R8G8B8A8Unorm>, Arc<Sampler>)
+    -> (Arc<CpuAccessibleBuffer<[u8]>>, Arc<ImmutableImage<format::R8G8B8A8Unorm>>, ImmutableImageInitialization<format::R8G8B8A8Unorm>, Arc<Sampler>)
     where P: Pixel<Subpixel=u8> + 'static,
           C: Deref<Target=[u8]> {
     // There should be a check whether the hardware supports the image format.
@@ -230,16 +245,15 @@ fn create_staging_buffer_image<P, C>(device: &Arc<Device>, queue_family: QueueFa
             width: image.width(),
             height: image.height(),
         },
-        R8G8B8A8Unorm,
+        format::R8G8B8A8Unorm,
         1,
         ImageUsage {
             transfer_destination: true,
             sampled: true,
             .. ImageUsage::none()
         },
-        ImageLayout::General, // TODO: Should be Undefined, figure out a way to create memory
-                              //       access barriers and transition the layout.
-        vec![queue_family], // TODO: Figure out a way not to use a Vec
+        ImageLayout::ShaderReadOnlyOptimal,
+        [queue_family].into_iter().cloned(),
     ).unwrap();
     let sampler = Sampler::new(
         device.clone(),
@@ -277,7 +291,7 @@ fn create_staging_buffers_data<T>(device: &Arc<Device>, queue_family: QueueFamil
             transfer_destination: true,
             .. usage.clone()
         },
-        vec![queue_family], // TODO: Figure out a way not to use a Vec
+        [queue_family].into_iter().cloned(), // TODO: Figure out a way not to use a Vec
     ).unwrap();
 
     (staging_buffer, device_buffer)
@@ -304,7 +318,7 @@ fn create_staging_buffers_iter<T, I>(device: &Arc<Device>, queue_family: QueueFa
             transfer_destination: true,
             .. usage.clone()
         },
-        vec![queue_family],
+        [queue_family].into_iter().cloned(),
     ).unwrap();
 
     (staging_buffer, device_buffer)
@@ -367,11 +381,11 @@ fn vulkan_screen_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window
         //
         // Note: If you configure multiple viewports, you can use geometry shaders to choose which
         // viewport the shape is going to be drawn to. This topic isn't covered here.
-        .viewports(vec![Viewport {
+        .viewports([Viewport {
             origin: [0.0, 0.0],
             dimensions: [SCREEN_DIMENSIONS[0] as f32, SCREEN_DIMENSIONS[1] as f32],
             depth_range: 0.0 .. 1.0,
-        }])
+        }].into_iter().cloned())
         .fragment_shader(screen_fs.main_entry_point(), ())
         .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
         .build(device.clone())
@@ -392,6 +406,7 @@ fn construct_view_matrix(translation: &Vec3, rotation: &Vec3) -> Mat4 {
     construct_model_matrix(1.0, &-translation, &-rotation)
 }
 
+#[allow(unused)]
 fn construct_orthographic_projection_matrix(near_plane: f32, far_plane: f32, dimensions: Vec2) -> Mat4 {
     let z_n = near_plane;
     let z_f = far_plane;
@@ -403,6 +418,7 @@ fn construct_orthographic_projection_matrix(near_plane: f32, far_plane: f32, dim
                            0.0,                  0.0,               0.0,                1.0])
 }
 
+#[allow(unused)]
 fn construct_perspective_projection_matrix(near_plane: f32, far_plane: f32, aspect_ratio: f32, fov_rad: f32) -> Mat4 {
     // The resulting `(x, y, z, w)` vector gets normalized following the execution of the vertex
     // shader to `(x/w, y/w, z/w)` (W-division). This makes it possible to create a perspective
@@ -579,6 +595,7 @@ fn main() {
         )
     }).collect();
     let mut main_framebuffers: Option<Vec<Arc<Framebuffer<_, _>>>> = None;
+    let mut depth_image: Option<Arc<AttachmentImage>> = None;
 
     // We need to keep track of whether the swapchain is invalid for the current window,
     // for example when the window is resized.
@@ -596,9 +613,16 @@ fn main() {
     let init_command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
         .copy_buffer_to_image(texture_staging_buffer.clone(), texture_device_image_initialization).unwrap()
         .build().unwrap();
+    // let standard_command_pool = Device::standard_command_pool(&device, queue_family);
+    // let init_unsafe_command_buffer = UnsafeCommandBufferBuilder::new(&standard_command_pool,
+    //                                                                  Kind::primary(),
+    //                                                                  Flags::OneTimeSubmit).unwrap()
+    //     .build().unwrap();
 
     previous_frame_end = Box::new(previous_frame_end
         .then_execute(queue.clone(), init_command_buffer).unwrap()
+        // .then_signal_fence()
+        // .then_execute_same_queue(init_unsafe_command_buffer).unwrap()
         .then_signal_fence_and_flush().unwrap());
 
     loop {
@@ -626,23 +650,30 @@ fn main() {
                 Err(err) => panic!("{:?}", err)
             };
 
-            mem::replace(&mut swapchain, new_swapchain);
-            mem::replace(&mut images, new_images);
-
+            swapchain = new_swapchain;
+            images = new_images;
             main_framebuffers = None;
-
             recreate_swapchain = false;
         }
-        //
+
         // Because framebuffers contains an Arc on the old swapchain, we need to
         // recreate framebuffers as well.
         if main_framebuffers.is_none() {
-            let new_main_framebuffers = Some(images.iter().map(|image| {
+            depth_image = Some(AttachmentImage::with_usage(
+                device.clone(),
+                dimensions.clone(),
+                Format::D32Sfloat,
+                ImageUsage {
+                    depth_stencil_attachment: true,
+                    .. ImageUsage::none()
+                }
+            ).unwrap());
+            main_framebuffers = Some(images.iter().map(|image| {
                 Arc::new(Framebuffer::start(main_pipeline.render_pass().clone())
                          .add(image.clone()).unwrap()
+                         .add(depth_image.as_ref().unwrap().clone()).unwrap()
                          .build().unwrap())
             }).collect::<Vec<_>>());
-            mem::replace(&mut main_framebuffers, new_main_framebuffers);
         }
 
         // Before we can draw on the output, we have to *acquire* an image from the swapchain. If
@@ -668,7 +699,7 @@ fn main() {
             [dimensions[0] as f32, dimensions[1] as f32],
             construct_model_matrix(1.0,
                                    &[0.0, 0.0, 2.0].into(),
-                                   &[iteration as f32 * 0.01, iteration as f32 * 0.01, 0.0].into()).into(),
+                                   &[iteration as f32 * 0.03, iteration as f32 * 0.01, 0.0].into()).into(),
             construct_view_matrix(&[(iteration as f32 * 0.02).cos(), 0.0, 0.0].into(),
                                   &[0.0, 0.0, 0.0].into()).into(),
             construct_perspective_projection_matrix(0.1, 1000.0, dimensions[0] as f32 / dimensions[1] as f32, std::f32::consts::FRAC_PI_2).into(),
@@ -702,7 +733,7 @@ fn main() {
             // is similar to the list of attachments when building the framebuffers, except that
             // only the attachments that use `load: Clear` appear in the list.
             .begin_render_pass(main_framebuffers.as_ref().unwrap()[image_num].clone(), false,
-                               vec![[0.0, 0.0, 1.0, 1.0].into()])
+                               vec![[0.0, 0.0, 1.0, 1.0].into(), 1.0.into()])
             .unwrap()
             // We are now inside the first subpass of the render pass. We add a draw command.
             //

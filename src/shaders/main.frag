@@ -13,7 +13,7 @@ layout(location = 0) out vec4 out_color;
 
 void main() {
     vec2 uv = gl_FragCoord.xy / dimensions;
-    out_color = vec4(1.0, 0.0, 0.0, 1.0)
-        + texture(screen_sampler, uv)
+    out_color = vec4(0.0, 0.0, 0.0, 1.0)
+        /* + texture(screen_sampler, uv) */
         + texture(tex, f_tex_coord);
 }

@@ -6,14 +6,17 @@ extern crate vulkano_win;
 extern crate winit;
 extern crate image;
 extern crate typenum;
+extern crate gltf;
+extern crate byteorder;
 
 #[macro_use]
 pub mod math;
+pub mod model;
 
 use std::sync::Arc;
 use std::ops::Deref;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
+use vulkano::command_buffer::{AutoCommandBuffer, AutoCommandBufferBuilder, DynamicState};
 use vulkano::device::{Device, DeviceExtensions, Queue};
 use vulkano::instance::{Instance, PhysicalDevice, QueueFamily, Features};
 use vulkano::sync::{FlushError, GpuFuture};
@@ -35,9 +38,22 @@ use winit::{EventsLoop, WindowBuilder, Window};
 use image::{ImageBuffer, Pixel};
 use math::matrix::*;
 use math::vector::*;
+use gltf::{Document, Gltf};
+use gltf::mesh::util::ReadIndices;
+use byteorder::{ReadBytesExt, WriteBytesExt, BigEndian, LittleEndian};
+use model::Model;
+
+pub type PipelineImpl<RPD: RenderPassDesc> = std::sync::Arc<vulkano::pipeline::GraphicsPipeline<vulkano::pipeline::vertex::SingleBufferDefinition<Position>, std::boxed::Box<(dyn vulkano::descriptor::PipelineLayoutAbstract + std::marker::Sync + std::marker::Send + 'static)>, std::sync::Arc<vulkano::framebuffer::RenderPass<RPD>>>>;
 
 #[derive(Copy, Clone)]
-struct MainVertex {
+pub struct Position {
+    position: [f32; 3],
+}
+
+impl_vertex!(Position, position);
+
+#[derive(Copy, Clone)]
+pub struct MainVertex {
     position: [f32; 3],
     tex_coord: [f32; 2],
 }
@@ -96,6 +112,45 @@ impl MainUBO {
         }
     }
 }
+
+// struct Model {
+//     pub document: Document,
+//     pub buffers: Vec<gltf::buffer::Data>,
+//     pub images: Vec<gltf::image::Data>,
+// }
+
+// impl Model {
+//     fn draw(&self, builder: AutoCommandBufferBuilder) -> AutoCommandBufferBuilder {
+//         for scene in self.document.scenes() {
+//             for node in scene.nodes() {
+//                 if let Some(mesh) = node.mesh() {
+//                     for primitive in mesh.primitives() {
+//                         let mut reader = primitive.reader(|buffer| Some(&*self.buffers[buffer.index()]));
+//                         let positions: Vec<[f32; 3]> = reader.read_positions()
+//                             .expect("The primitive is missing vertex positions.")
+//                             .collect();
+//                         let indices: Vec<u32> = match reader.read_indices().expect("The primitive is missing vertex indices.") {
+//                             ReadIndices::U8(iter) => iter.map(|x| x as u32).collect(),
+//                             ReadIndices::U16(iter) => iter.map(|x| x as u32).collect(),
+//                             ReadIndices::U32(iter) => iter.map(|x| x).collect(),
+//                         };
+
+//                         let vertices: Vec<MainVertex> = positions.into_iter()
+//                             .map(|position| MainVertex {
+//                                 position: position,
+//                                 tex_coord: [position[0], position[1]],
+//                             })
+//                         .collect();
+
+//                         builder.draw_indexed()
+//                     }
+//                 }
+//             }
+//         }
+
+//         builder
+//     }
+// }
 
 const SCREEN_DIMENSIONS: [u32; 2] = [3840, 1080];
 
@@ -470,6 +525,12 @@ fn main() {
      * some data that you are never going to modify you should use an ImmutableBuffer.
 */
 
+    let model = Model::import(device.clone(), "resources/minimal.gltf").unwrap();
+
+    // let obj = Obj::create("resources/chalet.obj");
+    // let texture = image::open("resources/chalet.jpg").unwrap().to_rgba();
+    let texture = image::open("resources/texture.jpg").unwrap().to_rgba();
+
     let main_vertices = [
         MainVertex { position: [-0.5, -0.5,  0.0], tex_coord: [0.0, 1.0] },
         MainVertex { position: [ 0.5, -0.5,  0.0], tex_coord: [1.0, 1.0] },
@@ -490,12 +551,24 @@ fn main() {
         6, 7, 4u16,
     ];
 
+    // let nom_obj::model::Interleaved { v_vt_vn, idx } = obj.objects[0].interleaved();
+
+    // let main_vertices: Vec<MainVertex> = v_vt_vn.iter()
+    //     .map(|&(v, vt, vn)| MainVertex { position: [v.0, v.1, v.2], tex_coord: [vt.0, 1.0 - vt.1] })
+    //     .collect();
+
+    // let main_indices: Vec<u32> = idx.iter()
+    //     .map(|x| *x as u32)
+    //     .collect();
+
     let (
         (main_vertex_staging_buffer, main_vertex_device_buffer),
         (main_index_staging_buffer, main_index_device_buffer),
     ) = create_vertex_index_buffers(
         &device,
         queue_family,
+        // main_vertices.into_iter(),
+        // main_indices.into_iter(),
         main_vertices.into_iter().cloned(),
         main_indices.into_iter().cloned(),
     );
@@ -532,7 +605,6 @@ fn main() {
     //     .build().unwrap()
     // );
 
-    let texture = image::open("resources/texture.jpg").unwrap().to_rgba();
     let (
         texture_staging_buffer,
         texture_device_image,
@@ -699,8 +771,8 @@ fn main() {
             [dimensions[0] as f32, dimensions[1] as f32],
             construct_model_matrix(1.0,
                                    &[0.0, 0.0, 2.0].into(),
-                                   &[iteration as f32 * 0.03, iteration as f32 * 0.01, 0.0].into()).into(),
-            construct_view_matrix(&[(iteration as f32 * 0.02).cos(), 0.0, 0.0].into(),
+                                   &[iteration as f32 * 0.00, iteration as f32 * 0.00, 0.0].into()).into(),
+            construct_view_matrix(&[(iteration as f32 * 0.00).cos(), 0.0, 0.0].into(),
                                   &[0.0, 0.0, 0.0].into()).into(),
             construct_perspective_projection_matrix(0.1, 1000.0, dimensions[0] as f32 / dimensions[1] as f32, std::f32::consts::FRAC_PI_2).into(),
             // construct_orthographic_projection_matrix(0.1, 1000.0, [dimensions[0] as f32 / dimensions[1] as f32, 1.0].into()).into(),

@@ -13,6 +13,7 @@ extern crate byteorder;
 pub mod math;
 pub mod model;
 
+use std::mem;
 use std::sync::Arc;
 use std::ops::Deref;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer};
@@ -91,6 +92,22 @@ mod main_vs {
     struct Dummy;
 }
 
+mod gltf_fs {
+    #[derive(VulkanoShader)]
+    #[ty = "fragment"]
+    #[path = "src/shaders/gltf.frag"]
+    #[allow(dead_code)]
+    struct Dummy;
+}
+
+mod gltf_vs {
+    #[derive(VulkanoShader)]
+    #[ty = "vertex"]
+    #[path = "src/shaders/gltf.vert"]
+    #[allow(dead_code)]
+    struct Dummy;
+}
+
 mod main_fs {
     #[derive(VulkanoShader)]
     #[ty = "fragment"]
@@ -113,44 +130,44 @@ impl MainUBO {
     }
 }
 
-// struct Model {
-//     pub document: Document,
-//     pub buffers: Vec<gltf::buffer::Data>,
-//     pub images: Vec<gltf::image::Data>,
-// }
+// TODO: Just for debugging purposes, remove later
+struct ModelTest {
+    pub document: Document,
+    pub buffers: Vec<gltf::buffer::Data>,
+    pub images: Vec<gltf::image::Data>,
+}
 
-// impl Model {
-//     fn draw(&self, builder: AutoCommandBufferBuilder) -> AutoCommandBufferBuilder {
-//         for scene in self.document.scenes() {
-//             for node in scene.nodes() {
-//                 if let Some(mesh) = node.mesh() {
-//                     for primitive in mesh.primitives() {
-//                         let mut reader = primitive.reader(|buffer| Some(&*self.buffers[buffer.index()]));
-//                         let positions: Vec<[f32; 3]> = reader.read_positions()
-//                             .expect("The primitive is missing vertex positions.")
-//                             .collect();
-//                         let indices: Vec<u32> = match reader.read_indices().expect("The primitive is missing vertex indices.") {
-//                             ReadIndices::U8(iter) => iter.map(|x| x as u32).collect(),
-//                             ReadIndices::U16(iter) => iter.map(|x| x as u32).collect(),
-//                             ReadIndices::U32(iter) => iter.map(|x| x).collect(),
-//                         };
+impl ModelTest {
+    fn draw(&self, builder: AutoCommandBufferBuilder) -> AutoCommandBufferBuilder {
+        for scene in self.document.scenes() {
+            for node in scene.nodes() {
+                if let Some(mesh) = node.mesh() {
+                    for primitive in mesh.primitives() {
+                        let mut reader = primitive.reader(|buffer| Some(&*self.buffers[buffer.index()]));
+                        let positions: Vec<[f32; 3]> = reader.read_positions()
+                            .expect("The primitive is missing vertex positions.")
+                            .collect();
+                        let indices: Vec<u32> = match reader.read_indices().expect("The primitive is missing vertex indices.") {
+                            ReadIndices::U8(iter) => iter.map(|x| x as u32).collect(),
+                            ReadIndices::U16(iter) => iter.map(|x| x as u32).collect(),
+                            ReadIndices::U32(iter) => iter.map(|x| x).collect(),
+                        };
 
-//                         let vertices: Vec<MainVertex> = positions.into_iter()
-//                             .map(|position| MainVertex {
-//                                 position: position,
-//                                 tex_coord: [position[0], position[1]],
-//                             })
-//                         .collect();
+                        println!("Indices: {:?}", indices);
+                        println!("Vertices: {:?}", positions);
+                        print!("Vertices (hex): ");
 
-//                         builder.draw_indexed()
-//                     }
-//                 }
-//             }
-//         }
+                        for vertex in positions.iter().cloned().map(|float| unsafe { mem::transmute::<_, [u32; 3]>(float.clone()) }) {
+                            print!("[{:x}, {:x}, {:x}], ", vertex[0], vertex[1], vertex[2]);
+                        }
+                    }
+                }
+            }
+        }
 
-//         builder
-//     }
-// }
+        builder
+    }
+}
 
 const SCREEN_DIMENSIONS: [u32; 2] = [3840, 1080];
 
@@ -229,9 +246,12 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
 //     unimplemented!()
 // }
 
-fn vulkan_main_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Arc<GraphicsPipeline<SingleBufferDefinition<MainVertex>, Box<dyn PipelineLayoutAbstract + Send + Sync>, Arc<RenderPass<impl RenderPassDesc>>>> {
-    let main_vs = main_vs::Shader::load(device.clone()).expect("Failed to create shader module.");
-    let main_fs = main_fs::Shader::load(device.clone()).expect("Failed to create shader module.");
+fn vulkan_main_pipeline<V>(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Arc<GraphicsPipeline<SingleBufferDefinition<V>, Box<dyn PipelineLayoutAbstract + Send + Sync>, Arc<RenderPass<impl RenderPassDesc>>>>
+        where V: vulkano::pipeline::vertex::Vertex + Clone + 'static {
+    let main_vs = gltf_vs::Shader::load(device.clone()).expect("Failed to create shader module.");
+    let main_fs = gltf_fs::Shader::load(device.clone()).expect("Failed to create shader module.");
+    // let main_vs = main_vs::Shader::load(device.clone()).expect("Failed to create shader module.");
+    // let main_fs = main_fs::Shader::load(device.clone()).expect("Failed to create shader module.");
 
     // A special GPU mode highly-optimized for rendering
     let render_pass = Arc::new(single_pass_renderpass! { device.clone(),
@@ -261,7 +281,7 @@ fn vulkan_main_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>
     Arc::new(GraphicsPipeline::start()
         // .with_pipeline_layout(device.clone(), pipeline_layout)
         // Specifies the vertex type
-        .vertex_input_single_buffer::<MainVertex>()
+        .vertex_input_single_buffer::<V>()
         .vertex_shader(main_vs.main_entry_point(), ())
         // Configures the builder so that we use one viewport, and that the state of this viewport
         // is dynamic. This makes it possible to change the viewport for each draw command. If the
@@ -523,7 +543,15 @@ fn main() {
      * structs being optimized for a certain kind of usage. For example, if you want to
      * continuously upload data you should use a CpuBufferPool, while on the other hand if you have
      * some data that you are never going to modify you should use an ImmutableBuffer.
-*/
+     */
+
+    // {
+    //     let model_test = {
+    //         let (document, buffers, images) = gltf::import("resources/minimal.gltf").unwrap();
+    //         ModelTest { document, buffers, images }
+    //     };
+    //     model_test.draw(AutoCommandBufferBuilder::new(device.clone(), queue_family).unwrap());
+    // }
 
     let model = Model::import(device.clone(), "resources/minimal.gltf").unwrap();
 
@@ -595,7 +623,7 @@ fn main() {
         screen_indices.into_iter().cloned(),
     );
 
-    let main_pipeline = vulkan_main_pipeline(&device, &swapchain);
+    let main_pipeline = vulkan_main_pipeline::<Position>(&device, &swapchain);
     let screen_pipeline = vulkan_screen_pipeline(&device, &swapchain);
 
     // let time_buffer = CpuBufferPool::<Time>::uniform_buffer(device.clone());
@@ -705,6 +733,8 @@ fn main() {
         previous_frame_end.cleanup_finished();
 
         if recreate_swapchain {
+            // println!("Recreating the swapchain.");
+
             dimensions = {
                 let (width, height) = window.window().get_inner_size().unwrap().into();
                 [width, height]
@@ -792,53 +822,82 @@ fn main() {
             .end_render_pass().unwrap()
             .build().unwrap();
 
-        let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
-            .update_buffer(main_ubo_staging_buffer.clone(), main_ubo.clone()).unwrap()
-            .copy_buffer(main_ubo_staging_buffer.clone(), main_ubo_device_buffer.clone()).unwrap()
-            .copy_buffer(main_vertex_staging_buffer.clone(), main_vertex_device_buffer.clone()).unwrap()
-            .copy_buffer(main_index_staging_buffer.clone(), main_index_device_buffer.clone()).unwrap()
-            // Before we can draw, we have to *enter a render pass*. There are two methods to do
-            // this: `draw_inline` and `draw_secondary`. The latter is a bit more advanced and is
-            // not covered here.
-            //
-            // The third parameter builds the list of values to clear the attachments with. The API
-            // is similar to the list of attachments when building the framebuffers, except that
-            // only the attachments that use `load: Clear` appear in the list.
-            .begin_render_pass(main_framebuffers.as_ref().unwrap()[image_num].clone(), false,
-                               vec![[0.0, 0.0, 1.0, 1.0].into(), 1.0.into()])
-            .unwrap()
-            // We are now inside the first subpass of the render pass. We add a draw command.
-            //
-            // The last two parameters contain the list of resources to pass to the shaders.
-            // Since we used an `EmptyPipeline` object, the objects have to be `()`.
-            .draw_indexed(main_pipeline.clone(),
-                  &DynamicState {
-                      line_width: None,
-                      // TODO: Find a way to do this without having to dynamically allocate a Vec every frame.
-                      viewports: Some(vec![Viewport {
-                          origin: [0.0, 0.0],
-                          dimensions: [dimensions[0] as f32, dimensions[1] as f32],
-                          depth_range: 0.0 .. 1.0,
-                      }]),
-                      scissors: None,
-                  },
-                  main_vertex_device_buffer.clone(),
-                  main_index_device_buffer.clone(),
-                  main_descriptor_set.clone(),
-                  ())
-            .unwrap()
-            // We leave the render pass by calling `draw_end`. Note that if we had multiple
-            // subpasses we could have called `next_inline` (or `next_secondary`) to jump to the
-            // next subpass.
-            .end_render_pass()
-            .unwrap()
-            // Finish building the command buffer by calling `build`.
-            .build().unwrap();
+        //let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
+        //    .update_buffer(main_ubo_staging_buffer.clone(), main_ubo.clone()).unwrap()
+        //    .copy_buffer(main_ubo_staging_buffer.clone(), main_ubo_device_buffer.clone()).unwrap()
+        //    .copy_buffer(main_vertex_staging_buffer.clone(), main_vertex_device_buffer.clone()).unwrap()
+        //    .copy_buffer(main_index_staging_buffer.clone(), main_index_device_buffer.clone()).unwrap()
+        //    // Before we can draw, we have to *enter a render pass*. There are two methods to do
+        //    // this: `draw_inline` and `draw_secondary`. The latter is a bit more advanced and is
+        //    // not covered here.
+        //    //
+        //    // The third parameter builds the list of values to clear the attachments with. The API
+        //    // is similar to the list of attachments when building the framebuffers, except that
+        //    // only the attachments that use `load: Clear` appear in the list.
+        //    .begin_render_pass(main_framebuffers.as_ref().unwrap()[image_num].clone(), false,
+        //                       vec![[0.0, 0.0, 1.0, 1.0].into(), 1.0.into()])
+        //    .unwrap()
+        //    // We are now inside the first subpass of the render pass. We add a draw command.
+        //    //
+        //    // The last two parameters contain the list of resources to pass to the shaders.
+        //    // Since we used an `EmptyPipeline` object, the objects have to be `()`.
+        //    .draw_indexed(main_pipeline.clone(),
+        //          &DynamicState {
+        //              line_width: None,
+        //              // TODO: Find a way to do this without having to dynamically allocate a Vec every frame.
+        //              viewports: Some(vec![Viewport {
+        //                  origin: [0.0, 0.0],
+        //                  dimensions: [dimensions[0] as f32, dimensions[1] as f32],
+        //                  depth_range: 0.0 .. 1.0,
+        //              }]),
+        //              scissors: None,
+        //          },
+        //          main_vertex_device_buffer.clone(),
+        //          main_index_device_buffer.clone(),
+        //          main_descriptor_set.clone(),
+        //          ())
+        //    .unwrap()
+        //    // We leave the render pass by calling `draw_end`. Note that if we had multiple
+        //    // subpasses we could have called `next_inline` (or `next_secondary`) to jump to the
+        //    // next subpass.
+        //    .end_render_pass()
+        //    .unwrap()
+        //    // Finish building the command buffer by calling `build`.
+        //    .build().unwrap();
+
+        let buffer_updates = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
+           .update_buffer(main_ubo_staging_buffer.clone(), main_ubo.clone()).unwrap()
+           .copy_buffer(main_ubo_staging_buffer.clone(), main_ubo_device_buffer.clone()).unwrap()
+           .build().unwrap();
+
+        let current_framebuffer: Arc<Framebuffer<_, _>> = main_framebuffers.as_ref().unwrap()[image_num].clone();
+        let clear_values = vec![[0.0, 0.0, 1.0, 1.0].into(), 1.0.into()];
+        // TODO: Recreate only when screen dimensions change
+        let dynamic_state = DynamicState {
+            line_width: None,
+            viewports: Some(vec![Viewport {
+                origin: [0.0, 0.0],
+                dimensions: [dimensions[0] as f32, dimensions[1] as f32],
+                depth_range: 0.0 .. 1.0,
+            }]),
+            scissors: None,
+        };
+        let command_buffer = model.draw_main_scene(
+            device.clone(),
+            queue_family,
+            current_framebuffer,
+            clear_values,
+            main_pipeline.clone(),
+            &dynamic_state,
+            main_descriptor_set.clone(),
+        ).unwrap();
 
         let result = previous_frame_end.join(acquire_future)
             .then_execute(queue.clone(), screen_command_buffer).unwrap()
-            .then_signal_fence()
+            .then_execute_same_queue(buffer_updates).unwrap()
+            .then_signal_semaphore()
             .then_execute_same_queue(command_buffer).unwrap()
+            .then_signal_fence()
 
             // The color output is now expected to contain our triangle. But in order to show it on
             // the screen, we have to *present* the image by calling `present`.

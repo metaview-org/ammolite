@@ -36,6 +36,7 @@ use gltf::accessor::Accessor as GltfAccessor;
 use gltf::Node;
 use gltf::scene::Transform;
 use gltf::Scene;
+use gltf::accessor::DataType;
 use failure::Error;
 use ::Position;
 use ::PipelineImpl;
@@ -210,8 +211,6 @@ fn get_node_matrices_impl(parent: Option<&Node>, node: &Node, results: &mut Vec<
         return;
     }
 
-    println!("Visited node #{}", node.index());
-
     results[node.index()] = Some(if let Some(parent) = parent {
         results[parent.index()].as_ref().unwrap() * Mat4(node.transform().matrix())
     } else {
@@ -358,11 +357,6 @@ impl Model {
                 let buffer_offset = positions_accessor.offset() + buffer_view.offset();
                 let buffer_bytes = positions_accessor.size() * positions_accessor.count();
 
-                // println!("positions:");
-                // println!("\tindex: {}", buffer_index);
-                // println!("\toffset: {}", buffer_offset);
-                // println!("\tbytes: {}", buffer_bytes);
-
                 let vertex_buffer = self.device_buffers[buffer_index].clone();
                 let vertex_slice = BufferSlice::from_typed_buffer_access(vertex_buffer)
                     .slice(buffer_offset..(buffer_offset + buffer_bytes))
@@ -371,43 +365,49 @@ impl Model {
                 unsafe { mem::transmute(vertex_slice) }
             };
 
-            let index_slice: Option<BufferSlice<_, _>> = indices_accessor.map(|indices_accessor| {
-                let buffer_view = indices_accessor.view();
-                let buffer_index = buffer_view.buffer().index();
-                let buffer_offset = indices_accessor.offset() + buffer_view.offset();
-                let buffer_bytes = indices_accessor.size() * indices_accessor.count();
+            if let Some(indices_accessor) = indices_accessor {
+                macro_rules! draw_indexed {
+                    ($index_type:ty; $command_buffer:ident, $context:ident, $vertex_slice:ident, $indices_accessor:ident, $sets:ident) => {
+                        let index_slice: BufferSlice<_, _> = {
+                            let buffer_view = $indices_accessor.view();
+                            let buffer_index = buffer_view.buffer().index();
+                            let buffer_offset = $indices_accessor.offset() + buffer_view.offset();
+                            let buffer_bytes = $indices_accessor.size() * $indices_accessor.count();
 
-                // println!("indices:");
-                // println!("\tindex: {}", buffer_index);
-                // println!("\toffset: {}", buffer_offset);
-                // println!("\tbytes: {}", buffer_bytes);
+                            let index_buffer = self.device_buffers[buffer_index].clone();
+                            let index_slice = BufferSlice::from_typed_buffer_access(index_buffer)
+                                .slice(buffer_offset..(buffer_offset + buffer_bytes))
+                                .unwrap();
 
-                let index_buffer = self.device_buffers[buffer_index].clone();
-                let index_slice = BufferSlice::from_typed_buffer_access(index_buffer)
-                    .slice(buffer_offset..(buffer_offset + buffer_bytes))
-                    .unwrap();
+                            unsafe { mem::transmute::<_, BufferSlice<[$index_type], Arc<CpuAccessibleBuffer<[u8]>>>>(index_slice) }
+                        };
 
-                unsafe { mem::transmute::<_, BufferSlice<[u16], Arc<CpuAccessibleBuffer<[u8]>>>>(index_slice) }
-            });
+                        // unsafe {
+                        //     let index_slice: BufferSlicePublic<[u16], Arc<CpuAccessibleBuffer<[u8]>>> = mem::transmute(index_slice);
+                        //     println!("index_slice: {:?}", index_slice);
+                        // }
 
-            // unsafe {
-            //     let index_slice: BufferSlicePublic<[u16], Arc<CpuAccessibleBuffer<[u8]>>> = mem::transmute(index_slice);
-            //     println!("index_slice: {:?}", index_slice);
-            // }
+                        $command_buffer = $command_buffer.draw_indexed(
+                            $context.pipeline.clone(),
+                            $context.dynamic,
+                            $vertex_slice,
+                            index_slice,
+                            $sets.clone(),
+                            () /* push_constants */).unwrap();
+                    }
+                }
 
-            // unsafe {
-            //     let vertex_slice: BufferSlicePublic<[u16], Arc<CpuAccessibleBuffer<[u8]>>> = mem::transmute(vertex_slice);
-            //     println!("vertex_slice: {:?}", vertex_slice);
-            // }
-
-            if let Some(index_slice) = index_slice {
-                command_buffer = command_buffer.draw_indexed(
-                    context.pipeline.clone(),
-                    context.dynamic,
-                    vertex_slice,
-                    index_slice,
-                    sets.clone(),
-                    () /* push_constants */).unwrap();
+                match indices_accessor.data_type() {
+                    DataType::U16 => {
+                        draw_indexed!(u16; command_buffer, context, vertex_slice, indices_accessor, sets);
+                    },
+                    DataType::U32 => {
+                        draw_indexed!(u32; command_buffer, context, vertex_slice, indices_accessor, sets);
+                    },
+                    _ => {
+                        panic!("Index type not supported.");
+                    }
+                }
             } else {
                 command_buffer = command_buffer.draw(
                     context.pipeline.clone(),

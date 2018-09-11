@@ -2,6 +2,8 @@
 extern crate vulkano;
 #[macro_use]
 extern crate vulkano_shader_derive;
+#[macro_use]
+extern crate failure;
 extern crate vulkano_win;
 extern crate winit;
 extern crate image;
@@ -43,8 +45,10 @@ use gltf::{Document, Gltf};
 use gltf::mesh::util::ReadIndices;
 use byteorder::{ReadBytesExt, WriteBytesExt, BigEndian, LittleEndian};
 use model::Model;
+use model::InitializationDrawContext;
 
-pub type PipelineImpl<RPD: RenderPassDesc> = std::sync::Arc<vulkano::pipeline::GraphicsPipeline<vulkano::pipeline::vertex::SingleBufferDefinition<Position>, std::boxed::Box<(dyn vulkano::descriptor::PipelineLayoutAbstract + std::marker::Sync + std::marker::Send + 'static)>, std::sync::Arc<vulkano::framebuffer::RenderPass<RPD>>>>;
+pub type MainDescriptorSet<RPD: RenderPassDesc> = std::sync::Arc<vulkano::descriptor::descriptor_set::PersistentDescriptorSet<std::sync::Arc<vulkano::pipeline::GraphicsPipeline<vulkano::pipeline::vertex::SingleBufferDefinition<Position>, std::boxed::Box<dyn vulkano::descriptor::PipelineLayoutAbstract + std::marker::Sync + std::marker::Send>, std::sync::Arc<vulkano::framebuffer::RenderPass<RPD>>>>, ((((((), vulkano::descriptor::descriptor_set::PersistentDescriptorSetBuf<std::sync::Arc<vulkano::buffer::DeviceLocalBuffer<gltf_fs::ty::SceneUBO>>>), vulkano::descriptor::descriptor_set::PersistentDescriptorSetImg<std::sync::Arc<vulkano::image::AttachmentImage>>), vulkano::descriptor::descriptor_set::PersistentDescriptorSetSampler), vulkano::descriptor::descriptor_set::PersistentDescriptorSetImg<std::sync::Arc<vulkano::image::ImmutableImage<vulkano::format::R8G8B8A8Unorm>>>), vulkano::descriptor::descriptor_set::PersistentDescriptorSetSampler)>>;
+pub type PipelineImpl<RPD: RenderPassDesc> = Arc<GraphicsPipeline<SingleBufferDefinition<Position>, Box<(dyn PipelineLayoutAbstract + Sync + Send + 'static)>, Arc<RenderPass<RPD>>>>;
 
 #[derive(Copy, Clone)]
 pub struct Position {
@@ -84,14 +88,6 @@ mod screen_fs {
     struct Dummy;
 }
 
-mod main_vs {
-    #[derive(VulkanoShader)]
-    #[ty = "vertex"]
-    #[path = "src/shaders/main.vert"]
-    #[allow(dead_code)]
-    struct Dummy;
-}
-
 mod gltf_fs {
     #[derive(VulkanoShader)]
     #[ty = "fragment"]
@@ -108,24 +104,24 @@ mod gltf_vs {
     struct Dummy;
 }
 
-mod main_fs {
-    #[derive(VulkanoShader)]
-    #[ty = "fragment"]
-    #[path = "src/shaders/main.frag"]
-    #[allow(dead_code)]
-    struct Dummy;
+use gltf_fs::ty::*;
+
+impl SceneUBO {
+    pub fn new(dimensions: Vec2, model: Mat4, view: Mat4, projection: Mat4) -> SceneUBO {
+        SceneUBO {
+            dimensions: dimensions.0,
+            _dummy0: Default::default(),
+            model: model.0,
+            view: view.0,
+            projection: projection.0,
+        }
+    }
 }
 
-use main_fs::ty::*;
-
-impl MainUBO {
-    pub fn new(dimensions: [f32; 2], model: [[f32; 4]; 4], view: [[f32; 4]; 4], projection: [[f32; 4]; 4]) -> MainUBO {
-        MainUBO {
-            dimensions,
-            _dummy0: Default::default(),
-            model,
-            view,
-            projection,
+impl NodeUBO {
+    pub fn new(matrix: Mat4) -> NodeUBO {
+        NodeUBO {
+            matrix: matrix.0,
         }
     }
 }
@@ -246,14 +242,14 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
 //     unimplemented!()
 // }
 
-fn vulkan_main_pipeline<V>(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Arc<GraphicsPipeline<SingleBufferDefinition<V>, Box<dyn PipelineLayoutAbstract + Send + Sync>, Arc<RenderPass<impl RenderPassDesc>>>>
-        where V: vulkano::pipeline::vertex::Vertex + Clone + 'static {
+fn vulkan_main_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> PipelineImpl<impl RenderPassDesc> {
     let main_vs = gltf_vs::Shader::load(device.clone()).expect("Failed to create shader module.");
     let main_fs = gltf_fs::Shader::load(device.clone()).expect("Failed to create shader module.");
     // let main_vs = main_vs::Shader::load(device.clone()).expect("Failed to create shader module.");
     // let main_fs = main_fs::Shader::load(device.clone()).expect("Failed to create shader module.");
 
     // A special GPU mode highly-optimized for rendering
+    // This really shouldn't have to be Boxed, but making the type system happy is a struggle.
     let render_pass = Arc::new(single_pass_renderpass! { device.clone(),
         attachments: {
             color: {
@@ -281,7 +277,7 @@ fn vulkan_main_pipeline<V>(device: &Arc<Device>, swapchain: &Arc<Swapchain<Windo
     Arc::new(GraphicsPipeline::start()
         // .with_pipeline_layout(device.clone(), pipeline_layout)
         // Specifies the vertex type
-        .vertex_input_single_buffer::<V>()
+        .vertex_input_single_buffer::<Position>()
         .vertex_shader(main_vs.main_entry_point(), ())
         // Configures the builder so that we use one viewport, and that the state of this viewport
         // is dynamic. This makes it possible to change the viewport for each draw command. If the
@@ -553,8 +549,6 @@ fn main() {
     //     model_test.draw(AutoCommandBufferBuilder::new(device.clone(), queue_family).unwrap());
     // }
 
-    let model = Model::import(device.clone(), "resources/minimal.gltf").unwrap();
-
     // let obj = Obj::create("resources/chalet.obj");
     // let texture = image::open("resources/chalet.jpg").unwrap().to_rgba();
     let texture = image::open("resources/texture.jpg").unwrap().to_rgba();
@@ -623,8 +617,15 @@ fn main() {
         screen_indices.into_iter().cloned(),
     );
 
-    let main_pipeline = vulkan_main_pipeline::<Position>(&device, &swapchain);
+    let main_pipeline = vulkan_main_pipeline(&device, &swapchain);
     let screen_pipeline = vulkan_screen_pipeline(&device, &swapchain);
+
+    let model_path = std::env::args().nth(1).unwrap_or_else(|| {
+        eprintln!("No model path provided.");
+        std::process::exit(1);
+    });
+    let (model, model_initialization_future) = Model::import(
+        device.clone(), queue.clone(), main_pipeline.clone(), model_path).unwrap();
 
     // let time_buffer = CpuBufferPool::<Time>::uniform_buffer(device.clone());
 
@@ -639,11 +640,11 @@ fn main() {
         texture_device_image_initialization,
         texture_device_sampler,
     ) = create_staging_buffer_image(&device, queue_family, &texture);
-    let mut main_ubo = MainUBO::new(
-        [dimensions[0] as f32, dimensions[1] as f32],
-        Mat4::identity().into(),
-        Mat4::identity().into(),
-        Mat4::identity().into(),
+    let mut main_ubo = SceneUBO::new(
+        Vec2([dimensions[0] as f32, dimensions[1] as f32]),
+        Mat4::identity(),
+        Mat4::identity(),
+        Mat4::identity(),
     );
     let (main_ubo_staging_buffer, main_ubo_device_buffer) = create_staging_buffers_data(
         &device,
@@ -708,7 +709,7 @@ fn main() {
     //
     // Destroying the `GpuFuture` blocks until the GPU is finished executing it. In order to avoid
     // that, we store the submission of the previous frame here.
-    let mut previous_frame_end: Box<dyn GpuFuture> = Box::new(vulkano::sync::now(device.clone()));
+    let mut previous_frame_end: Box<dyn GpuFuture> = Box::new(model_initialization_future);
 
     let init_command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
         .copy_buffer_to_image(texture_staging_buffer.clone(), texture_device_image_initialization).unwrap()
@@ -797,15 +798,15 @@ fn main() {
             Err(err) => panic!("{:?}", err)
         };
 
-        let main_ubo = MainUBO::new(
-            [dimensions[0] as f32, dimensions[1] as f32],
+        main_ubo = SceneUBO::new(
+            Vec2([dimensions[0] as f32, dimensions[1] as f32]),
             construct_model_matrix(1.0,
                                    &[0.0, 0.0, 2.0].into(),
-                                   &[iteration as f32 * 0.00, iteration as f32 * 0.00, 0.0].into()).into(),
-            construct_view_matrix(&[(iteration as f32 * 0.00).cos(), 0.0, 0.0].into(),
-                                  &[0.0, 0.0, 0.0].into()).into(),
-            construct_perspective_projection_matrix(0.1, 1000.0, dimensions[0] as f32 / dimensions[1] as f32, std::f32::consts::FRAC_PI_2).into(),
-            // construct_orthographic_projection_matrix(0.1, 1000.0, [dimensions[0] as f32 / dimensions[1] as f32, 1.0].into()).into(),
+                                   &[iteration as f32 * 0.01, iteration as f32 * 0.02, 0.0].into()),
+            construct_view_matrix(&[(iteration as f32 * 0.01).cos(), 0.0, 0.0].into(),
+                                  &[0.0, 0.0, 0.0].into()),
+            construct_perspective_projection_matrix(0.1, 1000.0, dimensions[0] as f32 / dimensions[1] as f32, std::f32::consts::FRAC_PI_2),
+            // construct_orthographic_projection_matrix(0.1, 1000.0, [dimensions[0] as f32 / dimensions[1] as f32, 1.0].into()),
         );
 
         let screen_command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
@@ -871,7 +872,7 @@ fn main() {
            .build().unwrap();
 
         let current_framebuffer: Arc<Framebuffer<_, _>> = main_framebuffers.as_ref().unwrap()[image_num].clone();
-        let clear_values = vec![[0.0, 0.0, 1.0, 1.0].into(), 1.0.into()];
+        let clear_values = vec![[0.0, 0.0, 0.0, 1.0].into(), 1.0.into()];
         // TODO: Recreate only when screen dimensions change
         let dynamic_state = DynamicState {
             line_width: None,
@@ -882,14 +883,17 @@ fn main() {
             }]),
             scissors: None,
         };
-        let command_buffer = model.draw_main_scene(
-            device.clone(),
-            queue_family,
-            current_framebuffer,
-            clear_values,
-            main_pipeline.clone(),
-            &dynamic_state,
-            main_descriptor_set.clone(),
+        let command_buffer = model.draw_scene(
+            InitializationDrawContext {
+                device: device.clone(),
+                queue_family,
+                framebuffer: current_framebuffer,
+                clear_values,
+                pipeline: main_pipeline.clone(),
+                dynamic: &dynamic_state,
+                main_descriptor_set: main_descriptor_set.clone(),
+            },
+            0,
         ).unwrap();
 
         let result = previous_frame_end.join(acquire_future)

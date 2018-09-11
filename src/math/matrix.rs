@@ -189,25 +189,6 @@ macro_rules! impl_mat {
                 Ok(())
             }
         }
-
-        #[allow(unused)]
-        macro_rules! $macro_name {
-            {
-                $component_array:expr
-            } => {{
-                let components: [f32; $dims * $dims] = $component_array;
-                let mut result = $ty_name::zero();
-
-                for (index, component) in components.into_iter().enumerate() {
-                    let column = index % $dims;
-                    let row = index / $dims;
-
-                    result.0[column][row] = *component;
-                }
-
-                result
-            }};
-        }
     }
 }
 

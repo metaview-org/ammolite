@@ -1,11 +1,13 @@
 use std::ops::{Add, Deref, DerefMut, Sub, Neg};
 use std::fmt::{Debug, Formatter, Error};
 use typenum::{Unsigned, U1, U2, U3, U4};
+use math::matrix::Mat4;
 
 pub trait Vector: Neg + Sized + Clone + Debug + PartialEq {
     type Dimensions: Unsigned + Add<U1> + Sub<U1>;
 
     fn zero() -> Self;
+    fn dot(&self, other: &Self) -> f32;
 }
 
 pub trait Projected: Vector {
@@ -20,6 +22,10 @@ pub trait Homogeneous: Vector {
     fn into_projected(&self) -> Self::ProjectedVector;
 }
 
+pub trait UnitQuaternion {
+    fn to_matrix(&self) -> Option<Mat4>;
+}
+
 macro_rules! impl_vec {
     ($ty_name:ident, $dims:expr, $dims_ty:ty) => {
         #[derive(Clone, PartialEq)]
@@ -30,6 +36,16 @@ macro_rules! impl_vec {
 
             fn zero() -> Self {
                 $ty_name([0.0; $dims])
+            }
+
+            fn dot(&self, other: &Self) -> f32 {
+                let mut result = 0.0;
+
+                for (a, b) in self.iter().zip(other.iter()) {
+                    result += a * b;
+                }
+
+                result
             }
         }
 
@@ -139,3 +155,20 @@ impl_vec!(Vec4, 4, U4);
 impl_projected_homogeneous!(Vec1, Vec2);
 impl_projected_homogeneous!(Vec2, Vec3);
 impl_projected_homogeneous!(Vec3, Vec4);
+
+impl UnitQuaternion for Vec4 {
+    fn to_matrix(&self) -> Option<Mat4> {
+        // Not actually a unit quaternion? Bail.
+        if self.dot(&self) != 1.0 {
+            return None;
+        }
+
+        let q = self;
+
+        Some(mat4!([1.0-2.0*(q[2]*q[2]+q[3]*q[3]),     2.0*(q[1]*q[2]-q[0]*q[3]),     2.0*(q[0]*q[2]+q[1]*q[3]), 0.0,
+                        2.0*(q[1]*q[2]+q[0]*q[3]), 1.0-2.0*(q[1]*q[1]+q[3]*q[3]),     2.0*(q[2]*q[3]-q[0]*q[1]), 0.0,
+                        2.0*(q[1]*q[3]-q[0]*q[2]),     2.0*(q[0]*q[1]+q[2]*q[3]), 1.0-2.0*(q[1]*q[1]+q[2]*q[2]), 0.0,
+                                              0.0,                           0.0,                           0.0, 1.0]))
+    }
+}
+

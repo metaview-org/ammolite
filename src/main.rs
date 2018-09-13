@@ -18,9 +18,11 @@ pub mod model;
 use std::mem;
 use std::sync::Arc;
 use std::ops::Deref;
+use std::ffi::CString;
+use vulkano::instance::RawInstanceExtensions;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer};
 use vulkano::command_buffer::{AutoCommandBuffer, AutoCommandBufferBuilder, DynamicState};
-use vulkano::device::{Device, DeviceExtensions, Queue};
+use vulkano::device::{Device, RawDeviceExtensions, DeviceExtensions, Queue};
 use vulkano::instance::{Instance, PhysicalDevice, QueueFamily, Features};
 use vulkano::sync::{FlushError, GpuFuture};
 use vulkano::format::{self, Format, FormatTy};
@@ -126,6 +128,16 @@ impl NodeUBO {
     }
 }
 
+impl MaterialUBO {
+    pub fn new(base_color_factor: Vec4, metallic_factor: f32, roughness_factor: f32) -> Self {
+        MaterialUBO {
+            base_color_factor: base_color_factor.0,
+            metallic_factor,
+            roughness_factor,
+        }
+    }
+}
+
 // TODO: Just for debugging purposes, remove later
 struct ModelTest {
     pub document: Document,
@@ -187,8 +199,8 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
     // }
 
     let queue_family = physical_device.queue_families()
-        .find(|&queue| {
-            queue.supports_graphics() && window.is_supported(queue).unwrap_or(false)
+        .find(|&queue_family| {
+            queue_family.supports_graphics() && window.is_supported(queue_family).unwrap_or(false)
         })
         .expect("Couldn't find a graphical queue family.");
 
@@ -198,14 +210,18 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
 
     // Create a device with a single queue
     let (device, mut queues) = {
-        let device_extensions = DeviceExtensions {
+        let safe_device_extensions = DeviceExtensions {
             khr_swapchain: true,
+            // ext_debug_marker: true,
             .. DeviceExtensions::none()
         };
+        let raw_device_extensions = [/*CString::new("VK_EXT_debug_utils").unwrap()*/];
+        let device_extensions = RawDeviceExtensions::new(raw_device_extensions.into_iter().cloned())
+            .union(&(&safe_device_extensions).into());
 
         Device::new(physical_device,
                     &Features::none(),
-                    &device_extensions,
+                    device_extensions,
                     // A list of queues to use specified by an iterator of (QueueFamily, priority).
                     // In a real-life application, we would probably use at least a graphics queue
                     // and a transfers queue to handle data transfers in parallel. In this example
@@ -525,8 +541,11 @@ fn main() {
 */
 
     // TODO: Explore method arguments
-    let extensions = vulkano_win::required_extensions();
-    let instance = Instance::new(None, &extensions, None)
+    let win_extensions = vulkano_win::required_extensions();
+    let raw_extensions = [/*CString::new("VK_EXT_debug_marker").unwrap()*/];
+    let extensions = RawInstanceExtensions::new(raw_extensions.into_iter().cloned())
+        .union(&(&win_extensions).into());
+    let instance = Instance::new(None, extensions, None)
         .expect("Failed to create a Vulkan instance.");
 
     let (mut events_loop, window, mut dimensions, device, queue_family, queue, mut swapchain, mut images) = vulkan_initialize(&instance);
@@ -624,8 +643,13 @@ fn main() {
         eprintln!("No model path provided.");
         std::process::exit(1);
     });
-    let (model, model_initialization_future) = Model::import(
-        device.clone(), queue.clone(), main_pipeline.clone(), model_path).unwrap();
+    let mut model = Model::import(
+        device.clone(),
+        queue.clone(),
+        [queue_family].into_iter().cloned(),
+        main_pipeline.clone(),
+        model_path
+    ).unwrap();
 
     // let time_buffer = CpuBufferPool::<Time>::uniform_buffer(device.clone());
 
@@ -709,11 +733,12 @@ fn main() {
     //
     // Destroying the `GpuFuture` blocks until the GPU is finished executing it. In order to avoid
     // that, we store the submission of the previous frame here.
-    let mut previous_frame_end: Box<dyn GpuFuture> = Box::new(model_initialization_future);
+    let mut previous_frame_end: Box<dyn GpuFuture> = Box::new(vulkano::sync::now(device.clone()));
 
-    let init_command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
-        .copy_buffer_to_image(texture_staging_buffer.clone(), texture_device_image_initialization).unwrap()
-        .build().unwrap();
+    let mut init_command_buffer_builder = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
+        .copy_buffer_to_image(texture_staging_buffer.clone(), texture_device_image_initialization).unwrap();
+    init_command_buffer_builder = model.initialize(device.clone(), init_command_buffer_builder).unwrap();
+    let init_command_buffer = init_command_buffer_builder.build().unwrap();
     // let standard_command_pool = Device::standard_command_pool(&device, queue_family);
     // let init_unsafe_command_buffer = UnsafeCommandBufferBuilder::new(&standard_command_pool,
     //                                                                  Kind::primary(),

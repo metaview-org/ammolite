@@ -6,6 +6,7 @@ use std::ops::Deref;
 use std::mem;
 use std::fmt;
 use std::marker::PhantomData;
+use rayon::prelude::*;
 use vulkano;
 use vulkano::sync::GpuFuture;
 use vulkano::command_buffer::{DynamicState, AutoCommandBuffer, AutoCommandBufferBuilder};
@@ -33,7 +34,8 @@ use vulkano::descriptor::descriptor::DescriptorDesc;
 use vulkano::buffer::immutable::ImmutableBuffer;
 use vulkano::descriptor::descriptor_set::DescriptorSet;
 use vulkano::sampler::Sampler;
-use vulkano::image::ImmutableImage;
+use vulkano::image::immutable::ImmutableImage;
+use vulkano::image::immutable::ImmutableImageInitialization;
 use vulkano::image::Dimensions;
 use vulkano::image::ImageUsage;
 use vulkano::image::ImageLayout;
@@ -49,6 +51,7 @@ use gltf::scene::Transform;
 use gltf::Scene;
 use gltf::accessor::DataType;
 use gltf::image::Format as GltfFormat;
+use generic_array::{GenericArray, ArrayLength};
 use failure::Error;
 use ::Position;
 use ::PipelineImpl;
@@ -57,6 +60,9 @@ use ::MaterialUBO;
 use ::MainDescriptorSet;
 use math::matrix::Mat4;
 use math::matrix::Matrix;
+use iter::ArrayIterator;
+use iter::ForcedExactSizeIterator;
+use vertex::{GltfVertexPosition, GltfVertexTexCoord, GltfVertexBuffers};
 use self::error::*;
 
 // #[derive(Clone)]
@@ -210,16 +216,23 @@ pub struct DrawContext<'a, RPD>
     main_descriptor_set: MainDescriptorSet<RPD>,
 }
 
+// struct FormatConversionIterator<I, O> {
+//     data: Vec<u8>,
+//     input_chunk_len: usize,
+//     conversion_fn: Box<dyn for<'a> Fn(&'a I) -> O>
+// }
+
 pub enum InitializationTask {
     Buffer {
         index: usize,
-        data: gltf::buffer::Data,
+        data: Vec<u8>,
         initialization_buffer: Box<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>,
     },
     Image {
         index: usize,
-        data: gltf::image::Data,
+        data: Vec<u8>,
         device_image: Box<dyn ImageAccess + Send + Sync>,
+        texel_conversion: Option<Box<dyn for<'a> Fn(&'a [u8]) -> Box<ExactSizeIterator<Item=u8> + 'a>>>,
     },
     NodeDescriptorSet {
         index: usize,
@@ -253,29 +266,33 @@ impl fmt::Debug for InitializationTask {
 }
 
 impl InitializationTask {
-    fn initialize(self, device: Arc<Device>, command_buffer_builder: AutoCommandBufferBuilder) -> Result<AutoCommandBufferBuilder, Error> {
+    fn initialize(self, device: &Arc<Device>, command_buffer_builder: AutoCommandBufferBuilder) -> Result<AutoCommandBufferBuilder, Error> {
         match self {
             InitializationTask::Buffer { data, initialization_buffer, .. } => {
                 let staging_buffer: Arc<CpuAccessibleBuffer<[u8]>> = CpuAccessibleBuffer::from_iter(
-                    device,
+                    device.clone(),
                     BufferUsage::all(),
                     data.iter().cloned(), // FIXME: Single memcpy call, do not iterate
                 )?;
 
                 Ok(command_buffer_builder.copy_buffer(staging_buffer, initialization_buffer)?)
             },
-            InitializationTask::Image { data, device_image, .. } => {
+            InitializationTask::Image { data, device_image, texel_conversion, .. } => {
                 let staging_buffer = CpuAccessibleBuffer::from_iter(
-                    device,
+                    device.clone(),
                     BufferUsage::transfer_source(),
-                    data.pixels.iter().cloned(), // FIXME: Single memcpy call, do not iterate
+                    if let Some(texel_conversion) = texel_conversion {
+                        (texel_conversion)(&data[..])
+                    } else {
+                        Box::new(data.iter().cloned()) // FIXME: Single memcpy call, do not iterate
+                    },
                 )?;
 
                 Ok(command_buffer_builder.copy_buffer_to_image(staging_buffer, device_image)?)
             },
             InitializationTask::NodeDescriptorSet { data, initialization_buffer, .. } => {
                 let staging_buffer: Arc<CpuAccessibleBuffer<NodeUBO>> = CpuAccessibleBuffer::from_data(
-                    device,
+                    device.clone(),
                     BufferUsage::all(),
                     data,
                 )?;
@@ -284,7 +301,7 @@ impl InitializationTask {
             },
             InitializationTask::MaterialDescriptorSet { data, initialization_buffer, .. } => {
                 let staging_buffer: Arc<CpuAccessibleBuffer<MaterialUBO>> = CpuAccessibleBuffer::from_data(
-                    device,
+                    device.clone(),
                     BufferUsage::all(),
                     data,
                 )?;
@@ -295,6 +312,78 @@ impl InitializationTask {
     }
 }
 
+pub trait UninitializedResource<T> {
+    fn initialize_resource(
+        self,
+        device: &Arc<Device>,
+        command_buffer_builder: AutoCommandBufferBuilder
+    ) -> Result<(AutoCommandBufferBuilder, T), Error>;
+}
+
+pub struct SimpleUninitializedResource<T> {
+    output: T,
+    tasks: Vec<InitializationTask>,
+}
+
+impl<T> SimpleUninitializedResource<T> {
+    pub fn new(output: T, tasks: Vec<InitializationTask>) -> Self {
+        Self {
+            output,
+            tasks,
+        }
+    }
+}
+
+impl<T> UninitializedResource<T> for SimpleUninitializedResource<T> {
+    fn initialize_resource(self, device: &Arc<Device>, mut command_buffer_builder: AutoCommandBufferBuilder) -> Result<(AutoCommandBufferBuilder, T), Error> {
+        for initialization_task in self.tasks.into_iter() {
+            command_buffer_builder = initialization_task.initialize(device, command_buffer_builder)?;
+        }
+
+        Ok((command_buffer_builder, self.output))
+    }
+}
+
+pub struct HelperResources {
+    pub empty_image: Arc<dyn ImageViewAccess + Send + Sync>,
+}
+
+impl HelperResources {
+    pub fn new<'a, I>(device: &Arc<Device>, queue_families: I)
+            -> Result<SimpleUninitializedResource<HelperResources>, Error>
+            where I: IntoIterator<Item = QueueFamily<'a>> {
+        let (device_image, image_initialization) = ImmutableImage::uninitialized(
+            device.clone(),
+            Dimensions::Dim2d {
+                width: 1,
+                height: 1,
+            },
+            R8Uint,
+            MipmapsCount::One,
+            ImageUsage {
+                transfer_destination: true,
+                sampled: true,
+                ..ImageUsage::none()
+            },
+            ImageLayout::ShaderReadOnlyOptimal,
+            queue_families,
+        )?;
+
+        let tasks = vec![InitializationTask::Image {
+            index: 0,
+            data: vec![0],
+            device_image: Box::new(image_initialization),
+            texel_conversion: None,
+        }];
+
+        let output = HelperResources {
+            empty_image: device_image,
+        };
+
+        Ok(SimpleUninitializedResource::new(output, tasks))
+    }
+}
+
 pub struct Model {
     document: Document,
     device_buffers: Vec<Arc<ImmutableBuffer<[u8]>>>,
@@ -302,7 +391,6 @@ pub struct Model {
     // Note: Do not ever try to express the descriptor set explicitly.
     node_descriptor_sets: Vec<Arc<dyn DescriptorSet + Send + Sync>>,
     material_descriptor_sets: Vec<Arc<dyn DescriptorSet + Send + Sync>>,
-    initialization_tasks: Option<Vec<InitializationTask>>,
 }
 
 fn get_node_matrices_impl(parent: Option<&Node>, node: &Node, results: &mut Vec<Option<Mat4>>) {
@@ -339,8 +427,8 @@ fn get_node_matrices(document: &Document) -> Vec<Mat4> {
 }
 
 impl Model {
-    pub fn import<'a, I, S>(device: Arc<Device>, queue: Arc<Queue>, queue_families: I, pipeline: PipelineImpl<impl RenderPassDesc + Send + Sync + 'static>, path: S)
-            -> Result<Model, Error>
+    pub fn import<'a, I, S>(device: &Arc<Device>, queue_families: I, pipeline: PipelineImpl<impl RenderPassDesc + Send + Sync + 'static>, helper_resources: &HelperResources, path: S)
+            -> Result<SimpleUninitializedResource<Model>, Error>
             where I: IntoIterator<Item = QueueFamily<'a>> + Clone,
                   S: AsRef<Path> {
         let (document, buffer_data_array, image_data_array) = gltf::import(path)?;
@@ -349,7 +437,7 @@ impl Model {
         );
         let mut device_buffers: Vec<Arc<ImmutableBuffer<[u8]>>> = Vec::with_capacity(buffer_data_array.len());
 
-        for (index, buffer_data) in buffer_data_array.into_iter().enumerate() {
+        for (index, gltf::buffer::Data(buffer_data)) in buffer_data_array.into_iter().enumerate() {
             let (device_buffer, buffer_initialization) = unsafe {
                 ImmutableBuffer::raw(
                     device.clone(),
@@ -377,16 +465,23 @@ impl Model {
         let mut device_images: Vec<Arc<dyn ImageViewAccess + Send + Sync>> = Vec::with_capacity(document.textures().len());
 
         for (index, image_data) in image_data_array.into_iter().enumerate() {
-            macro_rules! push_image_with_format {
-                ($vk_format:expr) => {{
+            let gltf::image::Data {
+                pixels,
+                format,
+                width,
+                height,
+            } = image_data;
+
+            macro_rules! push_image_with_format_impl {
+                ([$($vk_format:tt)+], $push_init_tasks:expr) => {{
                     let (device_image, image_initialization) = ImmutableImage::uninitialized(
                         device.clone(),
                         Dimensions::Dim2d {
-                            width: image_data.width,
-                            height: image_data.height,
+                            width,
+                            height,
                         },
-                        $vk_format,
-                        MipmapsCount::Log2,
+                        $($vk_format)+,
+                        MipmapsCount::One, // TODO: Figure out how mipmapping works
                         ImageUsage {
                             transfer_destination: true,
                             sampled: true,
@@ -395,20 +490,52 @@ impl Model {
                         ImageLayout::ShaderReadOnlyOptimal,
                         queue_families.clone(),
                     )?;
-                    initialization_tasks.push(InitializationTask::Image {
-                        index,
-                        data: image_data,
-                        device_image: Box::new(image_initialization),
-                    });
+                    ($push_init_tasks)(image_initialization);
                     device_images.push(device_image);
                 }}
             }
 
-            match image_data.format {
-                GltfFormat::R8 => push_image_with_format!(R8Uint),
-                GltfFormat::R8G8 => push_image_with_format!(R8G8Uint),
-                GltfFormat::R8G8B8 => push_image_with_format!(R8G8B8A8Srgb),
-                GltfFormat::R8G8B8A8 => push_image_with_format!(R8G8B8A8Srgb),
+            macro_rules! push_image_with_format {
+                ([$($vk_format:tt)+]) => {{
+                    push_image_with_format_impl! {
+                        [$($vk_format)+],
+                        |image_initialization: ImmutableImageInitialization<$($vk_format)+>| {
+                            initialization_tasks.push(InitializationTask::Image {
+                                index,
+                                data: pixels,
+                                device_image: Box::new(image_initialization),
+                                texel_conversion: None,
+                            });
+                        }
+                    }
+                }};
+
+                ([$($vk_format:tt)+], $texel_conversion:expr) => {{
+                    push_image_with_format_impl! {
+                        [$($vk_format)+],
+                        |image_initialization: ImmutableImageInitialization<$($vk_format)+>| {
+                            initialization_tasks.push(InitializationTask::Image {
+                                index,
+                                data: pixels,
+                                device_image: Box::new(image_initialization),
+                                texel_conversion: Some($texel_conversion),
+                            });
+                        }
+                    }
+                }}
+            }
+
+            match format {
+                GltfFormat::R8 => push_image_with_format!([R8Uint]),
+                GltfFormat::R8G8 => push_image_with_format!([R8G8Uint]),
+                GltfFormat::R8G8B8 => push_image_with_format!([R8G8B8A8Srgb], Box::new(|data_slice| {
+                    let unsized_iterator = data_slice.chunks(3).flat_map(|rgb| {
+                        ArrayIterator::new([rgb[0], rgb[1], rgb[2], 0xFF])
+                    });
+                    let iterator_len = data_slice.len() / 3 * 4;
+                    Box::new(ForcedExactSizeIterator::new(unsized_iterator, iterator_len))
+                })),
+                GltfFormat::R8G8B8A8 => push_image_with_format!([R8G8B8A8Srgb]),
             }
         }
 
@@ -446,17 +573,19 @@ impl Model {
                 metallic_factor: pbr.metallic_factor(),
                 roughness_factor: pbr.roughness_factor(),
             };
-            let (device_buffer, buffer_initialization) = unsafe {
+            let (device_material_ubo_buffer, material_ubo_buffer_initialization) = unsafe {
                 ImmutableBuffer::<MaterialUBO>::uninitialized(
                     device.clone(),
                     BufferUsage::uniform_buffer_transfer_destination(),
                 )
             }?;
-            let base_color_texture_index = pbr.base_color_texture().map(|it| it.texture().index()).unwrap_or(0);
-            let base_color_texture = device_images[base_color_texture_index].clone();
-            let descriptor_set = Arc::new(
+            let base_color_texture: Arc<dyn ImageViewAccess + Send + Sync> = pbr.base_color_texture()
+                .map(|it| it.texture().index())
+                .map(|index| device_images[index].clone())
+                .unwrap_or_else(|| helper_resources.empty_image.clone());
+            let descriptor_set: Arc<dyn DescriptorSet + Send + Sync> = Arc::new(
                 PersistentDescriptorSet::start(pipeline.clone(), 2)
-                    .add_buffer(device_buffer.clone()).unwrap()
+                    .add_buffer(device_material_ubo_buffer.clone()).unwrap()
                     .add_sampled_image(
                         base_color_texture,
                         Sampler::simple_repeat_linear(device.clone())
@@ -467,31 +596,18 @@ impl Model {
             initialization_tasks.push(InitializationTask::MaterialDescriptorSet {
                 index: material.index().expect("Implicit material definitions are not supported yet."), // FIXME
                 data: material_ubo,
-                initialization_buffer: Box::new(buffer_initialization),
+                initialization_buffer: Box::new(material_ubo_buffer_initialization),
             });
             material_descriptor_sets.push(descriptor_set);
         }
 
-        Ok(Model {
+        Ok(SimpleUninitializedResource::new(Model {
             document,
             device_buffers,
             node_descriptor_sets,
             material_descriptor_sets,
             device_images,
-            initialization_tasks: Some(initialization_tasks),
-        })
-    }
-
-    pub fn initialize(&mut self, device: Arc<Device>, mut command_buffer_builder: AutoCommandBufferBuilder) -> Result<AutoCommandBufferBuilder, Error> {
-        if let Some(initialization_tasks) = self.initialization_tasks.take() {
-            for initialization_task in initialization_tasks.into_iter() {
-                command_buffer_builder = initialization_task.initialize(device.clone(), command_buffer_builder)?;
-            }
-
-            Ok(command_buffer_builder)
-        } else {
-            Err(ModelInitializationError::ModelAlreadyInitialized.into())
-        }
+        }, initialization_tasks))
     }
 
     pub fn draw_scene<F, C, RPD>(&self, context: InitializationDrawContext<F, C, RPD>, scene_index: usize) -> Result<AutoCommandBuffer, Error>
@@ -573,25 +689,45 @@ impl Model {
         where S: DescriptorSetsCollection + Clone,
               RPD: RenderPassDesc + RenderPassDescClearValues<Vec<ClearValue>> + Send + Sync + 'static {
         let positions_accessor = primitive.get(&Semantic::Positions).unwrap();
+        let tex_coords_accessor = primitive.get(&Semantic::TexCoords(0));
         let indices_accessor = primitive.indices();
 
-        let vertex_slice: BufferSlice<[Position], Arc<ImmutableBuffer<[u8]>>> = {
+        let position_slice: BufferSlice<[GltfVertexPosition], Arc<ImmutableBuffer<[u8]>>> = {
             let buffer_view = positions_accessor.view();
             let buffer_index = buffer_view.buffer().index();
             let buffer_offset = positions_accessor.offset() + buffer_view.offset();
             let buffer_bytes = positions_accessor.size() * positions_accessor.count();
 
-            let vertex_buffer = self.device_buffers[buffer_index].clone();
-            let vertex_slice = BufferSlice::from_typed_buffer_access(vertex_buffer)
+            let position_buffer = self.device_buffers[buffer_index].clone();
+            let position_slice = BufferSlice::from_typed_buffer_access(position_buffer)
                 .slice(buffer_offset..(buffer_offset + buffer_bytes))
                 .unwrap();
 
-            unsafe { vertex_slice.reinterpret::<[Position]>() }
+            unsafe { position_slice.reinterpret::<[GltfVertexPosition]>() }
+        };
+
+        let tex_coord_slice: Option<BufferSlice<[GltfVertexTexCoord], Arc<ImmutableBuffer<[u8]>>>> = tex_coords_accessor.map(|tex_coords_accessor| {
+            let buffer_view = tex_coords_accessor.view();
+            let buffer_index = buffer_view.buffer().index();
+            let buffer_offset = tex_coords_accessor.offset() + buffer_view.offset();
+            let buffer_bytes = tex_coords_accessor.size() * tex_coords_accessor.count();
+
+            let tex_coord_buffer = self.device_buffers[buffer_index].clone();
+            let tex_coord_slice = BufferSlice::from_typed_buffer_access(tex_coord_buffer)
+                .slice(buffer_offset..(buffer_offset + buffer_bytes))
+                .unwrap();
+
+            unsafe { tex_coord_slice.reinterpret::<[GltfVertexTexCoord]>() }
+        });
+
+        let vertex_buffers = GltfVertexBuffers {
+            position_buffer: Some(position_slice),
+            tex_coord_buffer: tex_coord_slice,
         };
 
         if let Some(indices_accessor) = indices_accessor {
             macro_rules! draw_indexed {
-                ($index_type:ty; $command_buffer:ident, $context:ident, $vertex_slice:ident, $indices_accessor:ident, $sets:ident) => {
+                ($index_type:ty; $command_buffer:ident, $context:ident, $vertex_buffers:ident, $indices_accessor:ident, $sets:ident) => {
                     let index_slice: BufferSlice<[$index_type], Arc<ImmutableBuffer<[u8]>>> = {
                         let buffer_view = $indices_accessor.view();
                         let buffer_index = buffer_view.buffer().index();
@@ -614,7 +750,7 @@ impl Model {
                     $command_buffer = $command_buffer.draw_indexed(
                         $context.pipeline.clone(),
                         $context.dynamic,
-                        $vertex_slice,
+                        $vertex_buffers,
                         index_slice,
                         $sets.clone(),
                         () /* push_constants */).unwrap();
@@ -623,10 +759,10 @@ impl Model {
 
             match indices_accessor.data_type() {
                 DataType::U16 => {
-                    draw_indexed!(u16; command_buffer, context, vertex_slice, indices_accessor, sets);
+                    draw_indexed!(u16; command_buffer, context, vertex_buffers, indices_accessor, sets);
                 },
                 DataType::U32 => {
-                    draw_indexed!(u32; command_buffer, context, vertex_slice, indices_accessor, sets);
+                    draw_indexed!(u32; command_buffer, context, vertex_buffers, indices_accessor, sets);
                 },
                 _ => {
                     panic!("Index type not supported.");
@@ -636,7 +772,7 @@ impl Model {
             command_buffer = command_buffer.draw(
                 context.pipeline.clone(),
                 context.dynamic,
-                vertex_slice,
+                vertex_buffers,
                 sets.clone(),
                 () /* push_constants */).unwrap();
         }

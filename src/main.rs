@@ -10,10 +10,14 @@ extern crate image;
 extern crate typenum;
 extern crate gltf;
 extern crate byteorder;
+extern crate rayon;
+extern crate generic_array;
 
 #[macro_use]
 pub mod math;
 pub mod model;
+pub mod iter;
+pub mod vertex;
 
 use std::mem;
 use std::sync::Arc;
@@ -48,16 +52,21 @@ use gltf::mesh::util::ReadIndices;
 use byteorder::{ReadBytesExt, WriteBytesExt, BigEndian, LittleEndian};
 use model::Model;
 use model::InitializationDrawContext;
+use model::UninitializedResource;
+use model::SimpleUninitializedResource;
+use model::HelperResources;
+use vertex::GltfVertexBufferDefinition;
 
-pub type MainDescriptorSet<RPD: RenderPassDesc> = std::sync::Arc<vulkano::descriptor::descriptor_set::PersistentDescriptorSet<std::sync::Arc<vulkano::pipeline::GraphicsPipeline<vulkano::pipeline::vertex::SingleBufferDefinition<Position>, std::boxed::Box<dyn vulkano::descriptor::PipelineLayoutAbstract + std::marker::Sync + std::marker::Send>, std::sync::Arc<vulkano::framebuffer::RenderPass<RPD>>>>, ((((((), vulkano::descriptor::descriptor_set::PersistentDescriptorSetBuf<std::sync::Arc<vulkano::buffer::DeviceLocalBuffer<gltf_fs::ty::SceneUBO>>>), vulkano::descriptor::descriptor_set::PersistentDescriptorSetImg<std::sync::Arc<vulkano::image::AttachmentImage>>), vulkano::descriptor::descriptor_set::PersistentDescriptorSetSampler), vulkano::descriptor::descriptor_set::PersistentDescriptorSetImg<std::sync::Arc<vulkano::image::ImmutableImage<vulkano::format::R8G8B8A8Unorm>>>), vulkano::descriptor::descriptor_set::PersistentDescriptorSetSampler)>>;
-pub type PipelineImpl<RPD: RenderPassDesc> = Arc<GraphicsPipeline<SingleBufferDefinition<Position>, Box<(dyn PipelineLayoutAbstract + Sync + Send + 'static)>, Arc<RenderPass<RPD>>>>;
+pub type MainDescriptorSet<RPD: RenderPassDesc> = std::sync::Arc<vulkano::descriptor::descriptor_set::PersistentDescriptorSet<std::sync::Arc<vulkano::pipeline::GraphicsPipeline<GltfVertexBufferDefinition, std::boxed::Box<dyn vulkano::descriptor::PipelineLayoutAbstract + std::marker::Sync + std::marker::Send>, std::sync::Arc<vulkano::framebuffer::RenderPass<RPD>>>>, ((((), vulkano::descriptor::descriptor_set::PersistentDescriptorSetBuf<std::sync::Arc<vulkano::buffer::DeviceLocalBuffer<gltf_fs::ty::SceneUBO>>>), vulkano::descriptor::descriptor_set::PersistentDescriptorSetImg<std::sync::Arc<vulkano::image::AttachmentImage>>), vulkano::descriptor::descriptor_set::PersistentDescriptorSetSampler)>>;
+pub type PipelineImpl<RPD: RenderPassDesc> = Arc<GraphicsPipeline<GltfVertexBufferDefinition, Box<(dyn PipelineLayoutAbstract + Sync + Send + 'static)>, Arc<RenderPass<RPD>>>>;
 
 #[derive(Copy, Clone)]
 pub struct Position {
     position: [f32; 3],
+    tex_coord: [f32; 2],
 }
 
-impl_vertex!(Position, position);
+impl_vertex!(Position, position, tex_coord);
 
 #[derive(Copy, Clone)]
 pub struct MainVertex {
@@ -135,45 +144,6 @@ impl MaterialUBO {
             metallic_factor,
             roughness_factor,
         }
-    }
-}
-
-// TODO: Just for debugging purposes, remove later
-struct ModelTest {
-    pub document: Document,
-    pub buffers: Vec<gltf::buffer::Data>,
-    pub images: Vec<gltf::image::Data>,
-}
-
-impl ModelTest {
-    fn draw(&self, builder: AutoCommandBufferBuilder) -> AutoCommandBufferBuilder {
-        for scene in self.document.scenes() {
-            for node in scene.nodes() {
-                if let Some(mesh) = node.mesh() {
-                    for primitive in mesh.primitives() {
-                        let mut reader = primitive.reader(|buffer| Some(&*self.buffers[buffer.index()]));
-                        let positions: Vec<[f32; 3]> = reader.read_positions()
-                            .expect("The primitive is missing vertex positions.")
-                            .collect();
-                        let indices: Vec<u32> = match reader.read_indices().expect("The primitive is missing vertex indices.") {
-                            ReadIndices::U8(iter) => iter.map(|x| x as u32).collect(),
-                            ReadIndices::U16(iter) => iter.map(|x| x as u32).collect(),
-                            ReadIndices::U32(iter) => iter.map(|x| x).collect(),
-                        };
-
-                        println!("Indices: {:?}", indices);
-                        println!("Vertices: {:?}", positions);
-                        print!("Vertices (hex): ");
-
-                        for vertex in positions.iter().cloned().map(|float| unsafe { mem::transmute::<_, [u32; 3]>(float.clone()) }) {
-                            print!("[{:x}, {:x}, {:x}], ", vertex[0], vertex[1], vertex[2]);
-                        }
-                    }
-                }
-            }
-        }
-
-        builder
     }
 }
 
@@ -293,7 +263,8 @@ fn vulkan_main_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>
     Arc::new(GraphicsPipeline::start()
         // .with_pipeline_layout(device.clone(), pipeline_layout)
         // Specifies the vertex type
-        .vertex_input_single_buffer::<Position>()
+        .vertex_input(GltfVertexBufferDefinition)
+        // .vertex_input_single_buffer::<Position>()
         .vertex_shader(main_vs.main_entry_point(), ())
         // Configures the builder so that we use one viewport, and that the state of this viewport
         // is dynamic. This makes it possible to change the viewport for each draw command. If the
@@ -550,28 +521,6 @@ fn main() {
 
     let (mut events_loop, window, mut dimensions, device, queue_family, queue, mut swapchain, mut images) = vulkan_initialize(&instance);
 
-    /*
-     * Buffer Creation
-     *
-     * Vulkano does not provide a generic Buffer struct which you could create with Buffer::new.
-     * Instead, it provides several different structs that all represent buffers, each of these
-     * structs being optimized for a certain kind of usage. For example, if you want to
-     * continuously upload data you should use a CpuBufferPool, while on the other hand if you have
-     * some data that you are never going to modify you should use an ImmutableBuffer.
-     */
-
-    // {
-    //     let model_test = {
-    //         let (document, buffers, images) = gltf::import("resources/minimal.gltf").unwrap();
-    //         ModelTest { document, buffers, images }
-    //     };
-    //     model_test.draw(AutoCommandBufferBuilder::new(device.clone(), queue_family).unwrap());
-    // }
-
-    // let obj = Obj::create("resources/chalet.obj");
-    // let texture = image::open("resources/chalet.jpg").unwrap().to_rgba();
-    let texture = image::open("resources/texture.jpg").unwrap().to_rgba();
-
     let main_vertices = [
         MainVertex { position: [-0.5, -0.5,  0.0], tex_coord: [0.0, 1.0] },
         MainVertex { position: [ 0.5, -0.5,  0.0], tex_coord: [1.0, 1.0] },
@@ -639,31 +588,6 @@ fn main() {
     let main_pipeline = vulkan_main_pipeline(&device, &swapchain);
     let screen_pipeline = vulkan_screen_pipeline(&device, &swapchain);
 
-    let model_path = std::env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("No model path provided.");
-        std::process::exit(1);
-    });
-    let mut model = Model::import(
-        device.clone(),
-        queue.clone(),
-        [queue_family].into_iter().cloned(),
-        main_pipeline.clone(),
-        model_path
-    ).unwrap();
-
-    // let time_buffer = CpuBufferPool::<Time>::uniform_buffer(device.clone());
-
-    // let descriptor_set = Arc::new(PersistentDescriptorSet::start(pipeline.clone(), 0)
-    //     .add_buffer(time_buffer).unwrap()
-    //     .build().unwrap()
-    // );
-
-    let (
-        texture_staging_buffer,
-        texture_device_image,
-        texture_device_image_initialization,
-        texture_device_sampler,
-    ) = create_staging_buffer_image(&device, queue_family, &texture);
     let mut main_ubo = SceneUBO::new(
         Vec2([dimensions[0] as f32, dimensions[1] as f32]),
         Mat4::identity(),
@@ -708,7 +632,6 @@ fn main() {
         PersistentDescriptorSet::start(main_pipeline.clone(), 0)
             .add_buffer(main_ubo_device_buffer.clone()).unwrap()
             .add_sampled_image(screen_image.clone(), screen_sampler.clone()).unwrap()
-            .add_sampled_image(texture_device_image.clone(), texture_device_sampler.clone()).unwrap()
             .build().unwrap()
     );
 
@@ -735,9 +658,30 @@ fn main() {
     // that, we store the submission of the previous frame here.
     let mut previous_frame_end: Box<dyn GpuFuture> = Box::new(vulkano::sync::now(device.clone()));
 
-    let mut init_command_buffer_builder = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
-        .copy_buffer_to_image(texture_staging_buffer.clone(), texture_device_image_initialization).unwrap();
-    init_command_buffer_builder = model.initialize(device.clone(), init_command_buffer_builder).unwrap();
+    let init_command_buffer_builder = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap();
+    let (init_command_buffer_builder, mut helper_resources) = HelperResources::new(
+        &device,
+        [queue_family].into_iter().cloned(),
+    ).unwrap().initialize_resource(
+        &device,
+        init_command_buffer_builder,
+    ).unwrap();
+    let (init_command_buffer_builder, mut model) = {
+        let model_path = std::env::args().nth(1).unwrap_or_else(|| {
+            eprintln!("No model path provided.");
+            std::process::exit(1);
+        });
+        Model::import(
+            &device,
+            [queue_family].into_iter().cloned(),
+            main_pipeline.clone(),
+            &helper_resources,
+            model_path,
+        ).unwrap().initialize_resource(
+            &device,
+            init_command_buffer_builder
+        ).unwrap()
+    };
     let init_command_buffer = init_command_buffer_builder.build().unwrap();
     // let standard_command_pool = Device::standard_command_pool(&device, queue_family);
     // let init_unsafe_command_buffer = UnsafeCommandBufferBuilder::new(&standard_command_pool,

@@ -6,3 +6,6 @@ pub mod macros;
 pub mod vector;
 #[macro_use]
 pub mod matrix;
+
+pub use self::vector::*;
+pub use self::matrix::*;

@@ -16,6 +16,7 @@ layout(set = 2, binding = 0) uniform MaterialUBO {
     vec4 base_color_factor;
     float metallic_factor;
     float roughness_factor;
+    bool base_color_texture_provided;
 };
 layout(set = 2, binding = 1) uniform sampler2D base_color_texture;
 
@@ -24,12 +25,24 @@ layout(location = 1) in vec2 f_tex_coord;
 
 layout(location = 0) out vec4 out_color;
 
+vec4 get_base_color() {
+    if (base_color_texture_provided) {
+        vec4 texture_value = texture(base_color_texture, vec2(f_tex_coord));
+
+        return base_color_factor * texture_value;
+    } else {
+        return base_color_factor;
+    }
+}
+
 void main() {
     vec2 uv = gl_FragCoord.xy / dimensions;
+    vec4 base_color = get_base_color();
+
     out_color = 0.0.xxxx
         /* + texture(base_color_texture, uv) */
         /* + vec4(f_homogeneous_position.xyz / f_homogeneous_position.w, 1.0); */
         /* + texture(screen_sampler, uv) */
-        + texture(base_color_texture, vec2(f_tex_coord))
+        + base_color
         + 0.0.xxxx;
 }

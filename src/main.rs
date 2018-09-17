@@ -1,3 +1,5 @@
+#![feature(duration_as_u128)]
+
 #[macro_use]
 extern crate vulkano;
 #[macro_use]
@@ -23,6 +25,7 @@ use std::mem;
 use std::sync::Arc;
 use std::ops::Deref;
 use std::ffi::CString;
+use std::time::{Instant, Duration};
 use vulkano::instance::RawInstanceExtensions;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer};
 use vulkano::command_buffer::{AutoCommandBuffer, AutoCommandBufferBuilder, DynamicState};
@@ -51,6 +54,7 @@ use gltf::{Document, Gltf};
 use gltf::mesh::util::ReadIndices;
 use byteorder::{ReadBytesExt, WriteBytesExt, BigEndian, LittleEndian};
 use model::Model;
+use model::DrawContext;
 use model::InitializationDrawContext;
 use model::UninitializedResource;
 use model::SimpleUninitializedResource;
@@ -138,12 +142,24 @@ impl NodeUBO {
 }
 
 impl MaterialUBO {
-    pub fn new(base_color_factor: Vec4, metallic_factor: f32, roughness_factor: f32) -> Self {
+    pub fn new(base_color_factor: Vec4, metallic_factor: f32, roughness_factor: f32, base_color_texture_provided: bool) -> Self {
         MaterialUBO {
             base_color_factor: base_color_factor.0,
             metallic_factor,
             roughness_factor,
+            base_color_texture_provided: base_color_texture_provided as u32,
         }
+    }
+}
+
+impl Default for MaterialUBO {
+    fn default() -> Self {
+        Self::new(
+            [1.0, 1.0, 1.0, 1.0].into(),
+            1.0,
+            1.0,
+            false,
+        )
     }
 }
 
@@ -154,7 +170,14 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
     let physical_device = PhysicalDevice::enumerate(instance).next().expect("No physical device available.");
 
     let events_loop = EventsLoop::new();
-    let window = VkSurfaceBuild::build_vk_surface(WindowBuilder::new(), &events_loop, instance.clone()).unwrap();
+    // let displays = 
+    // let display 
+    // let surface = Surface::from_display_mode(
+
+    // )
+    let window = WindowBuilder::new()
+        .with_title("metaview")
+        .build_vk_surface(&events_loop, instance.clone()).unwrap();
 
     let mut dimensions: [u32; 2] = {
         let (width, height) = window.window().get_inner_size().unwrap().into();
@@ -214,10 +237,21 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
         let format = capabilities.supported_formats[0].0;
 
         // Please take a look at the docs for the meaning of the parameters we didn't mention.
-        Swapchain::new(device.clone(), window.clone(), capabilities.min_image_count, format,
-                       dimensions, 1, capabilities.supported_usage_flags, &queue,
-                       SurfaceTransform::Identity, alpha, PresentMode::Fifo, true,
-                       None).expect("failed to create swapchain")
+        Swapchain::new(
+            device.clone(),
+            window.clone(),
+            capabilities.min_image_count,
+            format,
+            dimensions,
+            1,
+            capabilities.supported_usage_flags,
+            &queue,
+            SurfaceTransform::Identity,
+            alpha,
+            PresentMode::Immediate, /* PresentMode::Relaxed TODO: Getting only ~60 FPS in a window */
+            true,
+            None,
+        ).expect("failed to create swapchain")
     };
 
     (events_loop, window, dimensions, device, queue_family, queue, swapchain, images)
@@ -648,7 +682,7 @@ fn main() {
     // We need to keep track of whether the swapchain is invalid for the current window,
     // for example when the window is resized.
     let mut recreate_swapchain = false;
-    let mut iteration = 0;
+    let mut init_instant = Instant::now();
 
     // In the loop below we are going to submit commands to the GPU. Submitting a command produces
     // an object that implements the `GpuFuture` trait, which holds the resources for as long as
@@ -662,6 +696,7 @@ fn main() {
     let (init_command_buffer_builder, mut helper_resources) = HelperResources::new(
         &device,
         [queue_family].into_iter().cloned(),
+        main_pipeline.clone(),
     ).unwrap().initialize_resource(
         &device,
         init_command_buffer_builder,
@@ -767,12 +802,14 @@ fn main() {
             Err(err) => panic!("{:?}", err)
         };
 
+        let nanoseconds_elapsed: u128 = init_instant.elapsed().as_nanos();
+        let seconds_elapsed: f64 = (nanoseconds_elapsed as f64) / 1_000_000_000.0;
         main_ubo = SceneUBO::new(
             Vec2([dimensions[0] as f32, dimensions[1] as f32]),
             construct_model_matrix(1.0,
                                    &[0.0, 0.0, 2.0].into(),
-                                   &[iteration as f32 * 0.01, iteration as f32 * 0.02, 0.0].into()),
-            construct_view_matrix(&[(iteration as f32 * 0.01).cos(), 0.0, 0.0].into(),
+                                   &[seconds_elapsed as f32 * 0.5, seconds_elapsed as f32 * 1.0, 0.0].into()),
+            construct_view_matrix(&[(seconds_elapsed as f32 * 0.5).cos(), 0.0, 0.0].into(),
                                   &[0.0, 0.0, 0.0].into()),
             construct_perspective_projection_matrix(0.1, 1000.0, dimensions[0] as f32 / dimensions[1] as f32, std::f32::consts::FRAC_PI_2),
             // construct_orthographic_projection_matrix(0.1, 1000.0, [dimensions[0] as f32 / dimensions[1] as f32, 1.0].into()),
@@ -854,13 +891,16 @@ fn main() {
         };
         let command_buffer = model.draw_scene(
             InitializationDrawContext {
-                device: device.clone(),
-                queue_family,
+                draw_context: DrawContext {
+                    device: device.clone(),
+                    queue_family,
+                    pipeline: main_pipeline.clone(),
+                    dynamic: &dynamic_state,
+                    main_descriptor_set: main_descriptor_set.clone(),
+                    helper_resources: helper_resources.clone(),
+                },
                 framebuffer: current_framebuffer,
                 clear_values,
-                pipeline: main_pipeline.clone(),
-                dynamic: &dynamic_state,
-                main_descriptor_set: main_descriptor_set.clone(),
             },
             0,
         ).unwrap();
@@ -913,6 +953,5 @@ fn main() {
             }
         });
         if done { return; }
-        iteration += 1;
     }
 }

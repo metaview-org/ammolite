@@ -1,5 +1,6 @@
 pub mod error;
 
+use std::iter;
 use std::sync::Arc;
 use std::path::Path;
 use std::ops::Deref;
@@ -58,8 +59,7 @@ use ::PipelineImpl;
 use ::NodeUBO;
 use ::MaterialUBO;
 use ::MainDescriptorSet;
-use math::matrix::Mat4;
-use math::matrix::Matrix;
+use math::*;
 use iter::ArrayIterator;
 use iter::ForcedExactSizeIterator;
 use vertex::{GltfVertexPosition, GltfVertexTexCoord, GltfVertexBuffers};
@@ -197,23 +197,20 @@ use self::error::*;
 pub struct InitializationDrawContext<'a, F, C, RPD>
     where F: FramebufferAbstract + RenderPassDescClearValues<C> + Send + Sync + 'static,
           RPD: RenderPassDesc + RenderPassDescClearValues<Vec<ClearValue>> + Send + Sync + 'static {
-    pub device: Arc<Device>,
-    pub queue_family: QueueFamily<'a>,
+    pub draw_context: DrawContext<'a, RPD>,
     pub framebuffer: Arc<F>,
     pub clear_values: C,
-    pub pipeline: PipelineImpl<RPD>,
-    pub dynamic: &'a DynamicState,
-    pub main_descriptor_set: MainDescriptorSet<RPD>,
 }
 
 #[derive(Clone)]
 pub struct DrawContext<'a, RPD>
     where RPD: RenderPassDesc + RenderPassDescClearValues<Vec<ClearValue>> + Send + Sync + 'static {
-    device: Arc<Device>,
-    queue_family: QueueFamily<'a>,
-    pipeline: PipelineImpl<RPD>,
-    dynamic: &'a DynamicState,
-    main_descriptor_set: MainDescriptorSet<RPD>,
+    pub device: Arc<Device>,
+    pub queue_family: QueueFamily<'a>,
+    pub pipeline: PipelineImpl<RPD>,
+    pub dynamic: &'a DynamicState,
+    pub main_descriptor_set: MainDescriptorSet<RPD>,
+    pub helper_resources: HelperResources,
 }
 
 // struct FormatConversionIterator<I, O> {
@@ -224,23 +221,23 @@ pub struct DrawContext<'a, RPD>
 
 pub enum InitializationTask {
     Buffer {
-        index: usize,
         data: Vec<u8>,
         initialization_buffer: Box<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>,
     },
+    ZeroBuffer {
+        len: usize,
+        initialization_buffer: Box<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>,
+    },
     Image {
-        index: usize,
         data: Vec<u8>,
         device_image: Box<dyn ImageAccess + Send + Sync>,
         texel_conversion: Option<Box<dyn for<'a> Fn(&'a [u8]) -> Box<ExactSizeIterator<Item=u8> + 'a>>>,
     },
     NodeDescriptorSet {
-        index: usize,
         data: NodeUBO,
         initialization_buffer: Box<dyn TypedBufferAccess<Content=NodeUBO> + Send + Sync>,
     },
     MaterialDescriptorSet {
-        index: usize,
         data: MaterialUBO,
         initialization_buffer: Box<dyn TypedBufferAccess<Content=MaterialUBO> + Send + Sync>,
     },
@@ -249,17 +246,20 @@ pub enum InitializationTask {
 impl fmt::Debug for InitializationTask {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            InitializationTask::Buffer { index, .. } => {
-                write!(f, "buffer #{}", index)
+            InitializationTask::Buffer { .. } => {
+                write!(f, "buffer")
             },
-            InitializationTask::Image { index, .. } => {
-                write!(f, "image #{}", index)
+            InitializationTask::ZeroBuffer { .. } => {
+                write!(f, "zero buffer")
             },
-            InitializationTask::NodeDescriptorSet { index, .. } => {
-                write!(f, "node descriptor set #{}", index)
+            InitializationTask::Image { .. } => {
+                write!(f, "image")
             },
-            InitializationTask::MaterialDescriptorSet { index, .. } => {
-                write!(f, "material descriptor set #{}", index)
+            InitializationTask::NodeDescriptorSet { .. } => {
+                write!(f, "node descriptor set")
+            },
+            InitializationTask::MaterialDescriptorSet { .. } => {
+                write!(f, "material descriptor set")
             },
         }
     }
@@ -271,8 +271,17 @@ impl InitializationTask {
             InitializationTask::Buffer { data, initialization_buffer, .. } => {
                 let staging_buffer: Arc<CpuAccessibleBuffer<[u8]>> = CpuAccessibleBuffer::from_iter(
                     device.clone(),
-                    BufferUsage::all(),
+                    BufferUsage::transfer_source(),
                     data.iter().cloned(), // FIXME: Single memcpy call, do not iterate
+                )?;
+
+                Ok(command_buffer_builder.copy_buffer(staging_buffer, initialization_buffer)?)
+            },
+            InitializationTask::ZeroBuffer { len, initialization_buffer, .. } => {
+                let staging_buffer: Arc<CpuAccessibleBuffer<[u8]>> = CpuAccessibleBuffer::from_iter(
+                    device.clone(),
+                    BufferUsage::transfer_source(),
+                    ForcedExactSizeIterator::new(iter::repeat(0u8).take(len), len),
                 )?;
 
                 Ok(command_buffer_builder.copy_buffer(staging_buffer, initialization_buffer)?)
@@ -293,7 +302,7 @@ impl InitializationTask {
             InitializationTask::NodeDescriptorSet { data, initialization_buffer, .. } => {
                 let staging_buffer: Arc<CpuAccessibleBuffer<NodeUBO>> = CpuAccessibleBuffer::from_data(
                     device.clone(),
-                    BufferUsage::all(),
+                    BufferUsage::transfer_source(),
                     data,
                 )?;
 
@@ -302,7 +311,7 @@ impl InitializationTask {
             InitializationTask::MaterialDescriptorSet { data, initialization_buffer, .. } => {
                 let staging_buffer: Arc<CpuAccessibleBuffer<MaterialUBO>> = CpuAccessibleBuffer::from_data(
                     device.clone(),
-                    BufferUsage::all(),
+                    BufferUsage::transfer_source(),
                     data,
                 )?;
 
@@ -344,15 +353,18 @@ impl<T> UninitializedResource<T> for SimpleUninitializedResource<T> {
     }
 }
 
+#[derive(Clone)]
 pub struct HelperResources {
     pub empty_image: Arc<dyn ImageViewAccess + Send + Sync>,
+    pub zero_buffer: Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>,
+    pub default_material_descriptor_set: Arc<dyn DescriptorSet + Send + Sync>,
 }
 
 impl HelperResources {
-    pub fn new<'a, I>(device: &Arc<Device>, queue_families: I)
+    pub fn new<'a, I>(device: &Arc<Device>, queue_families: I, pipeline: PipelineImpl<impl RenderPassDesc + Send + Sync + 'static>)
             -> Result<SimpleUninitializedResource<HelperResources>, Error>
-            where I: IntoIterator<Item = QueueFamily<'a>> {
-        let (device_image, image_initialization) = ImmutableImage::uninitialized(
+            where I: IntoIterator<Item = QueueFamily<'a>> + Clone {
+        let (empty_device_image, empty_image_initialization) = ImmutableImage::uninitialized(
             device.clone(),
             Dimensions::Dim2d {
                 width: 1,
@@ -366,18 +378,59 @@ impl HelperResources {
                 ..ImageUsage::none()
             },
             ImageLayout::ShaderReadOnlyOptimal,
-            queue_families,
+            queue_families.clone(),
         )?;
 
-        let tasks = vec![InitializationTask::Image {
-            index: 0,
-            data: vec![0],
-            device_image: Box::new(image_initialization),
-            texel_conversion: None,
-        }];
+        let zero_buffer_len = (1 << 15) * 2; // FIXME: Figure out a way to dynamically resize the zero buffer
+        let (zero_device_buffer, zero_buffer_initialization) = unsafe {
+            ImmutableBuffer::raw(
+                device.clone(),
+                zero_buffer_len,
+                BufferUsage {
+                    transfer_destination: true,
+                    vertex_buffer: true,
+                    ..BufferUsage::none()
+                },
+                queue_families.clone(),
+            )
+        }?;
+
+        let (device_default_material_ubo_buffer, default_material_ubo_buffer_initialization) = unsafe {
+            ImmutableBuffer::<MaterialUBO>::uninitialized(
+                device.clone(),
+                BufferUsage::uniform_buffer_transfer_destination(),
+            )
+        }?;
+        let default_material_descriptor_set: Arc<dyn DescriptorSet + Send + Sync> = Arc::new(
+            PersistentDescriptorSet::start(pipeline.clone(), 2)
+                .add_buffer(device_default_material_ubo_buffer.clone()).unwrap()
+                .add_sampled_image(
+                    empty_device_image.clone(),
+                    Sampler::simple_repeat_linear(device.clone()), // TODO
+                ).unwrap()
+                .build().unwrap()
+        );
+
+        let tasks = vec![
+            InitializationTask::Image {
+                data: vec![0],
+                device_image: Box::new(empty_image_initialization),
+                texel_conversion: None,
+            },
+            InitializationTask::ZeroBuffer {
+                len: zero_buffer_len,
+                initialization_buffer: Box::new(zero_buffer_initialization),
+            },
+            InitializationTask::MaterialDescriptorSet {
+                data: MaterialUBO::default(),
+                initialization_buffer: Box::new(default_material_ubo_buffer_initialization),
+            },
+        ];
 
         let output = HelperResources {
-            empty_image: device_image,
+            empty_image: empty_device_image,
+            zero_buffer: zero_device_buffer,
+            default_material_descriptor_set,
         };
 
         Ok(SimpleUninitializedResource::new(output, tasks))
@@ -455,7 +508,6 @@ impl Model {
                 )
             }?;
             initialization_tasks.push(InitializationTask::Buffer {
-                index,
                 data: buffer_data,
                 initialization_buffer: Box::new(buffer_initialization),
             });
@@ -501,7 +553,6 @@ impl Model {
                         [$($vk_format)+],
                         |image_initialization: ImmutableImageInitialization<$($vk_format)+>| {
                             initialization_tasks.push(InitializationTask::Image {
-                                index,
                                 data: pixels,
                                 device_image: Box::new(image_initialization),
                                 texel_conversion: None,
@@ -515,7 +566,6 @@ impl Model {
                         [$($vk_format)+],
                         |image_initialization: ImmutableImageInitialization<$($vk_format)+>| {
                             initialization_tasks.push(InitializationTask::Image {
-                                index,
                                 data: pixels,
                                 device_image: Box::new(image_initialization),
                                 texel_conversion: Some($texel_conversion),
@@ -557,7 +607,6 @@ impl Model {
             );
 
             initialization_tasks.push(InitializationTask::NodeDescriptorSet {
-                index: node.index(),
                 data: node_ubo,
                 initialization_buffer: Box::new(buffer_initialization),
             });
@@ -568,33 +617,35 @@ impl Model {
 
         for material in document.materials() {
             let pbr = material.pbr_metallic_roughness();
-            let material_ubo = MaterialUBO {
-                base_color_factor: pbr.base_color_factor(),
-                metallic_factor: pbr.metallic_factor(),
-                roughness_factor: pbr.roughness_factor(),
-            };
+            let base_color_texture_option: Option<Arc<dyn ImageViewAccess + Send + Sync>> = pbr
+                .base_color_texture()
+                .map(|it| it.texture().index())
+                .map(|index| device_images[index].clone());
+            let material_ubo = MaterialUBO::new(
+                pbr.base_color_factor().into(),
+                pbr.metallic_factor(),
+                pbr.roughness_factor(),
+                base_color_texture_option.is_some(),
+            );
             let (device_material_ubo_buffer, material_ubo_buffer_initialization) = unsafe {
                 ImmutableBuffer::<MaterialUBO>::uninitialized(
                     device.clone(),
                     BufferUsage::uniform_buffer_transfer_destination(),
                 )
             }?;
-            let base_color_texture: Arc<dyn ImageViewAccess + Send + Sync> = pbr.base_color_texture()
-                .map(|it| it.texture().index())
-                .map(|index| device_images[index].clone())
+            let base_color_texture: Arc<dyn ImageViewAccess + Send + Sync> = base_color_texture_option
                 .unwrap_or_else(|| helper_resources.empty_image.clone());
             let descriptor_set: Arc<dyn DescriptorSet + Send + Sync> = Arc::new(
                 PersistentDescriptorSet::start(pipeline.clone(), 2)
                     .add_buffer(device_material_ubo_buffer.clone()).unwrap()
                     .add_sampled_image(
                         base_color_texture,
-                        Sampler::simple_repeat_linear(device.clone())
+                        Sampler::simple_repeat_linear(device.clone()), // TODO
                     ).unwrap()
                     .build().unwrap()
             );
 
             initialization_tasks.push(InitializationTask::MaterialDescriptorSet {
-                index: material.index().expect("Implicit material definitions are not supported yet."), // FIXME
                 data: material_ubo,
                 initialization_buffer: Box::new(material_ubo_buffer_initialization),
             });
@@ -618,26 +669,15 @@ impl Model {
         }
 
         let InitializationDrawContext {
-            device,
-            queue_family,
+            draw_context,
             framebuffer,
             clear_values,
-            pipeline,
-            dynamic,
-            main_descriptor_set,
         } = context;
 
         let scene = self.document.scenes().nth(scene_index).unwrap();
-        let mut command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue_family.clone())
+        let mut command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(draw_context.device.clone(), draw_context.queue_family.clone())
             .unwrap()
             .begin_render_pass(framebuffer.clone(), false, clear_values).unwrap();
-        let draw_context = DrawContext {
-            device: device,
-            queue_family: queue_family,
-            pipeline: pipeline,
-            dynamic: dynamic,
-            main_descriptor_set: main_descriptor_set,
-        };
 
         for node in scene.nodes() {
             command_buffer = self.draw_node(node, command_buffer, &draw_context);
@@ -665,12 +705,16 @@ impl Model {
         if let Some(mesh) = node.mesh() {
             for primitive in mesh.primitives() {
                 let material = primitive.material();
-                let material_index = material.index().expect("Implicit material definitions are not supported yet."); // FIXME
+                let material_descriptor_set = material.index().map(|material_index| {
+                    self.material_descriptor_sets[material_index].clone()
+                }).unwrap_or_else(|| {
+                    context.helper_resources.default_material_descriptor_set.clone()
+                });
 
                 let descriptor_sets = (
                     context.main_descriptor_set.clone(),
                     self.node_descriptor_sets[node.index()].clone(),
-                    self.material_descriptor_sets[material_index].clone(),
+                    material_descriptor_set,
                 );
 
                 command_buffer = self.draw_primitive(&primitive, command_buffer, context, descriptor_sets.clone());
@@ -706,23 +750,30 @@ impl Model {
             unsafe { position_slice.reinterpret::<[GltfVertexPosition]>() }
         };
 
-        let tex_coord_slice: Option<BufferSlice<[GltfVertexTexCoord], Arc<ImmutableBuffer<[u8]>>>> = tex_coords_accessor.map(|tex_coords_accessor| {
-            let buffer_view = tex_coords_accessor.view();
-            let buffer_index = buffer_view.buffer().index();
-            let buffer_offset = tex_coords_accessor.offset() + buffer_view.offset();
-            let buffer_bytes = tex_coords_accessor.size() * tex_coords_accessor.count();
+        let tex_coord_slice: BufferSlice<[GltfVertexTexCoord], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = {
+            let tex_coord_slice: BufferSlice<[u8], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = tex_coords_accessor.map(|tex_coords_accessor| {
+                let buffer_view = tex_coords_accessor.view();
+                let buffer_index = buffer_view.buffer().index();
+                let buffer_offset = tex_coords_accessor.offset() + buffer_view.offset();
+                let buffer_bytes = tex_coords_accessor.size() * tex_coords_accessor.count();
 
-            let tex_coord_buffer = self.device_buffers[buffer_index].clone();
-            let tex_coord_slice = BufferSlice::from_typed_buffer_access(tex_coord_buffer)
-                .slice(buffer_offset..(buffer_offset + buffer_bytes))
-                .unwrap();
+                let tex_coord_buffer: Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync> = self.device_buffers[buffer_index].clone();
+
+                BufferSlice::from_typed_buffer_access(tex_coord_buffer)
+                    .slice(buffer_offset..(buffer_offset + buffer_bytes))
+                    .unwrap()
+            }).unwrap_or_else(|| {
+                let zero_buffer = context.helper_resources.zero_buffer.clone();
+
+                BufferSlice::from_typed_buffer_access(zero_buffer)
+            });
 
             unsafe { tex_coord_slice.reinterpret::<[GltfVertexTexCoord]>() }
-        });
+        };
 
         let vertex_buffers = GltfVertexBuffers {
             position_buffer: Some(position_slice),
-            tex_coord_buffer: tex_coord_slice,
+            tex_coord_buffer: Some(tex_coord_slice),
         };
 
         if let Some(indices_accessor) = indices_accessor {

@@ -1,4 +1,4 @@
-use std::ops::{Add, Deref, DerefMut, Sub, Neg};
+use std::ops::{Add, Deref, DerefMut, Sub, Neg, AddAssign, SubAssign, Div, Mul, DivAssign, MulAssign};
 use std::fmt::{Debug, Formatter, Error};
 use typenum::{Unsigned, U1, U2, U3, U4};
 use math::matrix::Mat4;
@@ -8,6 +8,11 @@ pub trait Vector: Neg + Sized + Clone + Debug + PartialEq {
 
     fn zero() -> Self;
     fn dot(&self, other: &Self) -> f32;
+    fn norm_squared(&self) -> f32;
+
+    fn norm(&self) -> f32 {
+        self.norm_squared().sqrt()
+    }
 }
 
 pub trait Projected: Vector {
@@ -47,6 +52,10 @@ macro_rules! impl_vec {
 
                 result
             }
+
+            fn norm_squared(&self) -> f32 {
+                self.dot(&self)
+            }
         }
 
         impl_unary_operator! {
@@ -63,6 +72,98 @@ macro_rules! impl_vec {
                 }
 
                 result
+            }
+        }
+
+        impl_binary_operator! {
+            operator_type: [Add];
+            inline: [true];
+            operator_fn: add;
+            generics: [];
+            header: ($ty_name, $ty_name) -> $ty_name;
+            |&a, &b| {
+                let mut result = $ty_name::zero();
+
+                for (result_component, (a_component, b_component)) in result.iter_mut().zip(a.iter().zip(b.iter())) {
+                    *result_component = *a_component + *b_component;
+                }
+
+                result
+            }
+        }
+
+        impl_binary_operator! {
+            operator_type: [Sub];
+            inline: [true];
+            operator_fn: sub;
+            generics: [];
+            header: ($ty_name, $ty_name) -> $ty_name;
+            |&a, &b| {
+                let mut result = $ty_name::zero();
+
+                for (result_component, (a_component, b_component)) in result.iter_mut().zip(a.iter().zip(b.iter())) {
+                    *result_component = *a_component - *b_component;
+                }
+
+                result
+            }
+        }
+
+        impl_binary_operator! {
+            operator_type: [Mul];
+            inline: [true];
+            operator_fn: mul;
+            generics: [];
+            header: ($ty_name, f32) -> $ty_name;
+            |&a, &b| {
+                let mut result = a.clone();
+
+                for result_component in result.iter_mut() {
+                    *result_component *= b;
+                }
+
+                result
+            }
+        }
+
+        impl_binary_operator! {
+            operator_type: [Div];
+            inline: [true];
+            operator_fn: div;
+            generics: [];
+            header: ($ty_name, f32) -> $ty_name;
+            |&a, &b| {
+                let mut result = a.clone();
+
+                for result_component in result.iter_mut() {
+                    *result_component /= b;
+                }
+
+                result
+            }
+        }
+
+        impl<T> AddAssign<T> for $ty_name where Self: Add<T, Output=Self> {
+            fn add_assign(&mut self, other: T) {
+                *self = self.clone() + other;
+            }
+        }
+
+        impl<T> SubAssign<T> for $ty_name where Self: Sub<T, Output=Self> {
+            fn sub_assign(&mut self, other: T) {
+                *self = self.clone() - other;
+            }
+        }
+
+        impl<T> MulAssign<T> for $ty_name where Self: Mul<T, Output=Self> {
+            fn mul_assign(&mut self, other: T) {
+                *self = self.clone() * other;
+            }
+        }
+
+        impl<T> DivAssign<T> for $ty_name where Self: Div<T, Output=Self> {
+            fn div_assign(&mut self, other: T) {
+                *self = self.clone() / other;
             }
         }
 
@@ -172,3 +273,17 @@ impl UnitQuaternion for Vec4 {
     }
 }
 
+pub trait Cross {
+    fn cross(&self, other: &Self) -> Self;
+}
+
+impl Cross for Vec3 {
+    fn cross(&self, other: &Self) -> Self {
+        let a = self;
+        let b = other;
+
+        det_copy!(Vec3([1.0, 0.0, 0.0]), Vec3([0.0, 1.0, 0.0]), Vec3([0.0, 0.0, 1.0]),
+                                   a[0],                  a[1],                  a[2],
+                                   b[0],                  b[1],                  b[2])
+    }
+}

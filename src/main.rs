@@ -6,6 +6,8 @@ extern crate vulkano;
 extern crate vulkano_shader_derive;
 #[macro_use]
 extern crate failure;
+#[macro_use]
+extern crate det;
 extern crate vulkano_win;
 extern crate winit;
 extern crate image;
@@ -14,14 +16,17 @@ extern crate gltf;
 extern crate byteorder;
 extern crate rayon;
 extern crate generic_array;
+extern crate boolinator;
 
 #[macro_use]
 pub mod math;
 pub mod model;
 pub mod iter;
 pub mod vertex;
+pub mod camera;
 
 use std::mem;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::ops::Deref;
 use std::ffi::CString;
@@ -46,7 +51,7 @@ use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::swapchain::{self, PresentMode, SurfaceTransform, Swapchain, AcquireError, SwapchainCreationError, Surface};
 use vulkano::sampler::{Sampler, SamplerAddressMode, BorderColor, MipmapMode, Filter};
 use vulkano_win::VkSurfaceBuild;
-use winit::{EventsLoop, WindowBuilder, Window};
+use winit::{ElementState, MouseButton, Event, WindowEvent, KeyboardInput, VirtualKeyCode, EventsLoop, WindowBuilder, Window};
 use image::{ImageBuffer, Pixel};
 use math::matrix::*;
 use math::vector::*;
@@ -60,6 +65,7 @@ use model::UninitializedResource;
 use model::SimpleUninitializedResource;
 use model::HelperResources;
 use vertex::GltfVertexBufferDefinition;
+use camera::*;
 
 pub type MainDescriptorSet<RPD: RenderPassDesc> = std::sync::Arc<vulkano::descriptor::descriptor_set::PersistentDescriptorSet<std::sync::Arc<vulkano::pipeline::GraphicsPipeline<GltfVertexBufferDefinition, std::boxed::Box<dyn vulkano::descriptor::PipelineLayoutAbstract + std::marker::Sync + std::marker::Send>, std::sync::Arc<vulkano::framebuffer::RenderPass<RPD>>>>, ((((), vulkano::descriptor::descriptor_set::PersistentDescriptorSetBuf<std::sync::Arc<vulkano::buffer::DeviceLocalBuffer<gltf_fs::ty::SceneUBO>>>), vulkano::descriptor::descriptor_set::PersistentDescriptorSetImg<std::sync::Arc<vulkano::image::AttachmentImage>>), vulkano::descriptor::descriptor_set::PersistentDescriptorSetSampler)>>;
 pub type PipelineImpl<RPD: RenderPassDesc> = Arc<GraphicsPipeline<GltfVertexBufferDefinition, Box<(dyn PipelineLayoutAbstract + Sync + Send + 'static)>, Arc<RenderPass<RPD>>>>;
@@ -178,6 +184,8 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
     let window = WindowBuilder::new()
         .with_title("metaview")
         .build_vk_surface(&events_loop, instance.clone()).unwrap();
+
+    window.window().hide_cursor(true);
 
     let mut dimensions: [u32; 2] = {
         let (width, height) = window.window().get_inner_size().unwrap().into();
@@ -485,16 +493,15 @@ fn vulkan_screen_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window
 }
 
 fn construct_model_matrix(scale: f32, translation: &Vec3, rotation: &Vec3) -> Mat4 {
-    let mut result = Mat4::identity();
-
-    result.scale(scale);
-    result.rotate(rotation);
-    result.translate(translation);
-
-    result
+    Mat4::translation(translation)
+        * Mat4::rotation_roll(rotation[2])
+        * Mat4::rotation_yaw(rotation[1])
+        * Mat4::rotation_pitch(rotation[0])
+        * Mat4::scale(scale)
 }
 
-fn construct_view_matrix(translation: &Vec3, rotation: &Vec3) -> Mat4 {
+pub fn construct_view_matrix(translation: &Vec3, rotation: &Vec3) -> Mat4 {
+    // construct_model_matrix(1.0, &-translation, &Vec3::zero())
     construct_model_matrix(1.0, &-translation, &-rotation)
 }
 
@@ -682,7 +689,6 @@ fn main() {
     // We need to keep track of whether the swapchain is invalid for the current window,
     // for example when the window is resized.
     let mut recreate_swapchain = false;
-    let mut init_instant = Instant::now();
 
     // In the loop below we are going to submit commands to the GPU. Submitting a command produces
     // an object that implements the `GpuFuture` trait, which holds the resources for as long as
@@ -729,8 +735,27 @@ fn main() {
         // .then_signal_fence()
         // .then_execute_same_queue(init_unsafe_command_buffer).unwrap()
         .then_signal_fence_and_flush().unwrap());
+    let mut init_instant = Instant::now();
+    let mut previous_frame_instant = init_instant.clone();
+    let mut cursor_position: (f64, f64) = (dimensions[0] as f64, dimensions[1] as f64);
+    let mut cursor_delta: (f64, f64) = (0.0, 0.0);
+    let mut camera = PitchYawCamera3::new();
+    let mut pressed_keys: HashSet<VirtualKeyCode> = HashSet::new();
+    let mut pressed_mouse_buttons: HashSet<MouseButton> = HashSet::new();
 
     loop {
+        let now = Instant::now();
+        let delta_time = now.duration_since(previous_frame_instant);
+        previous_frame_instant = now;
+        let cursor_delta = {
+            let (mut x, mut y) = cursor_position.into();
+            x -= dimensions[0] as f64 / 2.0;
+            y -= dimensions[1] as f64 / 2.0;
+            (x, y)
+        };
+
+        camera.update(&delta_time, &cursor_delta, &pressed_keys, &pressed_mouse_buttons);
+
         // It is important to call this function from time to time, otherwise resources will keep
         // accumulating and you will eventually reach an out of memory error.
         // Calling this function polls various fences in order to determine what the GPU has
@@ -802,15 +827,16 @@ fn main() {
             Err(err) => panic!("{:?}", err)
         };
 
-        let nanoseconds_elapsed: u128 = init_instant.elapsed().as_nanos();
-        let seconds_elapsed: f64 = (nanoseconds_elapsed as f64) / 1_000_000_000.0;
+        let nanoseconds_elapsed: u128 = delta_time.as_nanos();
+        let seconds_elapsed: f64 = (nanoseconds_elapsed as f64) / 1.0e9;
         main_ubo = SceneUBO::new(
             Vec2([dimensions[0] as f32, dimensions[1] as f32]),
             construct_model_matrix(1.0,
-                                   &[0.0, 0.0, 2.0].into(),
-                                   &[seconds_elapsed as f32 * 0.5, seconds_elapsed as f32 * 1.0, 0.0].into()),
-            construct_view_matrix(&[(seconds_elapsed as f32 * 0.5).cos(), 0.0, 0.0].into(),
-                                  &[0.0, 0.0, 0.0].into()),
+                                   &[1.0, 0.0, 2.0].into(),
+                                   &[seconds_elapsed as f32 * 0.0, seconds_elapsed as f32 * 0.0, 0.0].into()),
+            camera.get_view_matrix(),
+            // construct_view_matrix(&[(seconds_elapsed as f32 * 0.5).cos(), 0.0, 0.0].into(),
+            //                       &[0.0, 0.0, 0.0].into()),
             construct_perspective_projection_matrix(0.1, 1000.0, dimensions[0] as f32 / dimensions[1] as f32, std::f32::consts::FRAC_PI_2),
             // construct_orthographic_projection_matrix(0.1, 1000.0, [dimensions[0] as f32 / dimensions[1] as f32, 1.0].into()),
         );
@@ -947,11 +973,75 @@ fn main() {
         let mut done = false;
         events_loop.poll_events(|ev| {
             match ev {
-                winit::Event::WindowEvent { event: winit::WindowEvent::CloseRequested, .. } => done = true,
-                winit::Event::WindowEvent { event: winit::WindowEvent::Resized(_), .. } => recreate_swapchain = true,
+                Event::WindowEvent {
+                    event: WindowEvent::KeyboardInput {
+                        input: KeyboardInput {
+                            virtual_keycode: Some(VirtualKeyCode::Escape),
+                            ..
+                        },
+                        ..
+                    },
+                    ..
+                } |
+                Event::WindowEvent {
+                    event: WindowEvent::CloseRequested,
+                    ..
+                } => done = true,
+
+                Event::WindowEvent {
+                    // FIXME: "it should not be used to implement non-cursor-like interactions such as 3D camera control."
+                    event: WindowEvent::CursorMoved {
+                        position,
+                        ..
+                    },
+                    ..
+                } => {
+                    cursor_position = position.into();
+                    window.window().set_cursor_position(
+                        (dimensions[0] as f64 / 2.0, dimensions[1] as f64 / 2.0).into()
+                    ).expect("Could not center the cursor position.");
+                },
+
+                Event::WindowEvent {
+                    event: WindowEvent::KeyboardInput {
+                        input: KeyboardInput {
+                            state,
+                            virtual_keycode: Some(virtual_code),
+                            ..
+                        },
+                        ..
+                    },
+                    ..
+                } => {
+                    match state {
+                        ElementState::Pressed => { pressed_keys.insert(virtual_code); }
+                        ElementState::Released => { pressed_keys.remove(&virtual_code); }
+                    }
+                },
+
+                Event::WindowEvent {
+                    event: WindowEvent::MouseInput {
+                        state,
+                        button,
+                        ..
+                    },
+                    ..
+                } => {
+                    match state {
+                        ElementState::Pressed => { pressed_mouse_buttons.insert(button); }
+                        ElementState::Released => { pressed_mouse_buttons.remove(&button); }
+                    }
+                }
+
+                Event::WindowEvent {
+                    event: WindowEvent::Resized(_),
+                    ..
+                } => recreate_swapchain = true,
+
                 _ => ()
             }
         });
+
         if done { return; }
     }
 }

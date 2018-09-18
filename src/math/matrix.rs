@@ -14,12 +14,14 @@ pub trait Matrix: Neg + Mul<Output=Self> + PartialEq + Sized + Debug {
 }
 
 pub trait AffineTransformation<V>: Matrix<Vector=V> where V: Homogeneous {
-    fn scale(&mut self, coefficient: f32);
-    fn translate(&mut self, translation: &<V as Homogeneous>::ProjectedVector);
+    fn scale(coefficient: f32) -> Self;
+    fn translation(translation: &<V as Homogeneous>::ProjectedVector) -> Self;
 }
 
 pub trait Rotation3<V>: AffineTransformation<V> where V: Homogeneous {
-    fn rotate(&mut self, translation: &<V as Homogeneous>::ProjectedVector);
+    fn rotation_yaw(yaw: f32) -> Self;
+    fn rotation_pitch(pitch: f32) -> Self;
+    fn rotation_roll(roll: f32) -> Self;
 }
 
 macro_rules! impl_mat {
@@ -180,7 +182,7 @@ macro_rules! impl_mat {
                             write!(f, "\t")?;
                         }
 
-                        write!(f, "{}", self[column][row])?;
+                        write!(f, "{:.4}", self[column][row])?;
                     }
                 }
 
@@ -196,21 +198,27 @@ macro_rules! impl_affine_transformation {
     ($ty_name:ident, $vector_ty_name:ident) => {
         impl AffineTransformation<$vector_ty_name> for $ty_name {
             #[inline]
-            fn scale(&mut self, coefficient: f32) {
+            fn scale(coefficient: f32) -> Self {
+                let mut result = Self::identity();
                 let dims = <<<$vector_ty_name as Homogeneous>::ProjectedVector as Vector>::Dimensions as Unsigned>::to_usize();
 
                 for i in 0..dims {
-                    self[i][i] *= coefficient;
+                    result[i][i] = coefficient;
                 }
+
+                result
             }
 
             #[inline]
-            fn translate(&mut self, translation: &<$vector_ty_name as Homogeneous>::ProjectedVector) {
+            fn translation(translation: &<$vector_ty_name as Homogeneous>::ProjectedVector) -> Self {
+                let mut result = Self::identity();
                 let dims = <<$vector_ty_name as Vector>::Dimensions as Unsigned>::to_usize();
 
                 for (index, component) in translation.iter().enumerate() {
-                    self[dims - 1][index] += component;
+                    result[dims - 1][index] = *component;
                 }
+
+                result
             }
         }
 
@@ -238,32 +246,27 @@ impl_affine_transformation!(Mat4, Vec4);
 
 impl Rotation3<Vec4> for Mat4 {
     #[inline]
-    fn rotate(&mut self, euler_angles: &Vec3) {
-        let e = euler_angles;
+    fn rotation_pitch(pitch: f32) -> Self {
+        mat4!([1.0,         0.0,          0.0, 0.0,
+               0.0, pitch.cos(), -pitch.sin(), 0.0,
+               0.0, pitch.sin(),  pitch.cos(), 0.0,
+               0.0,         0.0,          0.0, 1.0])
+    }
 
-        if e[0] != 0.0 {
-            let a = e[0];
-            *self = mat4!([1.0,     0.0,      0.0, 0.0,
-                           0.0, a.cos(), -a.sin(), 0.0,
-                           0.0, a.sin(),  a.cos(), 0.0,
-                           0.0,     0.0,      0.0, 1.0]) * &*self;
-        }
+    #[inline]
+    fn rotation_yaw(yaw: f32) -> Self {
+        mat4!([ yaw.cos(), 0.0, yaw.sin(), 0.0,
+                      0.0, 1.0,       0.0, 0.0,
+               -yaw.sin(), 0.0, yaw.cos(), 0.0,
+                      0.0, 0.0,       0.0, 1.0])
+    }
 
-        if e[1] != 0.0 {
-            let b = e[1];
-            *self = mat4!([ b.cos(), 0.0, b.sin(), 0.0,
-                                0.0, 1.0,     0.0, 0.0,
-                           -b.sin(), 0.0, b.cos(), 0.0,
-                                0.0, 0.0,     0.0, 1.0]) * &*self;
-        }
-
-        if e[2] != 0.0 {
-            let c = e[2];
-            *self = mat4!([c.cos(), -c.sin(), 0.0, 0.0,
-                           c.sin(),  c.cos(), 0.0, 0.0,
-                               0.0,      0.0, 1.0, 0.0,
-                               0.0,      0.0, 0.0, 1.0]) * &*self;
-        }
+    #[inline]
+    fn rotation_roll(roll: f32) -> Self {
+        mat4!([roll.cos(), -roll.sin(), 0.0, 0.0,
+               roll.sin(),  roll.cos(), 0.0, 0.0,
+                      0.0,         0.0, 1.0, 0.0,
+                      0.0,         0.0, 0.0, 1.0])
     }
 }
 
@@ -329,11 +332,8 @@ mod tests {
 
     #[test]
     fn matrix_vector_rotation() {
-        let mut mat = Mat4::identity();
-
-        mat.rotate(&[consts::FRAC_PI_2, 0.0, 0.0].into());
-        mat.rotate(&[0.0, consts::FRAC_PI_2, 0.0].into());
-
+        let mat = Mat4::rotation(&[0.0, consts::FRAC_PI_2, 0.0].into())
+            * Mat4::rotation(&[consts::FRAC_PI_2, 0.0, 0.0].into());
         let vec: Vec3 = [1.0, 2.0, 3.0].into();
 
         assert_eq!(mat * vec, [1.9999999, -3.0, -1.0000001].into());
@@ -341,10 +341,7 @@ mod tests {
 
     #[test]
     fn matrix_vector_translation() {
-        let mut mat = Mat4::identity();
-
-        mat.translate(&[10.0, 20.0, 30.0].into());
-
+        let mat = Mat4::translation(&[10.0, 20.0, 30.0].into());
         let vec: Vec3 = [1.0, 2.0, 3.0].into();
 
         assert_eq!(mat * vec, [11.0, 22.0, 33.0].into());
@@ -352,10 +349,7 @@ mod tests {
 
     #[test]
     fn matrix_vector_scale() {
-        let mut mat = Mat4::identity();
-
-        mat.scale(10.0);
-
+        let mat = Mat4::scale(10.0);
         let vec: Vec3 = [1.0, 2.0, 3.0].into();
 
         assert_eq!(mat * vec, [10.0, 20.0, 30.0].into());

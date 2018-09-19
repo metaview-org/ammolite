@@ -619,8 +619,10 @@ impl Model {
             let pbr = material.pbr_metallic_roughness();
             let base_color_texture_option: Option<Arc<dyn ImageViewAccess + Send + Sync>> = pbr
                 .base_color_texture()
-                .map(|it| it.texture().index())
-                .map(|index| device_images[index].clone());
+                .map(|texture_info| {
+                    let image_index = texture_info.texture().source().index();
+                    device_images[image_index].clone()
+                });
             let material_ubo = MaterialUBO::new(
                 pbr.base_color_factor().into(),
                 pbr.metallic_factor(),

@@ -9,6 +9,9 @@ use std::fmt;
 use std::marker::PhantomData;
 use rayon::prelude::*;
 use vulkano;
+use vulkano::sampler::SamplerAddressMode;
+use vulkano::sampler::Filter;
+use vulkano::sampler::MipmapMode;
 use vulkano::sync::GpuFuture;
 use vulkano::command_buffer::{DynamicState, AutoCommandBuffer, AutoCommandBufferBuilder};
 use vulkano::descriptor::pipeline_layout::PipelineLayoutAbstract;
@@ -52,6 +55,8 @@ use gltf::scene::Transform;
 use gltf::Scene;
 use gltf::accessor::DataType;
 use gltf::image::Format as GltfFormat;
+use gltf::texture::MagFilter;
+use gltf::texture::MinFilter;
 use generic_array::{GenericArray, ArrayLength};
 use failure::Error;
 use ::Position;
@@ -63,6 +68,7 @@ use math::*;
 use iter::ArrayIterator;
 use iter::ForcedExactSizeIterator;
 use vertex::{GltfVertexPosition, GltfVertexTexCoord, GltfVertexBuffers};
+use sampler::IntoVulkanEquivalent;
 use self::error::*;
 
 // #[derive(Clone)]
@@ -358,6 +364,7 @@ pub struct HelperResources {
     pub empty_image: Arc<dyn ImageViewAccess + Send + Sync>,
     pub zero_buffer: Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>,
     pub default_material_descriptor_set: Arc<dyn DescriptorSet + Send + Sync>,
+    pub cheapest_sampler: Arc<Sampler>,
 }
 
 impl HelperResources {
@@ -395,6 +402,21 @@ impl HelperResources {
             )
         }?;
 
+        // Create the cheapest sampler possible
+        let cheapest_sampler = Sampler::new(
+            device.clone(),
+            Filter::Nearest,
+            Filter::Nearest,
+            MipmapMode::Nearest,
+            SamplerAddressMode::Repeat,
+            SamplerAddressMode::Repeat,
+            SamplerAddressMode::Repeat,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+        )?;
+
         let (device_default_material_ubo_buffer, default_material_ubo_buffer_initialization) = unsafe {
             ImmutableBuffer::<MaterialUBO>::uninitialized(
                 device.clone(),
@@ -404,10 +426,8 @@ impl HelperResources {
         let default_material_descriptor_set: Arc<dyn DescriptorSet + Send + Sync> = Arc::new(
             PersistentDescriptorSet::start(pipeline.clone(), 2)
                 .add_buffer(device_default_material_ubo_buffer.clone()).unwrap()
-                .add_sampled_image(
-                    empty_device_image.clone(),
-                    Sampler::simple_repeat_linear(device.clone()), // TODO
-                ).unwrap()
+                .add_image(empty_device_image.clone()).unwrap()
+                .add_sampler(cheapest_sampler.clone()).unwrap()
                 .build().unwrap()
         );
 
@@ -431,6 +451,7 @@ impl HelperResources {
             empty_image: empty_device_image,
             zero_buffer: zero_device_buffer,
             default_material_descriptor_set,
+            cheapest_sampler,
         };
 
         Ok(SimpleUninitializedResource::new(output, tasks))
@@ -613,6 +634,29 @@ impl Model {
             node_descriptor_sets.push(descriptor_set);
         }
 
+        let mut device_samplers: Vec<Arc<Sampler>> = Vec::with_capacity(document.samplers().len());
+
+        for gltf_sampler in document.samplers() {
+            let (min_filter, mipmap_mode) = gltf_sampler.min_filter()
+                .unwrap_or(MinFilter::LinearMipmapLinear)
+                .into_vulkan_equivalent();
+            let sampler = Sampler::new(
+                device.clone(),
+                gltf_sampler.mag_filter().unwrap_or(MagFilter::Linear).into_vulkan_equivalent(),
+                min_filter,
+                mipmap_mode,
+                gltf_sampler.wrap_s().into_vulkan_equivalent(),
+                gltf_sampler.wrap_t().into_vulkan_equivalent(),
+                SamplerAddressMode::Repeat,
+                0.0,
+                1.0,
+                0.0,
+                1.0, // TODO check the range of LOD
+            )?;
+
+            device_samplers.push(sampler);
+        }
+
         let mut material_descriptor_sets: Vec<Arc<dyn DescriptorSet + Send + Sync>> = Vec::with_capacity(document.materials().len());
 
         for material in document.materials() {
@@ -623,6 +667,10 @@ impl Model {
                     let image_index = texture_info.texture().source().index();
                     device_images[image_index].clone()
                 });
+            let base_color_sampler_option: Option<Arc<Sampler>> = pbr
+                .base_color_texture()
+                .and_then(|texture_info| texture_info.texture().sampler().index())
+                .map(|sampler_index| device_samplers[sampler_index].clone());
             let material_ubo = MaterialUBO::new(
                 pbr.base_color_factor().into(),
                 pbr.metallic_factor(),
@@ -637,13 +685,13 @@ impl Model {
             }?;
             let base_color_texture: Arc<dyn ImageViewAccess + Send + Sync> = base_color_texture_option
                 .unwrap_or_else(|| helper_resources.empty_image.clone());
+            let base_color_sampler: Arc<Sampler> = base_color_sampler_option
+                .unwrap_or_else(|| helper_resources.cheapest_sampler.clone());
             let descriptor_set: Arc<dyn DescriptorSet + Send + Sync> = Arc::new(
                 PersistentDescriptorSet::start(pipeline.clone(), 2)
                     .add_buffer(device_material_ubo_buffer.clone()).unwrap()
-                    .add_sampled_image(
-                        base_color_texture,
-                        Sampler::simple_repeat_linear(device.clone()), // TODO
-                    ).unwrap()
+                    .add_image(base_color_texture).unwrap()
+                    .add_sampler(base_color_sampler).unwrap()
                     .build().unwrap()
             );
 

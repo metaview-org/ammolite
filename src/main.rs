@@ -24,6 +24,7 @@ pub mod model;
 pub mod iter;
 pub mod vertex;
 pub mod camera;
+pub mod sampler;
 
 use std::mem;
 use std::collections::HashSet;

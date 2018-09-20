@@ -1,5 +1,6 @@
 pub mod error;
 
+use std::cmp;
 use std::iter;
 use std::sync::Arc;
 use std::path::Path;
@@ -9,9 +10,15 @@ use std::fmt;
 use std::marker::PhantomData;
 use rayon::prelude::*;
 use vulkano;
+use vulkano::command_buffer::sys::UnsafeCommandBufferBuilder;
+use vulkano::command_buffer::sys::UnsafeCommandBufferBuilderPipelineBarrier;
+use vulkano::command_buffer::sys::Flags;
+use vulkano::command_buffer::sys::Kind;
 use vulkano::sampler::SamplerAddressMode;
 use vulkano::sampler::Filter;
 use vulkano::sampler::MipmapMode;
+use vulkano::sync::PipelineStages;
+use vulkano::sync::AccessFlagBits;
 use vulkano::sync::GpuFuture;
 use vulkano::command_buffer::{DynamicState, AutoCommandBuffer, AutoCommandBufferBuilder};
 use vulkano::descriptor::pipeline_layout::PipelineLayoutAbstract;
@@ -38,6 +45,7 @@ use vulkano::descriptor::descriptor::DescriptorDesc;
 use vulkano::buffer::immutable::ImmutableBuffer;
 use vulkano::descriptor::descriptor_set::DescriptorSet;
 use vulkano::sampler::Sampler;
+use vulkano::image::ImageDimensions;
 use vulkano::image::immutable::ImmutableImage;
 use vulkano::image::immutable::ImmutableImageInitialization;
 use vulkano::image::Dimensions;
@@ -228,24 +236,24 @@ pub struct DrawContext<'a, RPD>
 pub enum InitializationTask {
     Buffer {
         data: Vec<u8>,
-        initialization_buffer: Box<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>,
+        initialization_buffer: Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>,
     },
     ZeroBuffer {
         len: usize,
-        initialization_buffer: Box<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>,
+        initialization_buffer: Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>,
     },
     Image {
         data: Vec<u8>,
-        device_image: Box<dyn ImageAccess + Send + Sync>,
+        device_image: Arc<dyn ImageAccess + Send + Sync>,
         texel_conversion: Option<Box<dyn for<'a> Fn(&'a [u8]) -> Box<ExactSizeIterator<Item=u8> + 'a>>>,
     },
     NodeDescriptorSet {
         data: NodeUBO,
-        initialization_buffer: Box<dyn TypedBufferAccess<Content=NodeUBO> + Send + Sync>,
+        initialization_buffer: Arc<dyn TypedBufferAccess<Content=NodeUBO> + Send + Sync>,
     },
     MaterialDescriptorSet {
         data: MaterialUBO,
-        initialization_buffer: Box<dyn TypedBufferAccess<Content=MaterialUBO> + Send + Sync>,
+        initialization_buffer: Arc<dyn TypedBufferAccess<Content=MaterialUBO> + Send + Sync>,
     },
 }
 
@@ -272,7 +280,7 @@ impl fmt::Debug for InitializationTask {
 }
 
 impl InitializationTask {
-    fn initialize(self, device: &Arc<Device>, command_buffer_builder: AutoCommandBufferBuilder) -> Result<AutoCommandBufferBuilder, Error> {
+    fn initialize(self, device: &Arc<Device>, queue_family: QueueFamily, command_buffer_builder: AutoCommandBufferBuilder) -> Result<AutoCommandBufferBuilder, Error> {
         match self {
             InitializationTask::Buffer { data, initialization_buffer, .. } => {
                 let staging_buffer: Arc<CpuAccessibleBuffer<[u8]>> = CpuAccessibleBuffer::from_iter(
@@ -303,7 +311,69 @@ impl InitializationTask {
                     },
                 )?;
 
-                Ok(command_buffer_builder.copy_buffer_to_image(staging_buffer, device_image)?)
+                let mut command_buffer_builder = command_buffer_builder
+                    .copy_buffer_to_image(staging_buffer, device_image.clone())?;
+
+                let (width, height) = if let ImageDimensions::Dim2d { width, height, .. } = device_image.dimensions() {
+                    (width, height)
+                } else {
+                    panic!("Texture mipmap generation is not implemented for non-2d textures.");
+                };
+
+                for mip_level in 1..device_image.mipmap_levels() {
+                    let source_mip_level = mip_level - 1;
+                    let mip_dimensions = (width >> mip_level, height >> mip_level);
+                    let source_mip_dimensions = (width >> source_mip_level, height >> source_mip_level);
+
+                    // unsafe {
+                    //     let pool = Device::standard_command_pool(&device, queue_family);
+                    //     let mut mipmap_layout_transition_commands = UnsafeCommandBufferBuilder::new(&pool, Kind::primary(), Flags::OneTimeSubmit)?;
+                    //     let mut barrier = UnsafeCommandBufferBuilderPipelineBarrier::new();
+
+                    //     barrier.add_image_memory_barrier(
+                    //         &device_image,
+                    //         mip_level..(mip_level + 1),
+                    //         0..1,
+                    //         PipelineStages {
+                    //             transfer: true,
+                    //             .. PipelineStages::none()
+                    //         },
+                    //         AccessFlagBits::none(),
+                    //         PipelineStages {
+                    //             host: true,
+                    //             .. PipelineStages::none()
+                    //         },
+                    //         AccessFlagBits {
+                    //             transfer_write: true,
+                    //             .. AccessFlagBits::none()
+                    //         },
+                    //         false, //????
+                    //         None,
+                    //         ImageLayout::Undefined,
+                    //         ImageLayout::TransferDstOptimal,
+                    //     );
+                    //     mipmap_layout_transition_commands.pipeline_barrier(&barrier);
+                    //     command_buffer_builder = command_buffer_builder
+                    //         .execute_commands(mipmap_layout_transition_commands)?;
+                    // }
+
+                    command_buffer_builder = command_buffer_builder.blit_image(
+                        device_image.clone(),
+                        [0, 0, 0],
+                        [source_mip_dimensions.0 as i32, source_mip_dimensions.1 as i32, 1],
+                        0,
+                        source_mip_level,
+                        device_image.clone(),
+                        [0, 0, 0],
+                        [mip_dimensions.0 as i32, mip_dimensions.1 as i32, 1],
+                        0,
+                        mip_level,
+                        1,
+                        Filter::Linear,
+                    )?;
+                }
+
+                Ok(command_buffer_builder)
             },
             InitializationTask::NodeDescriptorSet { data, initialization_buffer, .. } => {
                 let staging_buffer: Arc<CpuAccessibleBuffer<NodeUBO>> = CpuAccessibleBuffer::from_data(
@@ -331,6 +401,7 @@ pub trait UninitializedResource<T> {
     fn initialize_resource(
         self,
         device: &Arc<Device>,
+        queue_family: QueueFamily,
         command_buffer_builder: AutoCommandBufferBuilder
     ) -> Result<(AutoCommandBufferBuilder, T), Error>;
 }
@@ -350,9 +421,9 @@ impl<T> SimpleUninitializedResource<T> {
 }
 
 impl<T> UninitializedResource<T> for SimpleUninitializedResource<T> {
-    fn initialize_resource(self, device: &Arc<Device>, mut command_buffer_builder: AutoCommandBufferBuilder) -> Result<(AutoCommandBufferBuilder, T), Error> {
+    fn initialize_resource(self, device: &Arc<Device>, queue_family: QueueFamily, mut command_buffer_builder: AutoCommandBufferBuilder) -> Result<(AutoCommandBufferBuilder, T), Error> {
         for initialization_task in self.tasks.into_iter() {
-            command_buffer_builder = initialization_task.initialize(device, command_buffer_builder)?;
+            command_buffer_builder = initialization_task.initialize(device, queue_family, command_buffer_builder)?;
         }
 
         Ok((command_buffer_builder, self.output))
@@ -434,16 +505,16 @@ impl HelperResources {
         let tasks = vec![
             InitializationTask::Image {
                 data: vec![0],
-                device_image: Box::new(empty_image_initialization),
+                device_image: Arc::new(empty_image_initialization),
                 texel_conversion: None,
             },
             InitializationTask::ZeroBuffer {
                 len: zero_buffer_len,
-                initialization_buffer: Box::new(zero_buffer_initialization),
+                initialization_buffer: Arc::new(zero_buffer_initialization),
             },
             InitializationTask::MaterialDescriptorSet {
                 data: MaterialUBO::default(),
-                initialization_buffer: Box::new(default_material_ubo_buffer_initialization),
+                initialization_buffer: Arc::new(default_material_ubo_buffer_initialization),
             },
         ];
 
@@ -530,7 +601,7 @@ impl Model {
             }?;
             initialization_tasks.push(InitializationTask::Buffer {
                 data: buffer_data,
-                initialization_buffer: Box::new(buffer_initialization),
+                initialization_buffer: Arc::new(buffer_initialization),
             });
             device_buffers.push(device_buffer);
         }
@@ -554,8 +625,9 @@ impl Model {
                             height,
                         },
                         $($vk_format)+,
-                        MipmapsCount::One, // TODO: Figure out how mipmapping works
+                        MipmapsCount::Log2,
                         ImageUsage {
+                            transfer_source: true,
                             transfer_destination: true,
                             sampled: true,
                             ..ImageUsage::none()
@@ -575,7 +647,7 @@ impl Model {
                         |image_initialization: ImmutableImageInitialization<$($vk_format)+>| {
                             initialization_tasks.push(InitializationTask::Image {
                                 data: pixels,
-                                device_image: Box::new(image_initialization),
+                                device_image: Arc::new(image_initialization),
                                 texel_conversion: None,
                             });
                         }
@@ -588,7 +660,7 @@ impl Model {
                         |image_initialization: ImmutableImageInitialization<$($vk_format)+>| {
                             initialization_tasks.push(InitializationTask::Image {
                                 data: pixels,
-                                device_image: Box::new(image_initialization),
+                                device_image: Arc::new(image_initialization),
                                 texel_conversion: Some($texel_conversion),
                             });
                         }
@@ -629,7 +701,7 @@ impl Model {
 
             initialization_tasks.push(InitializationTask::NodeDescriptorSet {
                 data: node_ubo,
-                initialization_buffer: Box::new(buffer_initialization),
+                initialization_buffer: Arc::new(buffer_initialization),
             });
             node_descriptor_sets.push(descriptor_set);
         }
@@ -697,7 +769,7 @@ impl Model {
 
             initialization_tasks.push(InitializationTask::MaterialDescriptorSet {
                 data: material_ubo,
-                initialization_buffer: Box::new(material_ubo_buffer_initialization),
+                initialization_buffer: Arc::new(material_ubo_buffer_initialization),
             });
             material_descriptor_sets.push(descriptor_set);
         }
@@ -881,11 +953,3 @@ impl Model {
         command_buffer
     }
 }
-
-// #[derive(Debug)]
-// pub struct BufferSlicePublic<T: ?Sized, B> {
-//     pub marker: PhantomData<T>,
-//     pub resource: B,
-//     pub offset: usize,
-//     pub size: usize,
-// }

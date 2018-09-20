@@ -126,12 +126,6 @@ impl Camera for PitchYawCamera3 {
         if direction_norm != 0.0 {
             direction *= distance as f32 / direction_norm;
             self.location += &direction;
-
-            println!("yaw: {}", self.yaw);
-            println!("pitch: {}", self.pitch);
-            println!("forward: {:?}", forward);
-            println!("left: {:?}", left);
-            println!("direction: {:?}", &direction / direction.norm());
         }
     }
 }

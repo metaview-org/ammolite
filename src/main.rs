@@ -706,6 +706,7 @@ fn main() {
         main_pipeline.clone(),
     ).unwrap().initialize_resource(
         &device,
+        queue_family.clone(),
         init_command_buffer_builder,
     ).unwrap();
     let (init_command_buffer_builder, mut model) = {
@@ -721,6 +722,7 @@ fn main() {
             model_path,
         ).unwrap().initialize_resource(
             &device,
+            queue_family.clone(),
             init_command_buffer_builder
         ).unwrap()
     };

@@ -183,7 +183,7 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
 
     // )
     let window = WindowBuilder::new()
-        .with_title("metaview")
+        .with_title("ammolite")
         .build_vk_surface(&events_loop, instance.clone()).unwrap();
 
     window.window().hide_cursor(true);

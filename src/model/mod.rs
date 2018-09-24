@@ -531,8 +531,9 @@ impl HelperResources {
 
 pub struct Model {
     document: Document,
-    device_buffers: Vec<Arc<ImmutableBuffer<[u8]>>>,
+    device_buffers: Vec<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>,
     device_images: Vec<Arc<dyn ImageViewAccess + Send + Sync>>,
+    converted_index_buffers_by_accessor_index: Vec<Option<Arc<dyn TypedBufferAccess<Content=[u16]> + Send + Sync>>>,
     // Note: Do not ever try to express the descriptor set explicitly.
     node_descriptor_sets: Vec<Arc<dyn DescriptorSet + Send + Sync>>,
     material_descriptor_sets: Vec<Arc<dyn DescriptorSet + Send + Sync>>,
@@ -578,9 +579,49 @@ impl Model {
                   S: AsRef<Path> {
         let (document, buffer_data_array, image_data_array) = gltf::import(path)?;
         let mut initialization_tasks: Vec<InitializationTask> = Vec::with_capacity(
-            buffer_data_array.len() + image_data_array.len() + document.nodes().len()
+            buffer_data_array.len() + image_data_array.len() + document.accessors().len() + document.nodes().len() + document.materials().len()
         );
-        let mut device_buffers: Vec<Arc<ImmutableBuffer<[u8]>>> = Vec::with_capacity(buffer_data_array.len());
+
+        let mut converted_index_buffers_by_accessor_index: Vec<Option<Arc<dyn TypedBufferAccess<Content=[u16]> + Send + Sync>>> = vec![None; document.accessors().len()];
+
+        for mesh in document.meshes() {
+            for primitive in mesh.primitives() {
+                if let Some(index_accessor) = primitive.indices() {
+                    if index_accessor.data_type() == DataType::U8 {
+                        let index_view = index_accessor.view();
+
+                        assert!(index_view.stride().is_none(), "The stride of the index view must be `None`.");
+
+                        let byte_offset = index_view.offset() + index_accessor.offset();
+                        let byte_len = mem::size_of::<u8>() * index_accessor.count();
+                        let index_slice = &buffer_data_array[index_view.buffer().index()][byte_offset..(byte_offset + byte_len)];
+                        let buffer_data: Vec<u8> = index_slice.into_iter().flat_map(|index| ArrayIterator::new([0, *index])).collect(); // FIXME: Assumes byte order in u16
+                        let (device_index_buffer, index_buffer_initialization) = unsafe {
+                            ImmutableBuffer::<[u16]>::raw(
+                                device.clone(),
+                                byte_len,
+                                BufferUsage { // TODO: Scan document for buffer usage and optimize
+                                    transfer_destination: true,
+                                    index_buffer: true,
+                                    ..BufferUsage::none()
+                                },
+                                queue_families.clone(),
+                            )
+                        }?;
+                        let index_buffer_initialization: BufferSlice<[u8], _> = unsafe {
+                            BufferSlice::from_typed_buffer_access(index_buffer_initialization).reinterpret::<[u8]>()
+                        };
+                        initialization_tasks.push(InitializationTask::Buffer {
+                            data: buffer_data,
+                            initialization_buffer: Arc::new(index_buffer_initialization),
+                        });
+                        converted_index_buffers_by_accessor_index[index_accessor.index()] = Some(device_index_buffer);
+                    }
+                }
+            }
+        }
+
+        let mut device_buffers: Vec<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = Vec::with_capacity(buffer_data_array.len());
 
         for (index, gltf::buffer::Data(buffer_data)) in buffer_data_array.into_iter().enumerate() {
             let (device_buffer, buffer_initialization) = unsafe {
@@ -777,9 +818,10 @@ impl Model {
         Ok(SimpleUninitializedResource::new(Model {
             document,
             device_buffers,
+            device_images,
+            converted_index_buffers_by_accessor_index,
             node_descriptor_sets,
             material_descriptor_sets,
-            device_images,
         }, initialization_tasks))
     }
 
@@ -858,7 +900,7 @@ impl Model {
         let tex_coords_accessor = primitive.get(&Semantic::TexCoords(0));
         let indices_accessor = primitive.indices();
 
-        let position_slice: BufferSlice<[GltfVertexPosition], Arc<ImmutableBuffer<[u8]>>> = {
+        let position_slice: BufferSlice<[GltfVertexPosition], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = {
             let buffer_view = positions_accessor.view();
             let buffer_index = buffer_view.buffer().index();
             let buffer_offset = positions_accessor.offset() + buffer_view.offset();
@@ -901,7 +943,7 @@ impl Model {
         if let Some(indices_accessor) = indices_accessor {
             macro_rules! draw_indexed {
                 ($index_type:ty; $command_buffer:ident, $context:ident, $vertex_buffers:ident, $indices_accessor:ident, $sets:ident) => {
-                    let index_slice: BufferSlice<[$index_type], Arc<ImmutableBuffer<[u8]>>> = {
+                    let index_slice: BufferSlice<[$index_type], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = {
                         let buffer_view = $indices_accessor.view();
                         let buffer_index = buffer_view.buffer().index();
                         let buffer_offset = $indices_accessor.offset() + buffer_view.offset();
@@ -931,6 +973,19 @@ impl Model {
             }
 
             match indices_accessor.data_type() {
+                DataType::U8 => {
+                    let index_buffer = self.converted_index_buffers_by_accessor_index[indices_accessor.index()]
+                        .as_ref()
+                        .expect("Could not access a pre-generated `u16` index buffer, maybe it was not generated?")
+                        .clone();
+                    command_buffer = command_buffer.draw_indexed(
+                        context.pipeline.clone(),
+                        context.dynamic,
+                        vertex_buffers,
+                        index_buffer,
+                        sets.clone(),
+                        () /* push_constants */).unwrap();
+                },
                 DataType::U16 => {
                     draw_indexed!(u16; command_buffer, context, vertex_buffers, indices_accessor, sets);
                 },
@@ -939,7 +994,7 @@ impl Model {
                 },
                 _ => {
                     panic!("Index type not supported.");
-                }
+                },
             }
         } else {
             command_buffer = command_buffer.draw(

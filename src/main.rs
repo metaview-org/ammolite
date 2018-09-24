@@ -840,7 +840,7 @@ fn main() {
             camera.get_view_matrix(),
             // construct_view_matrix(&[(seconds_elapsed as f32 * 0.5).cos(), 0.0, 0.0].into(),
             //                       &[0.0, 0.0, 0.0].into()),
-            construct_perspective_projection_matrix(0.1, 1000.0, dimensions[0] as f32 / dimensions[1] as f32, std::f32::consts::FRAC_PI_2),
+            construct_perspective_projection_matrix(0.001, 1000.0, dimensions[0] as f32 / dimensions[1] as f32, std::f32::consts::FRAC_PI_2),
             // construct_orthographic_projection_matrix(0.1, 1000.0, [dimensions[0] as f32 / dimensions[1] as f32, 1.0].into()),
         );
 

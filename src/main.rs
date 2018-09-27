@@ -32,6 +32,10 @@ use std::sync::Arc;
 use std::ops::Deref;
 use std::ffi::CString;
 use std::time::{Instant, Duration};
+use vulkano::framebuffer::RenderPassAbstract;
+use vulkano::pipeline::GraphicsPipelineAbstract;
+use vulkano::pipeline::shader::EntryPointAbstract;
+use vulkano::pipeline::shader::GraphicsEntryPointAbstract;
 use vulkano::instance::RawInstanceExtensions;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer};
 use vulkano::command_buffer::{AutoCommandBuffer, AutoCommandBufferBuilder, DynamicState};
@@ -49,6 +53,8 @@ use vulkano::pipeline::vertex::SingleBufferDefinition;
 use vulkano::pipeline::depth_stencil::DepthStencil;
 use vulkano::descriptor::PipelineLayoutAbstract;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
+use vulkano::descriptor::descriptor_set::PersistentDescriptorSetImg;
+use vulkano::descriptor::descriptor_set::PersistentDescriptorSetBuf;
 use vulkano::swapchain::{self, PresentMode, SurfaceTransform, Swapchain, AcquireError, SwapchainCreationError, Surface};
 use vulkano::sampler::{Sampler, SamplerAddressMode, BorderColor, MipmapMode, Filter};
 use vulkano_win::VkSurfaceBuild;
@@ -68,8 +74,7 @@ use model::HelperResources;
 use vertex::GltfVertexBufferDefinition;
 use camera::*;
 
-pub type MainDescriptorSet<RPD: RenderPassDesc> = std::sync::Arc<vulkano::descriptor::descriptor_set::PersistentDescriptorSet<std::sync::Arc<vulkano::pipeline::GraphicsPipeline<GltfVertexBufferDefinition, std::boxed::Box<dyn vulkano::descriptor::PipelineLayoutAbstract + std::marker::Sync + std::marker::Send>, std::sync::Arc<vulkano::framebuffer::RenderPass<RPD>>>>, ((((), vulkano::descriptor::descriptor_set::PersistentDescriptorSetBuf<std::sync::Arc<vulkano::buffer::DeviceLocalBuffer<gltf_fs::ty::SceneUBO>>>), vulkano::descriptor::descriptor_set::PersistentDescriptorSetImg<std::sync::Arc<vulkano::image::AttachmentImage>>), vulkano::descriptor::descriptor_set::PersistentDescriptorSetSampler)>>;
-pub type PipelineImpl<RPD: RenderPassDesc> = Arc<GraphicsPipeline<GltfVertexBufferDefinition, Box<(dyn PipelineLayoutAbstract + Sync + Send + 'static)>, Arc<RenderPass<RPD>>>>;
+pub type MainDescriptorSet = Arc<PersistentDescriptorSet<Arc<GraphicsPipeline<GltfVertexBufferDefinition, Box<dyn PipelineLayoutAbstract + Sync + Send>, Arc<RenderPassAbstract + Send + Sync>>>, ((((), PersistentDescriptorSetBuf<Arc<DeviceLocalBuffer<SceneUBO>>>), PersistentDescriptorSetImg<Arc<AttachmentImage>>), vulkano::descriptor::descriptor_set::PersistentDescriptorSetSampler)>>;
 
 #[derive(Copy, Clone)]
 pub struct Position {
@@ -94,31 +99,7 @@ struct ScreenVertex {
 
 impl_vertex!(ScreenVertex, position);
 
-mod screen_vs {
-    #[derive(VulkanoShader)]
-    #[ty = "vertex"]
-    #[path = "src/shaders/screen.vert"]
-    #[allow(dead_code)]
-    struct Dummy;
-}
-
-mod screen_fs {
-    #[derive(VulkanoShader)]
-    #[ty = "fragment"]
-    #[path = "src/shaders/screen.frag"]
-    #[allow(dead_code)]
-    struct Dummy;
-}
-
-mod gltf_fs {
-    #[derive(VulkanoShader)]
-    #[ty = "fragment"]
-    #[path = "src/shaders/gltf.frag"]
-    #[allow(dead_code)]
-    struct Dummy;
-}
-
-mod gltf_vs {
+mod gltf_vert {
     #[derive(VulkanoShader)]
     #[ty = "vertex"]
     #[path = "src/shaders/gltf.vert"]
@@ -126,7 +107,31 @@ mod gltf_vs {
     struct Dummy;
 }
 
-use gltf_fs::ty::*;
+mod gltf_opaque_frag {
+    #[derive(VulkanoShader)]
+    #[ty = "fragment"]
+    #[path = "src/shaders/gltf_opaque.frag"]
+    #[allow(dead_code)]
+    struct Dummy;
+}
+
+mod gltf_mask_frag {
+    #[derive(VulkanoShader)]
+    #[ty = "fragment"]
+    #[path = "src/shaders/gltf_mask.frag"]
+    #[allow(dead_code)]
+    struct Dummy;
+}
+
+mod gltf_blend_frag {
+    #[derive(VulkanoShader)]
+    #[ty = "fragment"]
+    #[path = "src/shaders/gltf_blend.frag"]
+    #[allow(dead_code)]
+    struct Dummy;
+}
+
+pub use gltf_opaque_frag::ty::*;
 
 impl SceneUBO {
     pub fn new(dimensions: Vec2, model: Mat4, view: Mat4, projection: Mat4) -> SceneUBO {
@@ -149,13 +154,12 @@ impl NodeUBO {
 }
 
 impl MaterialUBO {
-    pub fn new(base_color_factor: Vec4, metallic_factor: f32, roughness_factor: f32, base_color_texture_provided: bool, alpha_mode_mask: bool, alpha_cutoff: f32) -> Self {
+    pub fn new(base_color_factor: Vec4, metallic_factor: f32, roughness_factor: f32, base_color_texture_provided: bool, alpha_cutoff: f32) -> Self {
         MaterialUBO {
             base_color_factor: base_color_factor.0,
             metallic_factor,
             roughness_factor,
             base_color_texture_provided: base_color_texture_provided as u32,
-            alpha_mode_mask: alpha_mode_mask as u32,
             alpha_cutoff,
         }
     }
@@ -167,7 +171,6 @@ impl Default for MaterialUBO {
             [1.0, 1.0, 1.0, 1.0].into(),
             1.0,
             1.0,
-            false,
             false,
             0.0,
         )
@@ -275,11 +278,8 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
 //     unimplemented!()
 // }
 
-fn vulkan_main_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> PipelineImpl<impl RenderPassDesc> {
-    let main_vs = gltf_vs::Shader::load(device.clone()).expect("Failed to create shader module.");
-    let main_fs = gltf_fs::Shader::load(device.clone()).expect("Failed to create shader module.");
-    // let main_vs = main_vs::Shader::load(device.clone()).expect("Failed to create shader module.");
-    // let main_fs = main_fs::Shader::load(device.clone()).expect("Failed to create shader module.");
+fn create_pipeline_gltf_opaque(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>, shared_vs: &gltf_vert::Shader) -> (Arc<GraphicsPipelineAbstract + Send + Sync>, Arc<RenderPassAbstract + Send + Sync>) {
+    let fs = gltf_opaque_frag::Shader::load(device.clone()).expect("Failed to create shader module.");
 
     // A special GPU mode highly-optimized for rendering
     // This really shouldn't have to be Boxed, but making the type system happy is a struggle.
@@ -293,7 +293,7 @@ fn vulkan_main_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>
             },
             depth_stencil: {
                 load: Clear,
-                store: DontCare,
+                store: Store,
                 format: Format::D32Sfloat,
                 samples: 1,
                 initial_layout: ImageLayout::Undefined,
@@ -307,25 +307,102 @@ fn vulkan_main_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>
         }
     }.unwrap());
 
-    Arc::new(GraphicsPipeline::start()
-        // .with_pipeline_layout(device.clone(), pipeline_layout)
-        // Specifies the vertex type
-        .vertex_input(GltfVertexBufferDefinition)
-        // .vertex_input_single_buffer::<Position>()
-        .vertex_shader(main_vs.main_entry_point(), ())
-        // Configures the builder so that we use one viewport, and that the state of this viewport
-        // is dynamic. This makes it possible to change the viewport for each draw command. If the
-        // viewport state wasn't dynamic, then we would have to create a new pipeline object if we
-        // wanted to draw to another image of a different size.
-        //
-        // Note: If you configure multiple viewports, you can use geometry shaders to choose which
-        // viewport the shape is going to be drawn to. This topic isn't covered here.
-        .viewports_dynamic_scissors_irrelevant(1)
-        .depth_stencil(DepthStencil::simple_depth_test())
-        .fragment_shader(main_fs.main_entry_point(), ())
-        .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
-        .build(device.clone())
-        .unwrap())
+    (
+        Arc::new(GraphicsPipeline::start()
+            // .with_pipeline_layout(device.clone(), pipeline_layout)
+            // Specifies the vertex type
+            .vertex_input(GltfVertexBufferDefinition)
+            // .vertex_input_single_buffer::<Position>()
+            .vertex_shader(shared_vs.main_entry_point(), ())
+            // Configures the builder so that we use one viewport, and that the state of this viewport
+            // is dynamic. This makes it possible to change the viewport for each draw command. If the
+            // viewport state wasn't dynamic, then we would have to create a new pipeline object if we
+            // wanted to draw to another image of a different size.
+            //
+            // Note: If you configure multiple viewports, you can use geometry shaders to choose which
+            // viewport the shape is going to be drawn to. This topic isn't covered here.
+            .viewports_dynamic_scissors_irrelevant(1)
+            .depth_stencil(DepthStencil::simple_depth_test())
+            .fragment_shader(fs.main_entry_point(), ())
+            .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
+            .build(device.clone())
+            .unwrap()),
+        render_pass
+    )
+}
+
+fn create_pipeline_gltf_mask(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>, shared_vs: &gltf_vert::Shader) -> (Arc<GraphicsPipelineAbstract + Send + Sync>, Arc<RenderPassAbstract + Send + Sync>) {
+    let fs = gltf_mask_frag::Shader::load(device.clone()).expect("Failed to create shader module.");
+
+    // A special GPU mode highly-optimized for rendering
+    // This really shouldn't have to be Boxed, but making the type system happy is a struggle.
+    let render_pass = Arc::new(single_pass_renderpass! { device.clone(),
+        attachments: {
+            color: {
+                load: Load,
+                store: Store, // for temporary images, use DontCare
+                format: swapchain.format(),
+                samples: 1,
+            },
+            depth_stencil: {
+                load: Load,
+                store: DontCare,
+                format: Format::D32Sfloat,
+                samples: 1,
+            }
+        },
+        pass: {
+            color: [color],
+            depth_stencil: { depth_stencil }
+        }
+    }.unwrap());
+
+    (
+        Arc::new(GraphicsPipeline::start()
+            // .with_pipeline_layout(device.clone(), pipeline_layout)
+            // Specifies the vertex type
+            .vertex_input(GltfVertexBufferDefinition)
+            // .vertex_input_single_buffer::<Position>()
+            .vertex_shader(shared_vs.main_entry_point(), ())
+            // Configures the builder so that we use one viewport, and that the state of this viewport
+            // is dynamic. This makes it possible to change the viewport for each draw command. If the
+            // viewport state wasn't dynamic, then we would have to create a new pipeline object if we
+            // wanted to draw to another image of a different size.
+            //
+            // Note: If you configure multiple viewports, you can use geometry shaders to choose which
+            // viewport the shape is going to be drawn to. This topic isn't covered here.
+            .viewports_dynamic_scissors_irrelevant(1)
+            .depth_stencil(DepthStencil::simple_depth_test())
+            .fragment_shader(fs.main_entry_point(), ())
+            .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
+            .build(device.clone())
+            .unwrap()),
+        render_pass
+    )
+}
+
+macro_rules! combine_graphics_pipelines {
+    ($device:expr, [$($pipelines:expr),+]) => {{
+        let builder = GraphicsPipeline::start()
+            // Configures the builder so that we use one viewport, and that the state of this viewport
+            // is dynamic. This makes it possible to change the viewport for each draw command. If the
+            // viewport state wasn't dynamic, then we would have to create a new pipeline object if we
+            // wanted to draw to another image of a different size.
+            //
+            // Note: If you configure multiple viewports, you can use geometry shaders to choose which
+            // viewport the shape is going to be drawn to. This topic isn't covered here.
+            .viewports_dynamic_scissors_irrelevant(1);
+
+        $(
+            let builder = {
+                let subpass = Subpass::from($pipelines, 0).unwrap();
+
+                builder.render_pass(subpass)
+            };
+        )+
+
+        Arc::new(builder.build($device.clone()).unwrap())
+    }}
 }
 
 fn create_staging_buffer_image<P, C>(device: &Arc<Device>, queue_family: QueueFamily, image: &ImageBuffer<P, C>)
@@ -452,51 +529,6 @@ fn create_vertex_index_buffers<V, I, VI, II>(device: &Arc<Device>, queue_family:
     )
 }
 
-fn vulkan_screen_pipeline(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Arc<GraphicsPipeline<SingleBufferDefinition<ScreenVertex>, Box<dyn PipelineLayoutAbstract + Send + Sync>, Arc<RenderPass<impl RenderPassDesc>>>> {
-    // A special GPU mode highly-optimized for rendering
-    let screen_vs = screen_vs::Shader::load(device.clone()).expect("Failed to create shader module.");
-    let screen_fs = screen_fs::Shader::load(device.clone()).expect("Failed to create shader module.");
-
-    let render_pass = Arc::new(single_pass_renderpass! { device.clone(),
-        attachments: {
-            color: {
-                load: Clear,
-                store: Store, // for temporary images, use DontCare
-                format: swapchain.format(),
-                samples: 1,
-            }
-        },
-        pass: {
-            color: [color],
-            depth_stencil: {}
-        }
-    }.unwrap());
-
-    // let pipeline_layout = PipelineLayour
-
-    Arc::new(GraphicsPipeline::start()
-        // .with_pipeline_layout(device.clone(), pipeline_layout)
-        // Specifies the vertex type
-        .vertex_input_single_buffer::<ScreenVertex>()
-        .vertex_shader(screen_vs.main_entry_point(), ())
-        // Configures the builder so that we use one viewport, and that the state of this viewport
-        // is dynamic. This makes it possible to change the viewport for each draw command. If the
-        // viewport state wasn't dynamic, then we would have to create a new pipeline object if we
-        // wanted to draw to another image of a different size.
-        //
-        // Note: If you configure multiple viewports, you can use geometry shaders to choose which
-        // viewport the shape is going to be drawn to. This topic isn't covered here.
-        .viewports([Viewport {
-            origin: [0.0, 0.0],
-            dimensions: [SCREEN_DIMENSIONS[0] as f32, SCREEN_DIMENSIONS[1] as f32],
-            depth_range: 0.0 .. 1.0,
-        }].into_iter().cloned())
-        .fragment_shader(screen_fs.main_entry_point(), ())
-        .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
-        .build(device.clone())
-        .unwrap())
-}
-
 fn construct_model_matrix(scale: f32, translation: &Vec3, rotation: &Vec3) -> Mat4 {
     Mat4::translation(translation)
         * Mat4::rotation_roll(rotation[2])
@@ -551,7 +583,7 @@ fn construct_perspective_projection_matrix(near_plane: f32, far_plane: f32, aspe
     //                     0.0, 0.0, -z_f / (z_n - z_f), (z_n * z_f) / (z_n - z_f),
     //                     0.0, 0.0,                1.0,                       0.0])
 
-    // TODO: Investigate
+    // TODO: Investigate the mysterious requirement of flipping the X coordinate
     mat4!([-f / aspect_ratio, 0.0,                0.0,                       0.0,
                          0.0,  -f,                0.0,                       0.0,
                          0.0, 0.0, -z_f / (z_n - z_f), (z_n * z_f) / (z_n - z_f),
@@ -637,8 +669,13 @@ fn main() {
         screen_indices.into_iter().cloned(),
     );
 
-    let main_pipeline = vulkan_main_pipeline(&device, &swapchain);
-    let screen_pipeline = vulkan_screen_pipeline(&device, &swapchain);
+    let vertex_shader = gltf_vert::Shader::load(device.clone()).expect("Failed to create shader module.");
+    let (pipeline_gltf_opaque, render_pass_gltf_opaque) = create_pipeline_gltf_opaque(&device, &swapchain, &vertex_shader);
+    let (pipeline_gltf_mask, render_pass_gltf_mask) = create_pipeline_gltf_mask(&device, &swapchain, &vertex_shader);
+    let combined_pipeline = combine_graphics_pipelines!(
+        &device,
+        [pipeline_gltf_opaque.clone(), pipeline_gltf_mask.clone()]
+    );
 
     let mut main_ubo = SceneUBO::new(
         Vec2([dimensions[0] as f32, dimensions[1] as f32]),
@@ -680,20 +717,24 @@ fn main() {
         1.0,  // min_lod
         1.0,  // max_lod
     ).unwrap();
-    let main_descriptor_set = Arc::new(
-        PersistentDescriptorSet::start(main_pipeline.clone(), 0)
+    let main_descriptor_set_gltf_opaque = Arc::new(
+        PersistentDescriptorSet::start(pipeline_gltf_opaque.clone(), 0)
             .add_buffer(main_ubo_device_buffer.clone()).unwrap()
-            .add_sampled_image(screen_image.clone(), screen_sampler.clone()).unwrap()
+            .build().unwrap()
+    );
+    let main_descriptor_set_gltf_mask = Arc::new(
+        PersistentDescriptorSet::start(pipeline_gltf_mask.clone(), 0)
+            .add_buffer(main_ubo_device_buffer.clone()).unwrap()
             .build().unwrap()
     );
 
-    let screen_framebuffers: Vec<Arc<Framebuffer<_, _>>> = images.iter().map(|_| {
-        Arc::new(
-            Framebuffer::start(screen_pipeline.render_pass().clone())
-            .add(screen_image.clone()).unwrap()
-            .build().unwrap()
-        )
-    }).collect();
+    // let screen_framebuffers: Vec<Arc<Framebuffer<_, _>>> = images.iter().map(|_| {
+    //     Arc::new(
+    //         Framebuffer::start(screen_pipeline.render_pass().clone())
+    //         .add(screen_image.clone()).unwrap()
+    //         .build().unwrap()
+    //     )
+    // }).collect();
     let mut main_framebuffers: Option<Vec<Arc<Framebuffer<_, _>>>> = None;
     let mut depth_image: Option<Arc<AttachmentImage>> = None;
 
@@ -713,7 +754,7 @@ fn main() {
     let (init_command_buffer_builder, mut helper_resources) = HelperResources::new(
         &device,
         [queue_family].into_iter().cloned(),
-        main_pipeline.clone(),
+        pipeline_gltf_opaque.clone(), //FIXME: Replace with a pipeline layout
     ).unwrap().initialize_resource(
         &device,
         queue_family.clone(),
@@ -727,7 +768,7 @@ fn main() {
         Model::import(
             &device,
             [queue_family].into_iter().cloned(),
-            main_pipeline.clone(),
+            pipeline_gltf_opaque.clone(), //FIXME: Replace with a pipeline layout
             &helper_resources,
             model_path,
         ).unwrap().initialize_resource(
@@ -814,7 +855,8 @@ fn main() {
                 }
             ).unwrap());
             main_framebuffers = Some(images.iter().map(|image| {
-                Arc::new(Framebuffer::start(main_pipeline.render_pass().clone())
+                // FIXME: Don't use a render pass explicitly
+                Arc::new(Framebuffer::start(render_pass_gltf_opaque.clone())
                          .add(image.clone()).unwrap()
                          .add(depth_image.as_ref().unwrap().clone()).unwrap()
                          .build().unwrap())
@@ -854,62 +896,19 @@ fn main() {
             // construct_orthographic_projection_matrix(0.1, 1000.0, [dimensions[0] as f32 / dimensions[1] as f32, 1.0].into()),
         );
 
-        let screen_command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
-            .copy_buffer(screen_vertex_staging_buffer.clone(), screen_vertex_device_buffer.clone()).unwrap()
-            .copy_buffer(screen_index_staging_buffer.clone(), screen_index_device_buffer.clone()).unwrap()
-            .begin_render_pass(screen_framebuffers[image_num].clone(),
-                               false,
-                               vec![[0.0, 1.0, 0.0, 1.0].into()]).unwrap()
-            .draw_indexed(screen_pipeline.clone(),
-                  &DynamicState::none(),
-                  screen_vertex_device_buffer.clone(),
-                  screen_index_device_buffer.clone(),
-                  (), ()).unwrap()
-            .end_render_pass().unwrap()
-            .build().unwrap();
-
-        //let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
-        //    .update_buffer(main_ubo_staging_buffer.clone(), main_ubo.clone()).unwrap()
-        //    .copy_buffer(main_ubo_staging_buffer.clone(), main_ubo_device_buffer.clone()).unwrap()
-        //    .copy_buffer(main_vertex_staging_buffer.clone(), main_vertex_device_buffer.clone()).unwrap()
-        //    .copy_buffer(main_index_staging_buffer.clone(), main_index_device_buffer.clone()).unwrap()
-        //    // Before we can draw, we have to *enter a render pass*. There are two methods to do
-        //    // this: `draw_inline` and `draw_secondary`. The latter is a bit more advanced and is
-        //    // not covered here.
-        //    //
-        //    // The third parameter builds the list of values to clear the attachments with. The API
-        //    // is similar to the list of attachments when building the framebuffers, except that
-        //    // only the attachments that use `load: Clear` appear in the list.
-        //    .begin_render_pass(main_framebuffers.as_ref().unwrap()[image_num].clone(), false,
-        //                       vec![[0.0, 0.0, 1.0, 1.0].into(), 1.0.into()])
-        //    .unwrap()
-        //    // We are now inside the first subpass of the render pass. We add a draw command.
-        //    //
-        //    // The last two parameters contain the list of resources to pass to the shaders.
-        //    // Since we used an `EmptyPipeline` object, the objects have to be `()`.
-        //    .draw_indexed(main_pipeline.clone(),
-        //          &DynamicState {
-        //              line_width: None,
-        //              // TODO: Find a way to do this without having to dynamically allocate a Vec every frame.
-        //              viewports: Some(vec![Viewport {
-        //                  origin: [0.0, 0.0],
-        //                  dimensions: [dimensions[0] as f32, dimensions[1] as f32],
-        //                  depth_range: 0.0 .. 1.0,
-        //              }]),
-        //              scissors: None,
-        //          },
-        //          main_vertex_device_buffer.clone(),
-        //          main_index_device_buffer.clone(),
-        //          main_descriptor_set.clone(),
-        //          ())
-        //    .unwrap()
-        //    // We leave the render pass by calling `draw_end`. Note that if we had multiple
-        //    // subpasses we could have called `next_inline` (or `next_secondary`) to jump to the
-        //    // next subpass.
-        //    .end_render_pass()
-        //    .unwrap()
-        //    // Finish building the command buffer by calling `build`.
-        //    .build().unwrap();
+//         let screen_command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
+//             .copy_buffer(screen_vertex_staging_buffer.clone(), screen_vertex_device_buffer.clone()).unwrap()
+//             .copy_buffer(screen_index_staging_buffer.clone(), screen_index_device_buffer.clone()).unwrap()
+//             .begin_render_pass(screen_framebuffers[image_num].clone(),
+//                                false,
+//                                vec![[0.0, 1.0, 0.0, 1.0].into()]).unwrap()
+//             .draw_indexed(screen_pipeline.clone(),
+//                   &DynamicState::none(),
+//                   screen_vertex_device_buffer.clone(),
+//                   screen_index_device_buffer.clone(),
+//                   (), ()).unwrap()
+//             .end_render_pass().unwrap()
+//             .build().unwrap();
 
         let buffer_updates = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
            .update_buffer(main_ubo_staging_buffer.clone(), main_ubo.clone()).unwrap()
@@ -933,9 +932,11 @@ fn main() {
                 draw_context: DrawContext {
                     device: device.clone(),
                     queue_family,
-                    pipeline: main_pipeline.clone(),
+                    combined_pipeline: combined_pipeline.clone(),
+                    // pipeline_gltf_opaque: pipeline_gltf_opaque.clone(),
+                    // pipeline_gltf_mask: pipeline_gltf_mask.clone(),
                     dynamic: &dynamic_state,
-                    main_descriptor_set: main_descriptor_set.clone(),
+                    main_descriptor_set: main_descriptor_set_gltf_opaque.clone(), // TODO
                     helper_resources: helper_resources.clone(),
                 },
                 framebuffer: current_framebuffer,
@@ -945,8 +946,7 @@ fn main() {
         ).unwrap();
 
         let result = previous_frame_end.join(acquire_future)
-            .then_execute(queue.clone(), screen_command_buffer).unwrap()
-            .then_execute_same_queue(buffer_updates).unwrap()
+            .then_execute(queue.clone(), buffer_updates).unwrap()
             .then_signal_semaphore()
             .then_execute_same_queue(command_buffer).unwrap()
             .then_signal_fence()

@@ -6,7 +6,6 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     mat4 view;
     mat4 projection;
 };
-layout(set = 0, binding = 1) uniform sampler2D screen_sampler;
 
 layout(set = 1, binding = 0) uniform NodeUBO {
     mat4 matrix;
@@ -17,7 +16,6 @@ layout(set = 2, binding = 0) uniform MaterialUBO {
     float metallic_factor;
     float roughness_factor;
     bool base_color_texture_provided;
-    bool alpha_mode_mask;
     float alpha_cutoff;
 };
 layout(set = 2, binding = 1) uniform texture2D base_color_texture;
@@ -42,21 +40,10 @@ vec4 get_base_color() {
 }
 
 void main() {
-    /* vec2 screen_uv = gl_FragCoord.xy / dimensions; */
     vec4 base_color = get_base_color();
-
-    if (alpha_mode_mask) {
-        if (base_color.a < alpha_cutoff) {
-            discard;
-        } else {
-            base_color = vec4(base_color.rgb, 1.0);
-        }
-    }
+    base_color = vec4(base_color.rgb, 1.0);
 
     out_color = 0.0.xxxx
-        /* + texture(base_color_texture, uv) */
-        /* + vec4(f_homogeneous_position.xyz / f_homogeneous_position.w, 1.0); */
-        /* + texture(screen_sampler, uv) */
         + base_color
         + 0.0.xxxx;
 }

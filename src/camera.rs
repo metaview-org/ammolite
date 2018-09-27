@@ -102,7 +102,7 @@ impl Camera for PitchYawCamera3 {
         let rotation_matrix = Mat4::rotation_roll(rotation[2])
             * Mat4::rotation_yaw(rotation[1])
             * Mat4::rotation_pitch(rotation[0]);
-;
+
         let forward: Vec3 = (rotation_matrix * Vec3::from([0.0, 0.0, 1.0]).into_homogeneous()).into_projected();
         // let forward = Vec3::from([0.0, 0.0, 1.0]);
         let left = Vec3::from([0.0, 1.0, 0.0]).cross(&forward);

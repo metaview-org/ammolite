@@ -10,6 +10,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use rayon::prelude::*;
 use vulkano;
+use vulkano::buffer::DeviceLocalBuffer;
 use vulkano::command_buffer::sys::UnsafeCommandBufferBuilder;
 use vulkano::command_buffer::sys::UnsafeCommandBufferBuilderPipelineBarrier;
 use vulkano::command_buffer::sys::Flags;
@@ -69,7 +70,7 @@ use gltf::texture::MinFilter;
 use generic_array::{GenericArray, ArrayLength};
 use failure::Error;
 use ::Position;
-use ::PipelineImpl;
+use ::SceneUBO;
 use ::NodeUBO;
 use ::MaterialUBO;
 use ::MainDescriptorSet;
@@ -209,22 +210,22 @@ use self::error::*;
 
 // TODO: Remove generics
 #[derive(Clone)]
-pub struct InitializationDrawContext<'a, F, C, RPD>
-    where F: FramebufferAbstract + RenderPassDescClearValues<C> + Send + Sync + 'static,
-          RPD: RenderPassDesc + RenderPassDescClearValues<Vec<ClearValue>> + Send + Sync + 'static {
-    pub draw_context: DrawContext<'a, RPD>,
+pub struct InitializationDrawContext<'a, F, C>
+        where F: FramebufferAbstract + RenderPassDescClearValues<C> + Send + Sync + 'static {
+    pub draw_context: DrawContext<'a>,
     pub framebuffer: Arc<F>,
     pub clear_values: C,
 }
 
 #[derive(Clone)]
-pub struct DrawContext<'a, RPD>
-    where RPD: RenderPassDesc + RenderPassDescClearValues<Vec<ClearValue>> + Send + Sync + 'static {
+pub struct DrawContext<'a> {
     pub device: Arc<Device>,
     pub queue_family: QueueFamily<'a>,
-    pub pipeline: PipelineImpl<RPD>,
+    pub combined_pipeline: Arc<GraphicsPipelineAbstract + Sync + Send>,
+    // pub pipeline_gltf_opaque: Arc<GraphicsPipelineAbstract + Sync + Send>,
+    // pub pipeline_gltf_mask: Arc<GraphicsPipelineAbstract + Sync + Send>,
     pub dynamic: &'a DynamicState,
-    pub main_descriptor_set: MainDescriptorSet<RPD>,
+    pub main_descriptor_set: Arc<PersistentDescriptorSet<Arc<dyn GraphicsPipelineAbstract + Sync + Send>, ((), PersistentDescriptorSetBuf<Arc<DeviceLocalBuffer<SceneUBO>>>)>>,
     pub helper_resources: HelperResources,
 }
 
@@ -440,7 +441,7 @@ pub struct HelperResources {
 }
 
 impl HelperResources {
-    pub fn new<'a, I>(device: &Arc<Device>, queue_families: I, pipeline: PipelineImpl<impl RenderPassDesc + Send + Sync + 'static>)
+    pub fn new<'a, I>(device: &Arc<Device>, queue_families: I, pipeline: Arc<GraphicsPipelineAbstract + Sync + Send>)
             -> Result<SimpleUninitializedResource<HelperResources>, Error>
             where I: IntoIterator<Item = QueueFamily<'a>> + Clone {
         let (empty_device_image, empty_image_initialization) = ImmutableImage::uninitialized(
@@ -574,7 +575,7 @@ fn get_node_matrices(document: &Document) -> Vec<Mat4> {
 }
 
 impl Model {
-    pub fn import<'a, I, S>(device: &Arc<Device>, queue_families: I, pipeline: PipelineImpl<impl RenderPassDesc + Send + Sync + 'static>, helper_resources: &HelperResources, path: S)
+    pub fn import<'a, I, S>(device: &Arc<Device>, queue_families: I, pipeline: Arc<GraphicsPipelineAbstract + Sync + Send>, helper_resources: &HelperResources, path: S)
             -> Result<SimpleUninitializedResource<Model>, Error>
             where I: IntoIterator<Item = QueueFamily<'a>> + Clone,
                   S: AsRef<Path> {
@@ -791,7 +792,6 @@ impl Model {
                 pbr.metallic_factor(),
                 pbr.roughness_factor(),
                 base_color_texture_option.is_some(),
-                material.alpha_mode() == AlphaMode::Mask,
                 material.alpha_cutoff(),
             );
             let (device_material_ubo_buffer, material_ubo_buffer_initialization) = unsafe {
@@ -829,9 +829,8 @@ impl Model {
         }, initialization_tasks))
     }
 
-    pub fn draw_scene<F, C, RPD>(&self, context: InitializationDrawContext<F, C, RPD>, scene_index: usize) -> Result<AutoCommandBuffer, Error>
-            where F: FramebufferAbstract + RenderPassDescClearValues<C> + Send + Sync + 'static,
-                  RPD: RenderPassDesc + RenderPassDescClearValues<Vec<ClearValue>> + Send + Sync + 'static {
+    pub fn draw_scene<F, C>(&self, context: InitializationDrawContext<F, C>, scene_index: usize) -> Result<AutoCommandBuffer, Error>
+            where F: FramebufferAbstract + RenderPassDescClearValues<C> + Send + Sync + 'static {
         if scene_index >= self.document.scenes().len() {
             return Err(ModelDrawError::InvalidSceneIndex { index: scene_index }.into());
         }
@@ -856,9 +855,8 @@ impl Model {
         Ok(command_buffer.build().unwrap())
     }
 
-    pub fn draw_main_scene<F, C, RPD>(&self, context: InitializationDrawContext<F, C, RPD>) -> Result<AutoCommandBuffer, Error>
-            where F: FramebufferAbstract + RenderPassDescClearValues<C> + Send + Sync + 'static,
-                  RPD: RenderPassDesc + RenderPassDescClearValues<Vec<ClearValue>> + Send + Sync + 'static {
+    pub fn draw_main_scene<F, C>(&self, context: InitializationDrawContext<F, C>) -> Result<AutoCommandBuffer, Error>
+            where F: FramebufferAbstract + RenderPassDescClearValues<C> + Send + Sync + 'static {
         if let Some(main_scene_index) = self.document.default_scene().map(|default_scene| default_scene.index()) {
             self.draw_scene(context, main_scene_index)
         } else {
@@ -866,10 +864,8 @@ impl Model {
         }
     }
 
-    pub fn draw_node<'a, RPD>(&self, node: Node<'a>, mut command_buffer: AutoCommandBufferBuilder, context: &DrawContext<RPD>)
-        -> AutoCommandBufferBuilder
-        where RPD: RenderPassDesc + RenderPassDescClearValues<Vec<ClearValue>> + Send + Sync + 'static {
-
+    pub fn draw_node<'a>(&self, node: Node<'a>, mut command_buffer: AutoCommandBufferBuilder, context: &DrawContext)
+            -> AutoCommandBufferBuilder {
         if let Some(mesh) = node.mesh() {
             for primitive in mesh.primitives() {
                 let material = primitive.material();
@@ -896,10 +892,9 @@ impl Model {
         command_buffer
     }
 
-    pub fn draw_primitive<'a, S, RPD>(&self, primitive: &Primitive<'a>, mut command_buffer: AutoCommandBufferBuilder, context: &DrawContext<RPD>, sets: S)
-        -> AutoCommandBufferBuilder
-        where S: DescriptorSetsCollection + Clone,
-              RPD: RenderPassDesc + RenderPassDescClearValues<Vec<ClearValue>> + Send + Sync + 'static {
+    pub fn draw_primitive<'a, S>(&self, primitive: &Primitive<'a>, mut command_buffer: AutoCommandBufferBuilder, context: &DrawContext, sets: S)
+            -> AutoCommandBufferBuilder
+            where S: DescriptorSetsCollection + Clone {
         let positions_accessor = primitive.get(&Semantic::Positions).unwrap();
         let tex_coords_accessor = primitive.get(&Semantic::TexCoords(0));
         let indices_accessor = primitive.indices();
@@ -940,8 +935,8 @@ impl Model {
         };
 
         let vertex_buffers = GltfVertexBuffers {
-            position_buffer: Some(position_slice),
-            tex_coord_buffer: Some(tex_coord_slice),
+            position_buffer: Some(Arc::new(position_slice)),
+            tex_coord_buffer: Some(Arc::new(tex_coord_slice)),
         };
 
         if let Some(indices_accessor) = indices_accessor {
@@ -967,9 +962,9 @@ impl Model {
                     // }
 
                     $command_buffer = $command_buffer.draw_indexed(
-                        $context.pipeline.clone(),
+                        $context.combined_pipeline.clone(),
                         $context.dynamic,
-                        $vertex_buffers,
+                        $vertex_buffers.get_individual_buffers(),
                         index_slice,
                         $sets.clone(),
                         () /* push_constants */).unwrap();
@@ -983,9 +978,9 @@ impl Model {
                         .expect("Could not access a pre-generated `u16` index buffer, maybe it was not generated?")
                         .clone();
                     command_buffer = command_buffer.draw_indexed(
-                        context.pipeline.clone(),
+                        context.combined_pipeline.clone(),
                         context.dynamic,
-                        vertex_buffers,
+                        vertex_buffers.get_individual_buffers(),
                         index_buffer,
                         sets.clone(),
                         () /* push_constants */).unwrap();
@@ -1002,9 +997,9 @@ impl Model {
             }
         } else {
             command_buffer = command_buffer.draw(
-                context.pipeline.clone(),
+                context.combined_pipeline.clone(),
                 context.dynamic,
-                vertex_buffers,
+                vertex_buffers.get_individual_buffers(),
                 sets.clone(),
                 () /* push_constants */).unwrap();
         }

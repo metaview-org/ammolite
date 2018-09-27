@@ -11,7 +11,7 @@ use vulkano::pipeline::vertex::AttributeInfo;
 use vulkano::pipeline::shader::ShaderInterfaceDef;
 use typenum::*;
 use iter::ArrayIterator;
-use ::gltf_vs::MainInput;
+use ::gltf_vert::MainInput;
 
 #[repr(C)]
 pub struct GltfVertexPosition([f32; 3]);
@@ -26,7 +26,22 @@ macro_rules! impl_buffers {
     } => {
         pub struct GltfVertexBuffers<PositionBuffer, TexCoordBuffer>
                 where $($($buffer_type_name)+: TypedBufferAccess<Content=[$($attribute_type)+]> + Send + Sync + 'static,)+ {
-            $(pub $field_name: Option<$($buffer_type_name)+>,)+
+            $(pub $field_name: Option<Arc<$($buffer_type_name)+>>,)+
+        }
+
+        impl<PositionBuffer, TexCoordBuffer> GltfVertexBuffers<PositionBuffer, TexCoordBuffer>
+                where $($($buffer_type_name)+: TypedBufferAccess<Content=[$($attribute_type)+]> + Send + Sync + 'static,)+ {
+            pub fn get_individual_buffers(&self) -> Vec<Arc<dyn BufferAccess + Send + Sync>> {
+                let mut result: Vec<Arc<dyn BufferAccess + Send + Sync>> = Vec::new();
+
+                $(
+                    if let Some(ref buffer) = self.$field_name {
+                        result.push(buffer.clone());
+                    }
+                )+
+
+                result
+            }
         }
 
         pub struct GltfVertexBufferDefinition;

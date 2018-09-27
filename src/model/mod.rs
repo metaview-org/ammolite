@@ -55,6 +55,7 @@ use vulkano::image::MipmapsCount;
 use vulkano::image::traits::ImageAccess;
 use vulkano::image::traits::ImageViewAccess;
 use gltf::{self, Document, Gltf};
+use gltf::material::AlphaMode;
 use gltf::mesh::util::ReadIndices;
 use gltf::mesh::{Primitive, Mesh, Semantic};
 use gltf::accessor::Accessor as GltfAccessor;
@@ -595,11 +596,12 @@ impl Model {
                         let byte_offset = index_view.offset() + index_accessor.offset();
                         let byte_len = mem::size_of::<u8>() * index_accessor.count();
                         let index_slice = &buffer_data_array[index_view.buffer().index()][byte_offset..(byte_offset + byte_len)];
-                        let buffer_data: Vec<u8> = index_slice.into_iter().flat_map(|index| ArrayIterator::new([0, *index])).collect(); // FIXME: Assumes byte order in u16
+                        let buffer_data: Vec<u8> = index_slice.into_iter().flat_map(|index| ArrayIterator::new([*index, 0])).collect(); // FIXME: Assumes byte order in u16
+                        let converted_byte_len = mem::size_of::<u16>() * index_accessor.count();
                         let (device_index_buffer, index_buffer_initialization) = unsafe {
                             ImmutableBuffer::<[u16]>::raw(
                                 device.clone(),
-                                byte_len,
+                                converted_byte_len,
                                 BufferUsage { // TODO: Scan document for buffer usage and optimize
                                     transfer_destination: true,
                                     index_buffer: true,
@@ -789,6 +791,8 @@ impl Model {
                 pbr.metallic_factor(),
                 pbr.roughness_factor(),
                 base_color_texture_option.is_some(),
+                material.alpha_mode() == AlphaMode::Mask,
+                material.alpha_cutoff(),
             );
             let (device_material_ubo_buffer, material_ubo_buffer_initialization) = unsafe {
                 ImmutableBuffer::<MaterialUBO>::uninitialized(

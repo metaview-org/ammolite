@@ -49,7 +49,7 @@ impl PitchYawCamera3 {
     fn update_rotation(&mut self, cursor_delta: &(f64, f64)) {
         let (delta_yaw, delta_pitch) = cursor_delta;
 
-        self.yaw += delta_yaw * self.mouse_sensitivity;
+        self.yaw -= delta_yaw * self.mouse_sensitivity;
         self.pitch -= delta_pitch * self.mouse_sensitivity;
 
         if self.pitch > std::f64::consts::FRAC_PI_2 {
@@ -105,7 +105,7 @@ impl Camera for PitchYawCamera3 {
 ;
         let forward: Vec3 = (rotation_matrix * Vec3::from([0.0, 0.0, 1.0]).into_homogeneous()).into_projected();
         // let forward = Vec3::from([0.0, 0.0, 1.0]);
-        let left = forward.cross(&Vec3::from([0.0, 1.0, 0.0]));
+        let left = Vec3::from([0.0, 1.0, 0.0]).cross(&forward);
         let mut direction: Vec3 = Vec3::zero();
 
         pressed_keys.contains(&VirtualKeyCode::W).as_option()

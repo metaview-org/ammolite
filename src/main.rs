@@ -149,12 +149,14 @@ impl NodeUBO {
 }
 
 impl MaterialUBO {
-    pub fn new(base_color_factor: Vec4, metallic_factor: f32, roughness_factor: f32, base_color_texture_provided: bool) -> Self {
+    pub fn new(base_color_factor: Vec4, metallic_factor: f32, roughness_factor: f32, base_color_texture_provided: bool, alpha_mode_mask: bool, alpha_cutoff: f32) -> Self {
         MaterialUBO {
             base_color_factor: base_color_factor.0,
             metallic_factor,
             roughness_factor,
             base_color_texture_provided: base_color_texture_provided as u32,
+            alpha_mode_mask: alpha_mode_mask as u32,
+            alpha_cutoff,
         }
     }
 }
@@ -166,6 +168,8 @@ impl Default for MaterialUBO {
             1.0,
             1.0,
             false,
+            false,
+            0.0,
         )
     }
 }
@@ -542,10 +546,16 @@ fn construct_perspective_projection_matrix(near_plane: f32, far_plane: f32, aspe
     // `f(z_near) = 0`
     // `f(z_far) = 1`
     // Solving for A and B gives us the necessary coefficients to construct the matrix.
-    mat4!([f / aspect_ratio, 0.0,                0.0,                       0.0,
-                        0.0,  -f,                0.0,                       0.0,
-                        0.0, 0.0, -z_f / (z_n - z_f), (z_n * z_f) / (z_n - z_f),
-                        0.0, 0.0,                1.0,                       0.0])
+    // mat4!([f / aspect_ratio, 0.0,                0.0,                       0.0,
+    //                     0.0,  -f,                0.0,                       0.0,
+    //                     0.0, 0.0, -z_f / (z_n - z_f), (z_n * z_f) / (z_n - z_f),
+    //                     0.0, 0.0,                1.0,                       0.0])
+
+    // TODO: Investigate
+    mat4!([-f / aspect_ratio, 0.0,                0.0,                       0.0,
+                         0.0,  -f,                0.0,                       0.0,
+                         0.0, 0.0, -z_f / (z_n - z_f), (z_n * z_f) / (z_n - z_f),
+                         0.0, 0.0,                1.0,                       0.0])
 }
 
 fn main() {

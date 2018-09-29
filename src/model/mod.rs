@@ -221,9 +221,9 @@ pub struct InitializationDrawContext<'a, F, C>
 pub struct DrawContext<'a> {
     pub device: Arc<Device>,
     pub queue_family: QueueFamily<'a>,
-    pub combined_pipeline: Arc<GraphicsPipelineAbstract + Sync + Send>,
-    // pub pipeline_gltf_opaque: Arc<GraphicsPipelineAbstract + Sync + Send>,
-    // pub pipeline_gltf_mask: Arc<GraphicsPipelineAbstract + Sync + Send>,
+    // pub combined_pipeline: Arc<GraphicsPipelineAbstract + Sync + Send>,
+    pub pipeline_gltf_opaque: Arc<GraphicsPipelineAbstract + Sync + Send>,
+    pub pipeline_gltf_mask: Arc<GraphicsPipelineAbstract + Sync + Send>,
     pub dynamic: &'a DynamicState,
     pub main_descriptor_set: Arc<PersistentDescriptorSet<Arc<dyn GraphicsPipelineAbstract + Sync + Send>, ((), PersistentDescriptorSetBuf<Arc<DeviceLocalBuffer<SceneUBO>>>)>>,
     pub helper_resources: HelperResources,
@@ -322,58 +322,60 @@ impl InitializationTask {
                     panic!("Texture mipmap generation is not implemented for non-2d textures.");
                 };
 
-                for mip_level in 1..device_image.mipmap_levels() {
-                    let source_mip_level = mip_level - 1;
-                    let mip_dimensions = (width >> mip_level, height >> mip_level);
-                    let source_mip_dimensions = (width >> source_mip_level, height >> source_mip_level);
+                // TODO: Set mip count to Log2
+                //
+                // for mip_level in 1..device_image.mipmap_levels() {
+                //     let source_mip_level = mip_level - 1;
+                //     let mip_dimensions = (width >> mip_level, height >> mip_level);
+                //     let source_mip_dimensions = (width >> source_mip_level, height >> source_mip_level);
 
-                    // unsafe {
-                    //     let pool = Device::standard_command_pool(&device, queue_family);
-                    //     let mut mipmap_layout_transition_commands = UnsafeCommandBufferBuilder::new(&pool, Kind::primary(), Flags::OneTimeSubmit)?;
-                    //     let mut barrier = UnsafeCommandBufferBuilderPipelineBarrier::new();
+                //     // unsafe {
+                //     //     let pool = Device::standard_command_pool(&device, queue_family);
+                //     //     let mut mipmap_layout_transition_commands = UnsafeCommandBufferBuilder::new(&pool, Kind::primary(), Flags::OneTimeSubmit)?;
+                //     //     let mut barrier = UnsafeCommandBufferBuilderPipelineBarrier::new();
 
-                    //     barrier.add_image_memory_barrier(
-                    //         &device_image,
-                    //         mip_level..(mip_level + 1),
-                    //         0..1,
-                    //         PipelineStages {
-                    //             transfer: true,
-                    //             .. PipelineStages::none()
-                    //         },
-                    //         AccessFlagBits::none(),
-                    //         PipelineStages {
-                    //             host: true,
-                    //             .. PipelineStages::none()
-                    //         },
-                    //         AccessFlagBits {
-                    //             transfer_write: true,
-                    //             .. AccessFlagBits::none()
-                    //         },
-                    //         false, //????
-                    //         None,
-                    //         ImageLayout::Undefined,
-                    //         ImageLayout::TransferDstOptimal,
-                    //     );
-                    //     mipmap_layout_transition_commands.pipeline_barrier(&barrier);
-                    //     command_buffer_builder = command_buffer_builder
-                    //         .execute_commands(mipmap_layout_transition_commands)?;
-                    // }
+                //     //     barrier.add_image_memory_barrier(
+                //     //         &device_image,
+                //     //         mip_level..(mip_level + 1),
+                //     //         0..1,
+                //     //         PipelineStages {
+                //     //             transfer: true,
+                //     //             .. PipelineStages::none()
+                //     //         },
+                //     //         AccessFlagBits::none(),
+                //     //         PipelineStages {
+                //     //             host: true,
+                //     //             .. PipelineStages::none()
+                //     //         },
+                //     //         AccessFlagBits {
+                //     //             transfer_write: true,
+                //     //             .. AccessFlagBits::none()
+                //     //         },
+                //     //         false, //????
+                //     //         None,
+                //     //         ImageLayout::Undefined,
+                //     //         ImageLayout::TransferDstOptimal,
+                //     //     );
+                //     //     mipmap_layout_transition_commands.pipeline_barrier(&barrier);
+                //     //     command_buffer_builder = command_buffer_builder
+                //     //         .execute_commands(mipmap_layout_transition_commands)?;
+                //     // }
 
-                    command_buffer_builder = command_buffer_builder.blit_image(
-                        device_image.clone(),
-                        [0, 0, 0],
-                        [source_mip_dimensions.0 as i32, source_mip_dimensions.1 as i32, 1],
-                        0,
-                        source_mip_level,
-                        device_image.clone(),
-                        [0, 0, 0],
-                        [mip_dimensions.0 as i32, mip_dimensions.1 as i32, 1],
-                        0,
-                        mip_level,
-                        1,
-                        Filter::Linear,
-                    )?;
-                }
+                //     command_buffer_builder = command_buffer_builder.blit_image(
+                //         device_image.clone(),
+                //         [0, 0, 0],
+                //         [source_mip_dimensions.0 as i32, source_mip_dimensions.1 as i32, 1],
+                //         0,
+                //         source_mip_level,
+                //         device_image.clone(),
+                //         [0, 0, 0],
+                //         [mip_dimensions.0 as i32, mip_dimensions.1 as i32, 1],
+                //         0,
+                //         mip_level,
+                //         1,
+                //         Filter::Linear,
+                //     )?;
+                // }
 
                 Ok(command_buffer_builder)
             },
@@ -669,7 +671,7 @@ impl Model {
                             height,
                         },
                         $($vk_format)+,
-                        MipmapsCount::Log2,
+                        MipmapsCount::One,
                         ImageUsage {
                             transfer_source: true,
                             transfer_destination: true,
@@ -847,10 +849,23 @@ impl Model {
             .begin_render_pass(framebuffer.clone(), false, clear_values).unwrap();
 
         for node in scene.nodes() {
-            command_buffer = self.draw_node(node, command_buffer, &draw_context);
+            command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Opaque);
         }
 
-        command_buffer = command_buffer.end_render_pass().unwrap();
+        command_buffer = command_buffer.next_subpass(false).unwrap();
+
+        for node in scene.nodes() {
+            command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Mask);
+        }
+
+        // command_buffer = command_buffer.next_subpass(false).unwrap();
+
+        // for node in scene.nodes() {
+        //     command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Blend);
+        // }
+
+        command_buffer = command_buffer
+            .end_render_pass().unwrap();
 
         Ok(command_buffer.build().unwrap())
     }
@@ -864,37 +879,57 @@ impl Model {
         }
     }
 
-    pub fn draw_node<'a>(&self, node: Node<'a>, mut command_buffer: AutoCommandBufferBuilder, context: &DrawContext)
+    pub fn draw_node<'a>(&self, node: Node<'a>, mut command_buffer: AutoCommandBufferBuilder, context: &DrawContext, alpha_mode: AlphaMode)
             -> AutoCommandBufferBuilder {
         if let Some(mesh) = node.mesh() {
             for primitive in mesh.primitives() {
                 let material = primitive.material();
-                let material_descriptor_set = material.index().map(|material_index| {
-                    self.material_descriptor_sets[material_index].clone()
-                }).unwrap_or_else(|| {
-                    context.helper_resources.default_material_descriptor_set.clone()
-                });
 
-                let descriptor_sets = (
-                    context.main_descriptor_set.clone(),
-                    self.node_descriptor_sets[node.index()].clone(),
-                    material_descriptor_set,
-                );
+                if material.alpha_mode() == alpha_mode {
+                    let pipeline = match material.alpha_mode() {
+                        AlphaMode::Opaque => &context.pipeline_gltf_opaque,
+                        AlphaMode::Mask => &context.pipeline_gltf_mask,
+                        AlphaMode::Blend => unimplemented!(),
+                    };
 
-                command_buffer = self.draw_primitive(&primitive, command_buffer, context, descriptor_sets.clone());
+                    let material_descriptor_set = material.index().map(|material_index| {
+                        self.material_descriptor_sets[material_index].clone()
+                    }).unwrap_or_else(|| {
+                        context.helper_resources.default_material_descriptor_set.clone()
+                    });
+
+                    let descriptor_sets = (
+                        context.main_descriptor_set.clone(),
+                        self.node_descriptor_sets[node.index()].clone(),
+                        material_descriptor_set,
+                    );
+
+                    command_buffer = self.draw_primitive(
+                        &primitive,
+                        command_buffer,
+                        context,
+                        descriptor_sets.clone(),
+                        pipeline,
+                    );
+                }
             }
         }
 
         for child in node.children() {
-            command_buffer = self.draw_node(child, command_buffer, context);
+            command_buffer = self.draw_node(child, command_buffer, context, alpha_mode);
         }
 
         command_buffer
     }
 
-    pub fn draw_primitive<'a, S>(&self, primitive: &Primitive<'a>, mut command_buffer: AutoCommandBufferBuilder, context: &DrawContext, sets: S)
-            -> AutoCommandBufferBuilder
-            where S: DescriptorSetsCollection + Clone {
+    pub fn draw_primitive<'a, S>(
+        &self,
+        primitive: &Primitive<'a>,
+        mut command_buffer: AutoCommandBufferBuilder,
+        context: &DrawContext,
+        sets: S,
+        pipeline: &Arc<GraphicsPipelineAbstract + Send + Sync>,
+    ) -> AutoCommandBufferBuilder where S: DescriptorSetsCollection + Clone {
         let positions_accessor = primitive.get(&Semantic::Positions).unwrap();
         let tex_coords_accessor = primitive.get(&Semantic::TexCoords(0));
         let indices_accessor = primitive.indices();
@@ -962,7 +997,8 @@ impl Model {
                     // }
 
                     $command_buffer = $command_buffer.draw_indexed(
-                        $context.combined_pipeline.clone(),
+                        // $context.combined_pipeline.clone(),
+                        pipeline.clone(),
                         $context.dynamic,
                         $vertex_buffers.get_individual_buffers(),
                         index_slice,
@@ -978,7 +1014,8 @@ impl Model {
                         .expect("Could not access a pre-generated `u16` index buffer, maybe it was not generated?")
                         .clone();
                     command_buffer = command_buffer.draw_indexed(
-                        context.combined_pipeline.clone(),
+                        // context.combined_pipeline.clone(),
+                        pipeline.clone(),
                         context.dynamic,
                         vertex_buffers.get_individual_buffers(),
                         index_buffer,
@@ -997,7 +1034,8 @@ impl Model {
             }
         } else {
             command_buffer = command_buffer.draw(
-                context.combined_pipeline.clone(),
+                // context.combined_pipeline.clone(),
+                pipeline.clone(),
                 context.dynamic,
                 vertex_buffers.get_individual_buffers(),
                 sets.clone(),

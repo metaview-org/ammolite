@@ -278,107 +278,100 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
 //     unimplemented!()
 // }
 
-fn create_pipeline_gltf_opaque(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>, shared_vs: &gltf_vert::Shader) -> (Arc<GraphicsPipelineAbstract + Send + Sync>, Arc<RenderPassAbstract + Send + Sync>) {
-    let fs = gltf_opaque_frag::Shader::load(device.clone()).expect("Failed to create shader module.");
-
-    // A special GPU mode highly-optimized for rendering
-    // This really shouldn't have to be Boxed, but making the type system happy is a struggle.
-    let render_pass = Arc::new(single_pass_renderpass! { device.clone(),
+fn create_render_pass(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Arc<RenderPassAbstract + Send + Sync> {
+    Arc::new(ordered_passes_renderpass! {
+        device.clone(),
         attachments: {
             color: {
                 load: Clear,
-                store: Store, // for temporary images, use DontCare
+                store: Store,
                 format: swapchain.format(),
                 samples: 1,
+                initial_layout: ImageLayout::Undefined,
+                final_layout: ImageLayout::ColorAttachmentOptimal,
             },
             depth_stencil: {
                 load: Clear,
-                store: Store,
+                store: DontCare,
                 format: Format::D32Sfloat,
                 samples: 1,
                 initial_layout: ImageLayout::Undefined,
                 final_layout: ImageLayout::DepthStencilAttachmentOptimal,
-                // initial_layout: ImageLayout::DepthStencilAttachmentOptimal,
             }
         },
-        pass: {
-            color: [color],
-            depth_stencil: { depth_stencil }
-        }
-    }.unwrap());
-
-    (
-        Arc::new(GraphicsPipeline::start()
-            // .with_pipeline_layout(device.clone(), pipeline_layout)
-            // Specifies the vertex type
-            .vertex_input(GltfVertexBufferDefinition)
-            // .vertex_input_single_buffer::<Position>()
-            .vertex_shader(shared_vs.main_entry_point(), ())
-            // Configures the builder so that we use one viewport, and that the state of this viewport
-            // is dynamic. This makes it possible to change the viewport for each draw command. If the
-            // viewport state wasn't dynamic, then we would have to create a new pipeline object if we
-            // wanted to draw to another image of a different size.
-            //
-            // Note: If you configure multiple viewports, you can use geometry shaders to choose which
-            // viewport the shape is going to be drawn to. This topic isn't covered here.
-            .viewports_dynamic_scissors_irrelevant(1)
-            .depth_stencil(DepthStencil::simple_depth_test())
-            .fragment_shader(fs.main_entry_point(), ())
-            .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
-            .build(device.clone())
-            .unwrap()),
-        render_pass
-    )
+        passes: [
+            {
+                color: [color],
+                depth_stencil: { depth_stencil },
+                input: []
+                // $(resolve: [$($resolve_atch:ident),*])*$(,)*
+            },
+            {
+                color: [color],
+                depth_stencil: { depth_stencil },
+                input: []
+                // $(resolve: [$($resolve_atch:ident),*])*$(,)*
+            }
+        ]
+    }.expect("Could not create a render pass."))
 }
 
-fn create_pipeline_gltf_mask(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>, shared_vs: &gltf_vert::Shader) -> (Arc<GraphicsPipelineAbstract + Send + Sync>, Arc<RenderPassAbstract + Send + Sync>) {
+fn create_pipeline_gltf_opaque(
+    device: &Arc<Device>,
+    swapchain: &Arc<Swapchain<Window>>,
+    render_pass: &Arc<RenderPassAbstract + Send + Sync>,
+    shared_vs: &gltf_vert::Shader
+) -> Arc<GraphicsPipelineAbstract + Send + Sync> {
+    let fs = gltf_opaque_frag::Shader::load(device.clone()).expect("Failed to create shader module.");
+
+    Arc::new(GraphicsPipeline::start()
+        // .with_pipeline_layout(device.clone(), pipeline_layout)
+        // Specifies the vertex type
+        .vertex_input(GltfVertexBufferDefinition)
+        // .vertex_input_single_buffer::<Position>()
+        .vertex_shader(shared_vs.main_entry_point(), ())
+        // Configures the builder so that we use one viewport, and that the state of this viewport
+        // is dynamic. This makes it possible to change the viewport for each draw command. If the
+        // viewport state wasn't dynamic, then we would have to create a new pipeline object if we
+        // wanted to draw to another image of a different size.
+        //
+        // Note: If you configure multiple viewports, you can use geometry shaders to choose which
+        // viewport the shape is going to be drawn to. This topic isn't covered here.
+        .viewports_dynamic_scissors_irrelevant(1)
+        .depth_stencil(DepthStencil::simple_depth_test())
+        .fragment_shader(fs.main_entry_point(), ())
+        .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
+        .build(device.clone())
+        .unwrap())
+}
+
+fn create_pipeline_gltf_mask(
+    device: &Arc<Device>,
+    swapchain: &Arc<Swapchain<Window>>,
+    render_pass: &Arc<RenderPassAbstract + Send + Sync>,
+    shared_vs: &gltf_vert::Shader
+) -> Arc<GraphicsPipelineAbstract + Send + Sync> {
     let fs = gltf_mask_frag::Shader::load(device.clone()).expect("Failed to create shader module.");
 
-    // A special GPU mode highly-optimized for rendering
-    // This really shouldn't have to be Boxed, but making the type system happy is a struggle.
-    let render_pass = Arc::new(single_pass_renderpass! { device.clone(),
-        attachments: {
-            color: {
-                load: Load,
-                store: Store, // for temporary images, use DontCare
-                format: swapchain.format(),
-                samples: 1,
-            },
-            depth_stencil: {
-                load: Load,
-                store: DontCare,
-                format: Format::D32Sfloat,
-                samples: 1,
-            }
-        },
-        pass: {
-            color: [color],
-            depth_stencil: { depth_stencil }
-        }
-    }.unwrap());
-
-    (
-        Arc::new(GraphicsPipeline::start()
-            // .with_pipeline_layout(device.clone(), pipeline_layout)
-            // Specifies the vertex type
-            .vertex_input(GltfVertexBufferDefinition)
-            // .vertex_input_single_buffer::<Position>()
-            .vertex_shader(shared_vs.main_entry_point(), ())
-            // Configures the builder so that we use one viewport, and that the state of this viewport
-            // is dynamic. This makes it possible to change the viewport for each draw command. If the
-            // viewport state wasn't dynamic, then we would have to create a new pipeline object if we
-            // wanted to draw to another image of a different size.
-            //
-            // Note: If you configure multiple viewports, you can use geometry shaders to choose which
-            // viewport the shape is going to be drawn to. This topic isn't covered here.
-            .viewports_dynamic_scissors_irrelevant(1)
-            .depth_stencil(DepthStencil::simple_depth_test())
-            .fragment_shader(fs.main_entry_point(), ())
-            .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
-            .build(device.clone())
-            .unwrap()),
-        render_pass
-    )
+    Arc::new(GraphicsPipeline::start()
+        // .with_pipeline_layout(device.clone(), pipeline_layout)
+        // Specifies the vertex type
+        .vertex_input(GltfVertexBufferDefinition)
+        // .vertex_input_single_buffer::<Position>()
+        .vertex_shader(shared_vs.main_entry_point(), ())
+        // Configures the builder so that we use one viewport, and that the state of this viewport
+        // is dynamic. This makes it possible to change the viewport for each draw command. If the
+        // viewport state wasn't dynamic, then we would have to create a new pipeline object if we
+        // wanted to draw to another image of a different size.
+        //
+        // Note: If you configure multiple viewports, you can use geometry shaders to choose which
+        // viewport the shape is going to be drawn to. This topic isn't covered here.
+        .viewports_dynamic_scissors_irrelevant(1)
+        .depth_stencil(DepthStencil::simple_depth_test())
+        .fragment_shader(fs.main_entry_point(), ())
+        .render_pass(Subpass::from(render_pass.clone(), 1).unwrap())
+        .build(device.clone())
+        .unwrap())
 }
 
 macro_rules! combine_graphics_pipelines {
@@ -670,12 +663,13 @@ fn main() {
     );
 
     let vertex_shader = gltf_vert::Shader::load(device.clone()).expect("Failed to create shader module.");
-    let (pipeline_gltf_opaque, render_pass_gltf_opaque) = create_pipeline_gltf_opaque(&device, &swapchain, &vertex_shader);
-    let (pipeline_gltf_mask, render_pass_gltf_mask) = create_pipeline_gltf_mask(&device, &swapchain, &vertex_shader);
-    let combined_pipeline = combine_graphics_pipelines!(
-        &device,
-        [pipeline_gltf_opaque.clone(), pipeline_gltf_mask.clone()]
-    );
+    let render_pass = create_render_pass(&device, &swapchain);
+    let pipeline_gltf_opaque = create_pipeline_gltf_opaque(&device, &swapchain, &render_pass, &vertex_shader);
+    let pipeline_gltf_mask = create_pipeline_gltf_mask(&device, &swapchain, &render_pass, &vertex_shader);
+    // let combined_pipeline = combine_graphics_pipelines!(
+    //     &device,
+    //     [pipeline_gltf_opaque.clone(), pipeline_gltf_mask.clone()]
+    // );
 
     let mut main_ubo = SceneUBO::new(
         Vec2([dimensions[0] as f32, dimensions[1] as f32]),
@@ -856,7 +850,7 @@ fn main() {
             ).unwrap());
             main_framebuffers = Some(images.iter().map(|image| {
                 // FIXME: Don't use a render pass explicitly
-                Arc::new(Framebuffer::start(render_pass_gltf_opaque.clone())
+                Arc::new(Framebuffer::start(render_pass.clone())
                          .add(image.clone()).unwrap()
                          .add(depth_image.as_ref().unwrap().clone()).unwrap()
                          .build().unwrap())
@@ -932,9 +926,9 @@ fn main() {
                 draw_context: DrawContext {
                     device: device.clone(),
                     queue_family,
-                    combined_pipeline: combined_pipeline.clone(),
-                    // pipeline_gltf_opaque: pipeline_gltf_opaque.clone(),
-                    // pipeline_gltf_mask: pipeline_gltf_mask.clone(),
+                    // combined_pipeline: combined_pipeline.clone(),
+                    pipeline_gltf_opaque: pipeline_gltf_opaque.clone(),
+                    pipeline_gltf_mask: pipeline_gltf_mask.clone(),
                     dynamic: &dynamic_state,
                     main_descriptor_set: main_descriptor_set_gltf_opaque.clone(), // TODO
                     helper_resources: helper_resources.clone(),

@@ -51,6 +51,8 @@ use vulkano::pipeline::GraphicsPipeline;
 use vulkano::pipeline::viewport::Viewport;
 use vulkano::pipeline::vertex::SingleBufferDefinition;
 use vulkano::pipeline::depth_stencil::DepthStencil;
+use vulkano::pipeline::depth_stencil::Compare;
+use vulkano::pipeline::depth_stencil::DepthBounds;
 use vulkano::descriptor::PipelineLayoutAbstract;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSetImg;
@@ -123,10 +125,18 @@ mod gltf_mask_frag {
     struct Dummy;
 }
 
-mod gltf_blend_frag {
+mod gltf_blend_preprocess_frag {
     #[derive(VulkanoShader)]
     #[ty = "fragment"]
-    #[path = "src/shaders/gltf_blend.frag"]
+    #[path = "src/shaders/gltf_blend_preprocess.frag"]
+    #[allow(dead_code)]
+    struct Dummy;
+}
+
+mod gltf_blend_finalize_frag {
+    #[derive(VulkanoShader)]
+    #[ty = "fragment"]
+    #[path = "src/shaders/gltf_blend_finalize.frag"]
     #[allow(dead_code)]
     struct Dummy;
 }
@@ -297,6 +307,22 @@ fn create_render_pass(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) 
                 samples: 1,
                 initial_layout: ImageLayout::Undefined,
                 final_layout: ImageLayout::DepthStencilAttachmentOptimal,
+            },
+            transparency_accumulation: {
+                load: Clear,
+                store: DontCare,
+                format: swapchain.format(),
+                samples: 1,
+                initial_layout: ImageLayout::Undefined,
+                final_layout: ImageLayout::ColorAttachmentOptimal,
+            },
+            transparency_revealage: {
+                load: Clear,
+                store: DontCare,
+                format: Format::R32G32B32A32Sfloat, //FIXME
+                samples: 1,
+                initial_layout: ImageLayout::Undefined,
+                final_layout: ImageLayout::ColorAttachmentOptimal,
             }
         },
         passes: [
@@ -310,7 +336,16 @@ fn create_render_pass(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) 
                 color: [color],
                 depth_stencil: { depth_stencil },
                 input: []
-                // $(resolve: [$($resolve_atch:ident),*])*$(,)*
+            },
+            {
+                color: [transparency_accumulation, transparency_revealage],
+                depth_stencil: { depth_stencil },
+                input: []
+            },
+            {
+                color: [color],
+                depth_stencil: { depth_stencil },
+                input: [transparency_accumulation, transparency_revealage]
             }
         ]
     }.expect("Could not create a render pass."))
@@ -354,22 +389,56 @@ fn create_pipeline_gltf_mask(
     let fs = gltf_mask_frag::Shader::load(device.clone()).expect("Failed to create shader module.");
 
     Arc::new(GraphicsPipeline::start()
-        // .with_pipeline_layout(device.clone(), pipeline_layout)
-        // Specifies the vertex type
         .vertex_input(GltfVertexBufferDefinition)
-        // .vertex_input_single_buffer::<Position>()
         .vertex_shader(shared_vs.main_entry_point(), ())
-        // Configures the builder so that we use one viewport, and that the state of this viewport
-        // is dynamic. This makes it possible to change the viewport for each draw command. If the
-        // viewport state wasn't dynamic, then we would have to create a new pipeline object if we
-        // wanted to draw to another image of a different size.
-        //
-        // Note: If you configure multiple viewports, you can use geometry shaders to choose which
-        // viewport the shape is going to be drawn to. This topic isn't covered here.
         .viewports_dynamic_scissors_irrelevant(1)
         .depth_stencil(DepthStencil::simple_depth_test())
         .fragment_shader(fs.main_entry_point(), ())
         .render_pass(Subpass::from(render_pass.clone(), 1).unwrap())
+        .build(device.clone())
+        .unwrap())
+}
+
+fn create_pipeline_gltf_blend_preprocess(
+    device: &Arc<Device>,
+    swapchain: &Arc<Swapchain<Window>>,
+    render_pass: &Arc<RenderPassAbstract + Send + Sync>,
+    shared_vs: &gltf_vert::Shader
+) -> Arc<GraphicsPipelineAbstract + Send + Sync> {
+    let fs = gltf_blend_preprocess_frag::Shader::load(device.clone()).expect("Failed to create shader module.");
+
+    Arc::new(GraphicsPipeline::start()
+        .vertex_input(GltfVertexBufferDefinition)
+        .vertex_shader(shared_vs.main_entry_point(), ())
+        .viewports_dynamic_scissors_irrelevant(1)
+        .depth_stencil(DepthStencil {
+            depth_compare: Compare::Less,
+            depth_write: false,
+            depth_bounds_test: DepthBounds::Disabled,
+            stencil_front: Default::default(),
+            stencil_back: Default::default(),
+        })
+        .fragment_shader(fs.main_entry_point(), ())
+        .render_pass(Subpass::from(render_pass.clone(), 2).unwrap())
+        .build(device.clone())
+        .unwrap())
+}
+
+fn create_pipeline_gltf_blend_finalize(
+    device: &Arc<Device>,
+    swapchain: &Arc<Swapchain<Window>>,
+    render_pass: &Arc<RenderPassAbstract + Send + Sync>,
+    shared_vs: &gltf_vert::Shader
+) -> Arc<GraphicsPipelineAbstract + Send + Sync> {
+    let fs = gltf_blend_finalize_frag::Shader::load(device.clone()).expect("Failed to create shader module.");
+
+    Arc::new(GraphicsPipeline::start()
+        .vertex_input(GltfVertexBufferDefinition)
+        .vertex_shader(shared_vs.main_entry_point(), ())
+        .viewports_dynamic_scissors_irrelevant(1)
+        .depth_stencil_disabled()
+        .fragment_shader(fs.main_entry_point(), ())
+        .render_pass(Subpass::from(render_pass.clone(), 3).unwrap())
         .build(device.clone())
         .unwrap())
 }
@@ -666,6 +735,8 @@ fn main() {
     let render_pass = create_render_pass(&device, &swapchain);
     let pipeline_gltf_opaque = create_pipeline_gltf_opaque(&device, &swapchain, &render_pass, &vertex_shader);
     let pipeline_gltf_mask = create_pipeline_gltf_mask(&device, &swapchain, &render_pass, &vertex_shader);
+    let pipeline_gltf_blend_preprocess = create_pipeline_gltf_blend_preprocess(&device, &swapchain, &render_pass, &vertex_shader);
+    let pipeline_gltf_blend_finalize = create_pipeline_gltf_blend_finalize(&device, &swapchain, &render_pass, &vertex_shader);
     // let combined_pipeline = combine_graphics_pipelines!(
     //     &device,
     //     [pipeline_gltf_opaque.clone(), pipeline_gltf_mask.clone()]
@@ -716,11 +787,11 @@ fn main() {
             .add_buffer(main_ubo_device_buffer.clone()).unwrap()
             .build().unwrap()
     );
-    let main_descriptor_set_gltf_mask = Arc::new(
-        PersistentDescriptorSet::start(pipeline_gltf_mask.clone(), 0)
-            .add_buffer(main_ubo_device_buffer.clone()).unwrap()
-            .build().unwrap()
-    );
+    // let main_descriptor_set_gltf_mask = Arc::new(
+    //     PersistentDescriptorSet::start(pipeline_gltf_mask.clone(), 0)
+    //         .add_buffer(main_ubo_device_buffer.clone()).unwrap()
+    //         .build().unwrap()
+    // );
 
     // let screen_framebuffers: Vec<Arc<Framebuffer<_, _>>> = images.iter().map(|_| {
     //     Arc::new(
@@ -731,6 +802,38 @@ fn main() {
     // }).collect();
     let mut main_framebuffers: Option<Vec<Arc<Framebuffer<_, _>>>> = None;
     let mut depth_image: Option<Arc<AttachmentImage>> = None;
+    let mut blend_accumulation_image: Option<Arc<AttachmentImage>> = None;
+    let mut blend_revealage_image: Option<Arc<AttachmentImage>> = None;
+
+    blend_accumulation_image = Some(AttachmentImage::with_usage(
+        device.clone(),
+        dimensions.clone(),
+        swapchain.format(),
+        ImageUsage {
+            color_attachment: true,
+            input_attachment: true,
+            transient_attachment: true,
+            .. ImageUsage::none()
+        }
+    ).unwrap());
+    blend_revealage_image = Some(AttachmentImage::with_usage(
+        device.clone(),
+        dimensions.clone(),
+        Format::D32Sfloat,
+        ImageUsage {
+            color_attachment: true,
+            input_attachment: true,
+            transient_attachment: true,
+            .. ImageUsage::none()
+        }
+    ).unwrap());
+
+    let descriptor_set_gltf_blend = Arc::new(
+        PersistentDescriptorSet::start(pipeline_gltf_blend_finalize.clone(), 3)
+            .add_image(blend_accumulation_image.unwrap().clone()).unwrap()
+            .add_image(blend_revealage_image.unwrap().clone()).unwrap()
+            .build().unwrap()
+    );
 
     // We need to keep track of whether the swapchain is invalid for the current window,
     // for example when the window is resized.
@@ -848,11 +951,35 @@ fn main() {
                     .. ImageUsage::none()
                 }
             ).unwrap());
+            blend_accumulation_image = Some(AttachmentImage::with_usage(
+                device.clone(),
+                dimensions.clone(),
+                swapchain.format(),
+                ImageUsage {
+                    color_attachment: true,
+                    input_attachment: true,
+                    transient_attachment: true,
+                    .. ImageUsage::none()
+                }
+            ).unwrap());
+            blend_revealage_image = Some(AttachmentImage::with_usage(
+                device.clone(),
+                dimensions.clone(),
+                Format::R32G32B32A32Sfloat, //FIXME
+                ImageUsage {
+                    color_attachment: true,
+                    input_attachment: true,
+                    transient_attachment: true,
+                    .. ImageUsage::none()
+                }
+            ).unwrap());
             main_framebuffers = Some(images.iter().map(|image| {
                 // FIXME: Don't use a render pass explicitly
                 Arc::new(Framebuffer::start(render_pass.clone())
                          .add(image.clone()).unwrap()
                          .add(depth_image.as_ref().unwrap().clone()).unwrap()
+                         .add(blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
+                         .add(blend_revealage_image.as_ref().unwrap().clone()).unwrap()
                          .build().unwrap())
             }).collect::<Vec<_>>());
         }
@@ -910,7 +1037,12 @@ fn main() {
            .build().unwrap();
 
         let current_framebuffer: Arc<Framebuffer<_, _>> = main_framebuffers.as_ref().unwrap()[image_num].clone();
-        let clear_values = vec![[0.0, 0.0, 0.0, 1.0].into(), 1.0.into()];
+        let clear_values = vec![
+            [0.0, 0.0, 0.0, 1.0].into(),
+            1.0.into(),
+            [0.0, 0.0, 0.0, 0.0].into(),
+            [0.0, 0.0, 0.0, 0.0].into(),
+        ];
         // TODO: Recreate only when screen dimensions change
         let dynamic_state = DynamicState {
             line_width: None,
@@ -929,8 +1061,11 @@ fn main() {
                     // combined_pipeline: combined_pipeline.clone(),
                     pipeline_gltf_opaque: pipeline_gltf_opaque.clone(),
                     pipeline_gltf_mask: pipeline_gltf_mask.clone(),
+                    pipeline_gltf_blend_preprocess: pipeline_gltf_blend_preprocess.clone(),
+                    pipeline_gltf_blend_finalize: pipeline_gltf_blend_finalize.clone(),
                     dynamic: &dynamic_state,
-                    main_descriptor_set: main_descriptor_set_gltf_opaque.clone(), // TODO
+                    main_descriptor_set: main_descriptor_set_gltf_opaque.clone(),
+                    descriptor_set_blend: descriptor_set_gltf_blend.clone(),
                     helper_resources: helper_resources.clone(),
                 },
                 framebuffer: current_framebuffer,

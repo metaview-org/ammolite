@@ -41,11 +41,13 @@ use vulkano::pipeline::vertex::VertexSource;
 use vulkano::descriptor::descriptor_set::collection::DescriptorSetsCollection;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSetBuf;
+use vulkano::descriptor::descriptor_set::PersistentDescriptorSetImg;
 use vulkano::descriptor::descriptor_set::DescriptorSetDesc;
 use vulkano::descriptor::descriptor::DescriptorDesc;
 use vulkano::buffer::immutable::ImmutableBuffer;
 use vulkano::descriptor::descriptor_set::DescriptorSet;
 use vulkano::sampler::Sampler;
+use vulkano::image::AttachmentImage;
 use vulkano::image::ImageDimensions;
 use vulkano::image::immutable::ImmutableImage;
 use vulkano::image::immutable::ImmutableImageInitialization;
@@ -224,8 +226,13 @@ pub struct DrawContext<'a> {
     // pub combined_pipeline: Arc<GraphicsPipelineAbstract + Sync + Send>,
     pub pipeline_gltf_opaque: Arc<GraphicsPipelineAbstract + Sync + Send>,
     pub pipeline_gltf_mask: Arc<GraphicsPipelineAbstract + Sync + Send>,
+    pub pipeline_gltf_blend_preprocess: Arc<GraphicsPipelineAbstract + Sync + Send>,
+    pub pipeline_gltf_blend_finalize: Arc<GraphicsPipelineAbstract + Sync + Send>,
     pub dynamic: &'a DynamicState,
     pub main_descriptor_set: Arc<PersistentDescriptorSet<Arc<dyn GraphicsPipelineAbstract + Sync + Send>, ((), PersistentDescriptorSetBuf<Arc<DeviceLocalBuffer<SceneUBO>>>)>>,
+    pub descriptor_set_blend: Arc<PersistentDescriptorSet<Arc<dyn GraphicsPipelineAbstract + Sync + Send>, (((), PersistentDescriptorSetImg<Arc<AttachmentImage>>), PersistentDescriptorSetImg<Arc<AttachmentImage>>)>>,
+    // pub main_descriptor_set: Arc<PersistentDescriptorSet<Arc<dyn GraphicsPipelineAbstract + Sync + Send>, (((), PersistentDescriptorSetBuf<Arc<DeviceLocalBuffer<SceneUBO>>>), PersistentDescriptorSetImg<Arc<vulkano::image::AttachmentImage>>)>>,
+    // pub main_descriptor_set: Arc<PersistentDescriptorSet<Arc<dyn GraphicsPipelineAbstract + Sync + Send>, ((((), PersistentDescriptorSetBuf<Arc<DeviceLocalBuffer<SceneUBO>>>), PersistentDescriptorSetImg<Arc<AttachmentImage>>), PersistentDescriptorSetImg<Arc<AttachmentImage>>)>>,
     pub helper_resources: HelperResources,
 }
 
@@ -831,7 +838,11 @@ impl Model {
         }, initialization_tasks))
     }
 
-    pub fn draw_scene<F, C>(&self, context: InitializationDrawContext<F, C>, scene_index: usize) -> Result<AutoCommandBuffer, Error>
+    pub fn draw_scene<F, C>(
+        &self,
+        context: InitializationDrawContext<F, C>,
+        scene_index: usize,
+    ) -> Result<AutoCommandBuffer, Error>
             where F: FramebufferAbstract + RenderPassDescClearValues<C> + Send + Sync + 'static {
         if scene_index >= self.document.scenes().len() {
             return Err(ModelDrawError::InvalidSceneIndex { index: scene_index }.into());
@@ -849,20 +860,26 @@ impl Model {
             .begin_render_pass(framebuffer.clone(), false, clear_values).unwrap();
 
         for node in scene.nodes() {
-            command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Opaque);
+            command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Opaque, 0);
         }
 
         command_buffer = command_buffer.next_subpass(false).unwrap();
 
         for node in scene.nodes() {
-            command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Mask);
+            command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Mask, 1);
         }
 
-        // command_buffer = command_buffer.next_subpass(false).unwrap();
+        command_buffer = command_buffer.next_subpass(false).unwrap();
 
-        // for node in scene.nodes() {
-        //     command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Blend);
-        // }
+        for node in scene.nodes() {
+            command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Blend, 2);
+        }
+
+        command_buffer = command_buffer.next_subpass(false).unwrap();
+
+        for node in scene.nodes() {
+            command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Blend, 3);
+        }
 
         command_buffer = command_buffer
             .end_render_pass().unwrap();
@@ -870,7 +887,10 @@ impl Model {
         Ok(command_buffer.build().unwrap())
     }
 
-    pub fn draw_main_scene<F, C>(&self, context: InitializationDrawContext<F, C>) -> Result<AutoCommandBuffer, Error>
+    pub fn draw_main_scene<F, C>(
+        &self,
+        context: InitializationDrawContext<F, C>,
+    ) -> Result<AutoCommandBuffer, Error>
             where F: FramebufferAbstract + RenderPassDescClearValues<C> + Send + Sync + 'static {
         if let Some(main_scene_index) = self.document.default_scene().map(|default_scene| default_scene.index()) {
             self.draw_scene(context, main_scene_index)
@@ -879,17 +899,25 @@ impl Model {
         }
     }
 
-    pub fn draw_node<'a>(&self, node: Node<'a>, mut command_buffer: AutoCommandBufferBuilder, context: &DrawContext, alpha_mode: AlphaMode)
-            -> AutoCommandBufferBuilder {
+    pub fn draw_node<'a>(
+        &self,
+        node: Node<'a>,
+        mut command_buffer: AutoCommandBufferBuilder,
+        context: &DrawContext,
+        alpha_mode: AlphaMode,
+        subpass: u8,
+    ) -> AutoCommandBufferBuilder {
         if let Some(mesh) = node.mesh() {
             for primitive in mesh.primitives() {
                 let material = primitive.material();
 
                 if material.alpha_mode() == alpha_mode {
-                    let pipeline = match material.alpha_mode() {
-                        AlphaMode::Opaque => &context.pipeline_gltf_opaque,
-                        AlphaMode::Mask => &context.pipeline_gltf_mask,
-                        AlphaMode::Blend => unimplemented!(),
+                    let pipeline = match (alpha_mode, subpass) {
+                        (AlphaMode::Opaque, _) => &context.pipeline_gltf_opaque,
+                        (AlphaMode::Mask, _) => &context.pipeline_gltf_mask,
+                        (AlphaMode::Blend, 2) => &context.pipeline_gltf_blend_preprocess,
+                        (AlphaMode::Blend, 3) => &context.pipeline_gltf_blend_finalize,
+                        _ => panic!("Invalid alpha_mode/subpass combination."),
                     };
 
                     let material_descriptor_set = material.index().map(|material_index| {
@@ -898,25 +926,46 @@ impl Model {
                         context.helper_resources.default_material_descriptor_set.clone()
                     });
 
-                    let descriptor_sets = (
-                        context.main_descriptor_set.clone(),
-                        self.node_descriptor_sets[node.index()].clone(),
-                        material_descriptor_set,
-                    );
+                    match (alpha_mode, subpass) {
+                        (AlphaMode::Blend, 3) => {
+                            let descriptor_sets = (
+                                context.main_descriptor_set.clone(),
+                                self.node_descriptor_sets[node.index()].clone(),
+                                material_descriptor_set,
+                                context.descriptor_set_blend.clone(),
+                            );
 
-                    command_buffer = self.draw_primitive(
-                        &primitive,
-                        command_buffer,
-                        context,
-                        descriptor_sets.clone(),
-                        pipeline,
-                    );
+                            command_buffer = self.draw_primitive(
+                                &primitive,
+                                command_buffer,
+                                context,
+                                descriptor_sets.clone(),
+                                pipeline,
+                            );
+
+                        },
+                        _ => {
+                            let descriptor_sets = (
+                                context.main_descriptor_set.clone(),
+                                self.node_descriptor_sets[node.index()].clone(),
+                                material_descriptor_set,
+                            );
+
+                            command_buffer = self.draw_primitive(
+                                &primitive,
+                                command_buffer,
+                                context,
+                                descriptor_sets.clone(),
+                                pipeline,
+                            );
+                        },
+                    }
                 }
             }
         }
 
         for child in node.children() {
-            command_buffer = self.draw_node(child, command_buffer, context, alpha_mode);
+            command_buffer = self.draw_node(child, command_buffer, context, alpha_mode, subpass);
         }
 
         command_buffer

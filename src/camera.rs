@@ -125,6 +125,10 @@ impl Camera for PitchYawCamera3 {
 
         if direction_norm != 0.0 {
             direction *= distance as f32 / direction_norm;
+
+            pressed_keys.contains(&VirtualKeyCode::Space).as_option()
+                .map(|()| direction *= 0.1);
+
             self.location += &direction;
         }
     }

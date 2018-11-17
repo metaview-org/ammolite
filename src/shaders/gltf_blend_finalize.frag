@@ -32,5 +32,5 @@ layout(location = 0) out vec4 out_color;
 void main() {
     vec4 accumulation = subpassLoad(attachment_accumulation);
     float revealage = subpassLoad(attachment_revealage).r;
-    out_color = vec4(accumulation.rgb / clamp(accumulation.a, 1e-4, 5e4), revealage);
+    out_color = vec4(accumulation.rgb / accumulation.a, revealage);
 }

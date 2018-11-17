@@ -319,7 +319,7 @@ fn create_render_pass(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) 
             transparency_accumulation: {
                 load: Clear,
                 store: DontCare,
-                format: swapchain.format(),
+                format: Format::R32G32B32A32Sfloat,
                 samples: 1,
                 // initial_layout: ImageLayout::Undefined,
                 // final_layout: ImageLayout::General,
@@ -498,56 +498,6 @@ fn create_pipeline_gltf_blend_finalize(
         .render_pass(Subpass::from(render_pass.clone(), 3).unwrap())
         .build(device.clone())
         .unwrap())
-}
-
-fn create_staging_buffer_image<P, C>(device: &Arc<Device>, queue_family: QueueFamily, image: &ImageBuffer<P, C>)
-    -> (Arc<CpuAccessibleBuffer<[u8]>>, Arc<ImmutableImage<format::R8G8B8A8Unorm>>, ImmutableImageInitialization<format::R8G8B8A8Unorm>, Arc<Sampler>)
-    where P: Pixel<Subpixel=u8> + 'static,
-          C: Deref<Target=[u8]> {
-    // There should be a check whether the hardware supports the image format.
-    // let pixel_size = P::channel_count() as usize * mem::size_of::<u8>();
-    // let image_size = pixel_size * image.len();
-    let staging_buffer = CpuAccessibleBuffer::<[u8]>::from_iter(
-        device.clone(),
-        BufferUsage {
-            transfer_destination: true,
-            transfer_source: true,
-            .. BufferUsage::none()
-        },
-        Vec::from(&**image).into_iter(),
-    ).unwrap();
-    let (texture_image, initialization) = ImmutableImage::uninitialized(
-        device.clone(),
-        Dimensions::Dim2d {
-            width: image.width(),
-            height: image.height(),
-        },
-        format::R8G8B8A8Unorm,
-        1,
-        ImageUsage {
-            transfer_destination: true,
-            sampled: true,
-            .. ImageUsage::none()
-        },
-        ImageLayout::ShaderReadOnlyOptimal,
-        [queue_family].into_iter().cloned(),
-    ).unwrap();
-    let sampler = Sampler::new(
-        device.clone(),
-        Filter::Linear,  // magnifying filter
-        Filter::Linear,  // minifying filter
-        MipmapMode::Linear,
-        SamplerAddressMode::ClampToEdge,
-        SamplerAddressMode::ClampToEdge,
-        SamplerAddressMode::ClampToEdge,
-        0.0,  // mip_lod_bias
-        // TODO: Turn anisotropic filtering on for better screen readability
-        1.0,  // anisotropic filtering (1.0 = off, anything higher = on)
-        1.0,  // min_lod
-        1.0,  // max_lod
-    ).unwrap();
-
-    (staging_buffer, texture_image, initialization, sampler)
 }
 
 fn create_staging_buffers_data<T>(device: &Arc<Device>, queue_family: QueueFamily, usage: BufferUsage, data: T)
@@ -842,7 +792,7 @@ fn main() {
     blend_accumulation_image = Some(AttachmentImage::with_usage(
         device.clone(),
         dimensions.clone(),
-        swapchain.format(),
+        Format::R32G32B32A32Sfloat,
         ImageUsage {
             color_attachment: true,
             input_attachment: true,
@@ -988,7 +938,7 @@ fn main() {
             blend_accumulation_image = Some(AttachmentImage::with_usage(
                 device.clone(),
                 dimensions.clone(),
-                swapchain.format(),
+                Format::R32G32B32A32Sfloat,
                 ImageUsage {
                     color_attachment: true,
                     input_attachment: true,

@@ -58,7 +58,7 @@ float weight_function_paper_eq_7(vec4 homogeneous_position, float alpha) {
     float mem1 = base_mem1 * base_mem1;
     float base_mem2 = abs(z) / 200.0;
     float mem2 = base_mem2 * base_mem2 * base_mem2 * base_mem2 * base_mem2 * base_mem2;
-    return alpha * max(1.0e-2, min(3.0e3, 10.0 / (10e-5 + mem1 + mem2)));
+    return alpha * max(1e-2, min(3e3, 10.0 / (1e-5 + mem1 + mem2)));
 }
 
 float weight_function_paper_eq_8(vec4 homogeneous_position, float alpha) {
@@ -67,34 +67,34 @@ float weight_function_paper_eq_8(vec4 homogeneous_position, float alpha) {
     float mem1 = base_mem1 * base_mem1 * base_mem1;
     float base_mem2 = abs(z) / 200.0;
     float mem2 = base_mem2 * base_mem2 * base_mem2 * base_mem2 * base_mem2 * base_mem2;
-    return alpha * max(1.0e-2, min(3.0e3, 10.0 / (10e-5 + mem1 + mem2)));
+    return alpha * max(1e-2, min(3e3, 10.0 / (1e-5 + mem1 + mem2)));
 }
 
 float weight_function_paper_eq_9(vec4 homogeneous_position, float alpha) {
     float z = linearize_z(homogeneous_position);
     float base_mem = abs(z) / 200.0;
     float mem = base_mem * base_mem * base_mem * base_mem;
-    return alpha * max(1.0e-2, min(3.0e3, 0.03 / (10e-5 + mem)));
+    return alpha * max(1e-2, min(3e3, 0.03 / (1e-5 + mem)));
 }
 
 float weight_function_paper_eq_10(vec4 homogeneous_position, float alpha) {
     float one_minus_z = 1.0 - homogeneous_position.z;
     float cubed = one_minus_z * one_minus_z * one_minus_z;
-    return alpha * max(1.0e-2, 3.0e3 * cubed);
+    return alpha * max(1e-2, 3e3 * cubed);
 }
 
 float weight_function(vec4 homogeneous_position, float alpha) {
-    return weight_function_inverse(homogeneous_position, alpha);
+    return weight_function_paper_eq_8(homogeneous_position, alpha);
 }
 
 void main() {
     vec4 base_color = get_base_color();
-    vec4 premultiplied_alpha_color = vec4(base_color.rgb * base_color.a, base_color.a);
+    // Without premultiplication:
+    vec4 premultiplied_alpha_color = vec4(base_color.rgb, 1.0);
+    // With premultiplication:
+    /* vec4 premultiplied_alpha_color = vec4(base_color.rgb * base_color.a, base_color.a); */
 
-    // TODO: Premultiplied color or not?
+    // Sums up both the numerator and the denominator of the WBOIT expression
     out_accumulation_src = premultiplied_alpha_color * weight_function(gl_FragCoord, base_color.a);
     out_revealage_src = base_color.aaaa;
-
-    /* out_accumulation_src = 1.0.rrrr; */
-    /* out_revealage_src = 0.5.rrrr; */
 }

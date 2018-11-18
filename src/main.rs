@@ -3,7 +3,7 @@
 #[macro_use]
 extern crate vulkano;
 #[macro_use]
-extern crate vulkano_shader_derive;
+extern crate vulkano_shaders;
 #[macro_use]
 extern crate failure;
 #[macro_use]
@@ -44,8 +44,8 @@ use vulkano::pipeline::shader::GraphicsEntryPointAbstract;
 use vulkano::instance::RawInstanceExtensions;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer};
 use vulkano::command_buffer::{AutoCommandBuffer, AutoCommandBufferBuilder, DynamicState};
-use vulkano::device::{Device, RawDeviceExtensions, DeviceExtensions, Queue};
-use vulkano::instance::{Instance, PhysicalDevice, QueueFamily, Features};
+use vulkano::device::{Device, RawDeviceExtensions, DeviceExtensions, Queue, Features};
+use vulkano::instance::{Instance, PhysicalDevice, QueueFamily};
 use vulkano::sync::{FlushError, GpuFuture};
 use vulkano::format::{self, Format, FormatTy};
 use vulkano::image::{AttachmentImage, ImageUsage, Dimensions, ImageLayout};
@@ -107,43 +107,38 @@ struct ScreenVertex {
 impl_vertex!(ScreenVertex, position);
 
 mod gltf_vert {
-    #[derive(VulkanoShader)]
-    #[ty = "vertex"]
-    #[path = "src/shaders/gltf.vert"]
-    #[allow(dead_code)]
-    struct Dummy;
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        path: "src/shaders/gltf.vert",
+    }
 }
 
 mod gltf_opaque_frag {
-    #[derive(VulkanoShader)]
-    #[ty = "fragment"]
-    #[path = "src/shaders/gltf_opaque.frag"]
-    #[allow(dead_code)]
-    struct Dummy;
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "src/shaders/gltf_opaque.frag",
+    }
 }
 
 mod gltf_mask_frag {
-    #[derive(VulkanoShader)]
-    #[ty = "fragment"]
-    #[path = "src/shaders/gltf_mask.frag"]
-    #[allow(dead_code)]
-    struct Dummy;
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "src/shaders/gltf_mask.frag",
+    }
 }
 
 mod gltf_blend_preprocess_frag {
-    #[derive(VulkanoShader)]
-    #[ty = "fragment"]
-    #[path = "src/shaders/gltf_blend_preprocess.frag"]
-    #[allow(dead_code)]
-    struct Dummy;
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "src/shaders/gltf_blend_preprocess.frag",
+    }
 }
 
 mod gltf_blend_finalize_frag {
-    #[derive(VulkanoShader)]
-    #[ty = "fragment"]
-    #[path = "src/shaders/gltf_blend_finalize.frag"]
-    #[allow(dead_code)]
-    struct Dummy;
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "src/shaders/gltf_blend_finalize.frag",
+    }
 }
 
 pub use gltf_opaque_frag::ty::*;

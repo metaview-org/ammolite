@@ -4,10 +4,13 @@ version = "0.1.0"
 authors = ["Jakub Hlusička <limeth@protonmail.com>"]
 
 [dependencies]
+# vulkano = "0.11.1"
+# vulkano-shaders = "0.11.0"
+# vulkano-win = "0.11.0"
 vulkano = { path = "../vulkano/vulkano" }
-vulkano-shader-derive = { path = "../vulkano/vulkano-shader-derive" }
+vulkano-shaders = { path = "../vulkano/vulkano-shaders" }
 vulkano-win = { path = "../vulkano/vulkano-win" }
-winit = "0.17.0"
+winit = "0.18.0"
 image = "0.19.0"
 typenum = "1.10.0"
 gltf = "0.11.2"

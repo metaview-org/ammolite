@@ -1,4 +1,5 @@
 #version 450
+#include "gltf_common.frag"
 
 layout(set = 0, binding = 0) uniform SceneUBO {
     vec2 dimensions;
@@ -26,19 +27,6 @@ layout(location = 1) in vec2 f_tex_coord;
 
 layout(location = 0) out vec4 out_accumulation_src;
 layout(location = 1) out vec4 out_revealage_src; //FIXME
-
-vec4 get_base_color() {
-    if (base_color_texture_provided) {
-        vec4 texture_value = texture(
-            sampler2D(base_color_texture, base_color_sampler),
-            vec2(f_tex_coord)
-        );
-
-        return base_color_factor * texture_value;
-    } else {
-        return base_color_factor;
-    }
-}
 
 float linearize_z(vec4 homogeneous_position) {
     mat4 inverse_projection = inverse(projection);
@@ -88,7 +76,11 @@ float weight_function(vec4 homogeneous_position, float alpha) {
 }
 
 void main() {
-    vec4 base_color = get_base_color();
+    vec4 base_color = get_base_color(base_color_texture_provided,
+                                     base_color_factor,
+                                     base_color_texture,
+                                     base_color_sampler,
+                                     f_tex_coord);
     // Without premultiplication:
     vec4 premultiplied_alpha_color = vec4(base_color.rgb, 1.0);
     // With premultiplication:

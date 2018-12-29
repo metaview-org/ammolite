@@ -79,7 +79,7 @@ use ::MainDescriptorSet;
 use math::*;
 use iter::ArrayIterator;
 use iter::ForcedExactSizeIterator;
-use vertex::{GltfVertexPosition, GltfVertexTexCoord, GltfVertexBuffers};
+use vertex::{GltfVertexPosition, GltfVertexNormal, GltfVertexTangent, GltfVertexTexCoord, GltfVertexBuffers};
 use sampler::IntoVulkanEquivalent;
 use self::error::*;
 
@@ -545,6 +545,7 @@ pub struct Model {
     device_buffers: Vec<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>,
     device_images: Vec<Arc<dyn ImageViewAccess + Send + Sync>>,
     converted_index_buffers_by_accessor_index: Vec<Option<Arc<dyn TypedBufferAccess<Content=[u16]> + Send + Sync>>>,
+    tangent_buffers: Vec<Vec<Option<Arc<dyn TypedBufferAccess<Content=[GltfVertexTangent]> + Send + Sync>>>>,
     // Note: Do not ever try to express the descriptor set explicitly.
     node_descriptor_sets: Vec<Arc<dyn DescriptorSet + Send + Sync>>,
     material_descriptor_sets: Vec<Arc<dyn DescriptorSet + Send + Sync>>,
@@ -594,9 +595,11 @@ impl Model {
         );
 
         let mut converted_index_buffers_by_accessor_index: Vec<Option<Arc<dyn TypedBufferAccess<Content=[u16]> + Send + Sync>>> = vec![None; document.accessors().len()];
+        let primitive_count = document.meshes().map(|mesh| mesh.primitives().len()).sum();
+        let mut tangent_buffers: Vec<Vec<Option<Arc<dyn TypedBufferAccess<Content=[GltfVertexTangent]> + Send + Sync>>>> = vec![Vec::new(); primitive_count];
 
-        for mesh in document.meshes() {
-            for primitive in mesh.primitives() {
+        for (mesh_index, mesh) in document.meshes().enumerate() {
+            for (primitive_index, primitive) in mesh.primitives().enumerate() {
                 if let Some(index_accessor) = primitive.indices() {
                     if index_accessor.data_type() == DataType::U8 {
                         let index_view = index_accessor.view();
@@ -612,7 +615,7 @@ impl Model {
                             ImmutableBuffer::<[u16]>::raw(
                                 device.clone(),
                                 converted_byte_len,
-                                BufferUsage { // TODO: Scan document for buffer usage and optimize
+                                BufferUsage {
                                     transfer_destination: true,
                                     index_buffer: true,
                                     ..BufferUsage::none()
@@ -629,6 +632,64 @@ impl Model {
                         });
                         converted_index_buffers_by_accessor_index[index_accessor.index()] = Some(device_index_buffer);
                     }
+                }
+
+                // Compute tangents for the model if they are missing.
+                if primitive.get(&Semantic::Tangents).is_none() {
+                    let position_accessor = primitive.get(&Semantic::Positions).unwrap();
+                    let position_view = position_accessor.view();
+
+                    assert!(position_view.stride().is_none(), "The stride of the index view must be `None`.");
+
+                    let byte_offset = position_view.offset() + position_accessor.offset();
+                    let byte_len = mem::size_of::<u8>() * position_accessor.count();
+                    let position_slice = &buffer_data_array[position_view.buffer().index()][byte_offset..(byte_offset + byte_len)];
+                    let index_count = primitive.indices()
+                        .map(|index_accessor| index_accessor.count())
+                        .unwrap_or_else(|| primitive.get(&Semantic::Positions).unwrap().count());
+
+                    let converted_byte_len = mem::size_of::<GltfVertexTangent>() * index_count;
+                    let (device_tangent_buffer, tangent_buffer_initialization) = unsafe {
+                        ImmutableBuffer::<[GltfVertexTangent]>::raw(
+                            device.clone(),
+                            converted_byte_len,
+                            BufferUsage {
+                                transfer_destination: true,
+                                vertex_buffer: true,
+                                ..BufferUsage::none()
+                            },
+                            queue_families.clone(),
+                        )
+                    }?;
+                    let tangent_buffer_initialization: BufferSlice<[u8], _> = unsafe {
+                        BufferSlice::from_typed_buffer_access(tangent_buffer_initialization).reinterpret::<[u8]>()
+                    };
+                    let buffer_data: Vec<u8> = Vec::with_capacity(converted_byte_len);
+                    let vertices_per_face = 3;
+                    let face_count = index_count / vertices_per_face;
+
+                    let get_semantic_index: Box<Fn(usize, usize) -> usize> = if let Some(index_accessor) = primitive.indices() {
+                        // TODO: Index into the index buffer to figure out the actual vertex index
+                        // TODO: No need for a closure.
+                        Box::new(|face_index, vertex_index| { face_index * vertices_per_face + vertex_index })
+                    } else {
+                        Box::new(|face_index, vertex_index| { face_index * vertices_per_face + vertex_index })
+                    };
+
+                    mikktspace::generate_tangents(
+                        &|| { vertices_per_face }, // vertices_per_face: &'a Fn() -> usize, 
+                        &|| { index_count }, // face_count: &'a Fn() -> usize, 
+                        &|| {  }, // position: &'a Fn(usize, usize) -> &'a [f32; 3], 
+                        &|| {}, // normal: &'a Fn(usize, usize) -> &'a [f32; 3], 
+                        &|| {}, // tex_coord: &'a Fn(usize, usize) -> &'a [f32; 2], 
+                        &mut || {}, // set_tangent: &'a mut FnMut(usize, usize, [f32; 4])
+                    );
+
+                    initialization_tasks.push(InitializationTask::Buffer {
+                        data: buffer_data,
+                        initialization_buffer: Arc::new(tangent_buffer_initialization),
+                    });
+                    tangent_buffers[mesh_index][primitive_index] = Some(device_tangent_buffer);
                 }
             }
         }
@@ -833,6 +894,7 @@ impl Model {
             device_buffers,
             device_images,
             converted_index_buffers_by_accessor_index,
+            tangent_buffers,
             node_descriptor_sets,
             material_descriptor_sets,
         }, initialization_tasks))
@@ -980,6 +1042,8 @@ impl Model {
         pipeline: &Arc<GraphicsPipelineAbstract + Send + Sync>,
     ) -> AutoCommandBufferBuilder where S: DescriptorSetsCollection + Clone {
         let positions_accessor = primitive.get(&Semantic::Positions).unwrap();
+        let normals_accessor = primitive.get(&Semantic::Normals).expect("Normals must be provided by the glTF model for now.");
+        let tangents_accessor = primitive.get(&Semantic::Tangents);
         let tex_coords_accessor = primitive.get(&Semantic::TexCoords(0));
         let indices_accessor = primitive.indices();
 
@@ -996,6 +1060,47 @@ impl Model {
 
             unsafe { position_slice.reinterpret::<[GltfVertexPosition]>() }
         };
+
+        let normal_slice: BufferSlice<[GltfVertexNormal], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = {
+            let buffer_view = normals_accessor.view();
+            let buffer_index = buffer_view.buffer().index();
+            let buffer_offset = normals_accessor.offset() + buffer_view.offset();
+            let buffer_bytes = normals_accessor.size() * normals_accessor.count();
+
+            let normal_buffer = self.device_buffers[buffer_index].clone();
+            let normal_slice = BufferSlice::from_typed_buffer_access(normal_buffer)
+                .slice(buffer_offset..(buffer_offset + buffer_bytes))
+                .unwrap();
+
+            unsafe { normal_slice.reinterpret::<[GltfVertexNormal]>() }
+        };
+
+        let tangent_slice: BufferSlice<[GltfVertexTangent], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = {
+            let tangent_slice: BufferSlice<[u8], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = tangents_accessor.map(|tangents_accessor| {
+                // TODO: Use precomputed tangents
+                unimplemented!();
+            }).unwrap_or_else(|| {
+                let zero_buffer = context.helper_resources.zero_buffer.clone();
+
+                BufferSlice::from_typed_buffer_access(zero_buffer)
+            });
+
+            unsafe { tangent_slice.reinterpret::<[GltfVertexTangent]>() }
+        };
+
+        // let tangent_slice: BufferSlice<[GltfVertexTangent], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = {
+        //     let buffer_view = tangents_accessor.view();
+        //     let buffer_index = buffer_view.buffer().index();
+        //     let buffer_offset = tangents_accessor.offset() + buffer_view.offset();
+        //     let buffer_bytes = tangents_accessor.size() * tangents_accessor.count();
+
+        //     let tangent_buffer = self.device_buffers[buffer_index].clone();
+        //     let tangent_slice = BufferSlice::from_typed_buffer_access(tangent_buffer)
+        //         .slice(buffer_offset..(buffer_offset + buffer_bytes))
+        //         .unwrap();
+
+        //     unsafe { tangent_slice.reinterpret::<[GltfVertexTangent]>() }
+        // };
 
         let tex_coord_slice: BufferSlice<[GltfVertexTexCoord], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = {
             let tex_coord_slice: BufferSlice<[u8], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = tex_coords_accessor.map(|tex_coords_accessor| {
@@ -1020,6 +1125,8 @@ impl Model {
 
         let vertex_buffers = GltfVertexBuffers {
             position_buffer: Some(Arc::new(position_slice)),
+            normal_buffer: Some(Arc::new(normal_slice)),
+            tangent_buffer: Some(Arc::new(tangent_slice)),
             tex_coord_buffer: Some(Arc::new(tex_coord_slice)),
         };
 

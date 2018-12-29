@@ -17,6 +17,7 @@ extern crate byteorder;
 extern crate rayon;
 extern crate generic_array;
 extern crate boolinator;
+extern crate mikktspace;
 
 #[macro_use]
 pub mod math;
@@ -645,69 +646,27 @@ fn main() {
 
     let (mut events_loop, window, mut dimensions, device, queue_family, queue, mut swapchain, mut images) = vulkan_initialize(&instance);
 
-    let main_vertices = [
-        MainVertex { position: [-0.5, -0.5,  0.0], tex_coord: [0.0, 1.0] },
-        MainVertex { position: [ 0.5, -0.5,  0.0], tex_coord: [1.0, 1.0] },
-        MainVertex { position: [ 0.5,  0.5,  0.0], tex_coord: [1.0, 0.0] },
-        MainVertex { position: [-0.5,  0.5,  0.0], tex_coord: [0.0, 0.0] },
+    // let screen_vertices = [
+    //     ScreenVertex { position: [-1.0, -1.0,  0.0] },
+    //     ScreenVertex { position: [-1.0,  1.0,  0.0] },
+    //     ScreenVertex { position: [ 1.0,  1.0,  0.0] },
+    //     ScreenVertex { position: [ 1.0, -1.0,  0.0] },
+    // ];
 
-        MainVertex { position: [-0.5, -0.5, -0.5], tex_coord: [0.0, 1.0] },
-        MainVertex { position: [ 0.5, -0.5, -0.5], tex_coord: [1.0, 1.0] },
-        MainVertex { position: [ 0.5,  0.5, -0.5], tex_coord: [1.0, 0.0] },
-        MainVertex { position: [-0.5,  0.5, -0.5], tex_coord: [0.0, 0.0] },
-    ];
+    // let screen_indices = [
+    //     0, 1, 2u16,
+    //     // 2, 3, 0u16,
+    // ];
 
-    let main_indices = [
-        0, 1, 2,
-        2, 3, 0,
-
-        4, 5, 6,
-        6, 7, 4u16,
-    ];
-
-    // let nom_obj::model::Interleaved { v_vt_vn, idx } = obj.objects[0].interleaved();
-
-    // let main_vertices: Vec<MainVertex> = v_vt_vn.iter()
-    //     .map(|&(v, vt, vn)| MainVertex { position: [v.0, v.1, v.2], tex_coord: [vt.0, 1.0 - vt.1] })
-    //     .collect();
-
-    // let main_indices: Vec<u32> = idx.iter()
-    //     .map(|x| *x as u32)
-    //     .collect();
-
-    let (
-        (main_vertex_staging_buffer, main_vertex_device_buffer),
-        (main_index_staging_buffer, main_index_device_buffer),
-    ) = create_vertex_index_buffers(
-        &device,
-        queue_family,
-        // main_vertices.into_iter(),
-        // main_indices.into_iter(),
-        main_vertices.into_iter().cloned(),
-        main_indices.into_iter().cloned(),
-    );
-
-    let screen_vertices = [
-        ScreenVertex { position: [-1.0, -1.0,  0.0] },
-        ScreenVertex { position: [-1.0,  1.0,  0.0] },
-        ScreenVertex { position: [ 1.0,  1.0,  0.0] },
-        ScreenVertex { position: [ 1.0, -1.0,  0.0] },
-    ];
-
-    let screen_indices = [
-        0, 1, 2u16,
-        // 2, 3, 0u16,
-    ];
-
-    let (
-        (screen_vertex_staging_buffer, screen_vertex_device_buffer),
-        (screen_index_staging_buffer, screen_index_device_buffer),
-    ) = create_vertex_index_buffers(
-        &device,
-        queue_family,
-        screen_vertices.into_iter().cloned(),
-        screen_indices.into_iter().cloned(),
-    );
+    // let (
+    //     (screen_vertex_staging_buffer, screen_vertex_device_buffer),
+    //     (screen_index_staging_buffer, screen_index_device_buffer),
+    // ) = create_vertex_index_buffers(
+    //     &device,
+    //     queue_family,
+    //     screen_vertices.into_iter().cloned(),
+    //     screen_indices.into_iter().cloned(),
+    // );
 
     let vertex_shader = gltf_vert::Shader::load(device.clone()).expect("Failed to create shader module.");
     let render_pass = create_render_pass(&device, &swapchain);
@@ -733,33 +692,33 @@ fn main() {
         main_ubo.clone(),
     );
 
-    let screen_image = AttachmentImage::with_usage(
-        device.clone(),
-        SCREEN_DIMENSIONS.clone(),
-        swapchain.format(),
-        ImageUsage {
-            sampled: true,
-            .. ImageUsage::none()
-        }
-    ).unwrap();
-    let border_color = match swapchain.format().ty() {
-        FormatTy::Uint | FormatTy::Sint => BorderColor::IntTransparentBlack,
-                                      _ => BorderColor::FloatTransparentBlack,
-    };
-    let screen_sampler = Sampler::new(
-        device.clone(),
-        Filter::Nearest,  // magnifying filter
-        Filter::Linear,  // minifying filter
-        MipmapMode::Nearest,
-        SamplerAddressMode::ClampToBorder(border_color),
-        SamplerAddressMode::ClampToBorder(border_color),
-        SamplerAddressMode::ClampToBorder(border_color),
-        0.0,  // mip_lod_bias
-        // TODO: Turn anisotropic filtering on for better screen readability
-        1.0,  // anisotropic filtering (1.0 = off, anything higher = on)
-        1.0,  // min_lod
-        1.0,  // max_lod
-    ).unwrap();
+    // let screen_image = AttachmentImage::with_usage(
+    //     device.clone(),
+    //     SCREEN_DIMENSIONS.clone(),
+    //     swapchain.format(),
+    //     ImageUsage {
+    //         sampled: true,
+    //         .. ImageUsage::none()
+    //     }
+    // ).unwrap();
+    // let border_color = match swapchain.format().ty() {
+    //     FormatTy::Uint | FormatTy::Sint => BorderColor::IntTransparentBlack,
+    //                                   _ => BorderColor::FloatTransparentBlack,
+    // };
+    // let screen_sampler = Sampler::new(
+    //     device.clone(),
+    //     Filter::Nearest,  // magnifying filter
+    //     Filter::Linear,  // minifying filter
+    //     MipmapMode::Nearest,
+    //     SamplerAddressMode::ClampToBorder(border_color),
+    //     SamplerAddressMode::ClampToBorder(border_color),
+    //     SamplerAddressMode::ClampToBorder(border_color),
+    //     0.0,  // mip_lod_bias
+    //     // TODO: Turn anisotropic filtering on for better screen readability
+    //     1.0,  // anisotropic filtering (1.0 = off, anything higher = on)
+    //     1.0,  // min_lod
+    //     1.0,  // max_lod
+    // ).unwrap();
     let main_descriptor_set_gltf_opaque = Arc::new(
         PersistentDescriptorSet::start(pipeline_gltf_opaque.clone(), 0)
             .add_buffer(main_ubo_device_buffer.clone()).unwrap()
@@ -827,7 +786,7 @@ fn main() {
     let mut previous_frame_end: Box<dyn GpuFuture> = Box::new(vulkano::sync::now(device.clone()));
 
     let init_command_buffer_builder = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap();
-    let (init_command_buffer_builder, mut helper_resources) = HelperResources::new(
+    let (init_command_buffer_builder, helper_resources) = HelperResources::new(
         &device,
         [queue_family].into_iter().cloned(),
         pipeline_gltf_opaque.clone(), //FIXME: Replace with a pipeline layout
@@ -836,7 +795,7 @@ fn main() {
         queue_family.clone(),
         init_command_buffer_builder,
     ).unwrap();
-    let (init_command_buffer_builder, mut model) = {
+    let (init_command_buffer_builder, model) = {
         let model_path = std::env::args().nth(1).unwrap_or_else(|| {
             eprintln!("No model path provided.");
             std::process::exit(1);
@@ -865,10 +824,9 @@ fn main() {
         // .then_signal_fence()
         // .then_execute_same_queue(init_unsafe_command_buffer).unwrap()
         .then_signal_fence_and_flush().unwrap());
-    let mut init_instant = Instant::now();
+    let init_instant = Instant::now();
     let mut previous_frame_instant = init_instant.clone();
     let mut cursor_position: (f64, f64) = (dimensions[0] as f64, dimensions[1] as f64);
-    let mut cursor_delta: (f64, f64) = (0.0, 0.0);
     let mut camera = PitchYawCamera3::new();
     let mut pressed_keys: HashSet<VirtualKeyCode> = HashSet::new();
     let mut pressed_mouse_buttons: HashSet<MouseButton> = HashSet::new();

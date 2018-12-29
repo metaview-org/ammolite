@@ -25,7 +25,9 @@ layout(set = 3, binding = 0, input_attachment_index = 0) uniform subpassInput at
 layout(set = 3, binding = 1, input_attachment_index = 1) uniform subpassInput attachment_revealage;
 
 layout(location = 0) in vec4 f_homogeneous_position;
-layout(location = 1) in vec2 f_tex_coord;
+layout(location = 1) in vec3 f_normal;
+layout(location = 2) in vec4 f_tangent;
+layout(location = 3) in vec2 f_tex_coord;
 
 layout(location = 0) out vec4 out_color;
 

@@ -17,6 +17,12 @@ use ::gltf_vert::MainInput;
 pub struct GltfVertexPosition([f32; 3]);
 
 #[repr(C)]
+pub struct GltfVertexNormal([f32; 3]);
+
+#[repr(C)]
+pub struct GltfVertexTangent([f32; 4]);
+
+#[repr(C)]
 pub struct GltfVertexTexCoord([f32; 2]);
 
 macro_rules! impl_buffers {
@@ -24,12 +30,12 @@ macro_rules! impl_buffers {
         $field_len:expr, $field_len_ty:ty;
         $([$field_name:ident: $($buffer_type_name:tt)+] of [$attribute_name:ident: $($attribute_type:tt)+]),+,
     } => {
-        pub struct GltfVertexBuffers<PositionBuffer, TexCoordBuffer>
+        pub struct GltfVertexBuffers<$($($buffer_type_name),+),+>
                 where $($($buffer_type_name)+: TypedBufferAccess<Content=[$($attribute_type)+]> + Send + Sync + 'static,)+ {
             $(pub $field_name: Option<Arc<$($buffer_type_name)+>>,)+
         }
 
-        impl<PositionBuffer, TexCoordBuffer> GltfVertexBuffers<PositionBuffer, TexCoordBuffer>
+        impl<$($($buffer_type_name),+),+> GltfVertexBuffers<$($($buffer_type_name),+),+>
                 where $($($buffer_type_name)+: TypedBufferAccess<Content=[$($attribute_type)+]> + Send + Sync + 'static,)+ {
             pub fn get_individual_buffers(&self) -> Vec<Arc<dyn BufferAccess + Send + Sync>> {
                 let mut result: Vec<Arc<dyn BufferAccess + Send + Sync>> = Vec::new();
@@ -150,8 +156,10 @@ macro_rules! impl_buffers {
 }
 
 impl_buffers! {
-    2, U2;
+    4, U4;
 
     [position_buffer: PositionBuffer] of [position: GltfVertexPosition],
+    [normal_buffer: NormalBuffer] of [normal: GltfVertexNormal],
+    [tangent_buffer: TangentBuffer] of [tangent: GltfVertexTangent],
     [tex_coord_buffer: TexCoordBuffer] of [tex_coord: GltfVertexTexCoord],
 }

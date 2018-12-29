@@ -1,4 +1,5 @@
 #![feature(duration_as_u128)]
+#![feature(core_intrinsics)]
 
 #[macro_use]
 extern crate vulkano;
@@ -18,6 +19,7 @@ extern crate rayon;
 extern crate generic_array;
 extern crate boolinator;
 extern crate mikktspace;
+extern crate safe_transmute;
 
 #[macro_use]
 pub mod math;

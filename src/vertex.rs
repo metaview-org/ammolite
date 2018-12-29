@@ -12,18 +12,27 @@ use vulkano::pipeline::shader::ShaderInterfaceDef;
 use typenum::*;
 use iter::ArrayIterator;
 use ::gltf_vert::MainInput;
+use safe_transmute::PodTransmutable;
 
 #[repr(C)]
-pub struct GltfVertexPosition([f32; 3]);
+#[derive(Clone, Copy)]
+pub struct GltfVertexPosition(pub [f32; 3]);
+unsafe impl PodTransmutable for GltfVertexPosition {}
 
 #[repr(C)]
-pub struct GltfVertexNormal([f32; 3]);
+#[derive(Clone, Copy)]
+pub struct GltfVertexNormal(pub [f32; 3]);
+unsafe impl PodTransmutable for GltfVertexNormal {}
 
 #[repr(C)]
-pub struct GltfVertexTangent([f32; 4]);
+#[derive(Clone, Copy)]
+pub struct GltfVertexTangent(pub [f32; 4]);
+unsafe impl PodTransmutable for GltfVertexTangent {}
 
 #[repr(C)]
-pub struct GltfVertexTexCoord([f32; 2]);
+#[derive(Clone, Copy)]
+pub struct GltfVertexTexCoord(pub [f32; 2]);
+unsafe impl PodTransmutable for GltfVertexTexCoord {}
 
 macro_rules! impl_buffers {
     {
@@ -121,21 +130,32 @@ macro_rules! impl_buffers {
                         format: vulkano::format::Format::R4G4UnormPack8,
                     })
                 },)+];
-                let mut field_index = 0;
 
-                $(
-                    let element = interface.elements()
-                        .nth(field_index)
-                        .expect("Not enough vertex attributes in the shader.");
+                // for (index, element) in interface.elements().enumerate() {
+                //     println!("element #{}: {:?}", index, element);
+                // }
+
+                let attribute_names = [$(stringify!($attribute_name)),+];
+                let attribute_type_sizes = [$(mem::size_of::<$($attribute_type)+>()),+];
+
+                debug_assert_eq!(
+                    interface.elements().len(),
+                    $field_len,
+                    "The number of fields in the shader and program code is inconsistent.",
+                );
+
+                for element in interface.elements() {
+                    let field_index = element.location.start as usize;
 
                     debug_assert_eq!(
                         element.name.expect("Shader input attribute has no name.").as_ref(),
-                        stringify!($attribute_name)
+                        attribute_names[field_index],
+                        "The field types in the shader and program code are inconsistent",
                     );
 
                     buffers[field_index] = (
                         field_index as u32,
-                        mem::size_of::<$($attribute_type)+>(),
+                        attribute_type_sizes[field_index],
                         InputRate::Vertex
                     );
                     attribs[field_index] = (
@@ -146,8 +166,7 @@ macro_rules! impl_buffers {
                             format: element.format,
                         }
                     );
-                    field_index += 1;
-                )+
+                }
 
                 Ok((ArrayIterator::new(buffers), ArrayIterator::new(attribs)))
             }
@@ -161,5 +180,6 @@ impl_buffers! {
     [position_buffer: PositionBuffer] of [position: GltfVertexPosition],
     [normal_buffer: NormalBuffer] of [normal: GltfVertexNormal],
     [tangent_buffer: TangentBuffer] of [tangent: GltfVertexTangent],
+    // [tangent_buffer_2: TangentBuffer2] of [tangent2: GltfVertexTangent],
     [tex_coord_buffer: TexCoordBuffer] of [tex_coord: GltfVertexTexCoord],
 }

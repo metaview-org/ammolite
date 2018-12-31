@@ -588,6 +588,19 @@ fn get_node_matrices(document: &Document) -> Vec<Mat4> {
     results.into_iter().map(|option| option.unwrap_or_else(Mat4::identity)).collect()
 }
 
+enum ColorSpace {
+    Srgb,
+    Linear,
+}
+
+fn convert_double_channel_to_triple_channel<'a>(data_slice: &'a [u8]) -> Box<ExactSizeIterator<Item=u8> + 'a> {
+    let unsized_iterator = data_slice.chunks(3).flat_map(|rgb| {
+        ArrayIterator::new([rgb[0], rgb[1], rgb[2], 0xFF])
+    });
+    let iterator_len = data_slice.len() / 3 * 4;
+    Box::new(ForcedExactSizeIterator::new(unsized_iterator, iterator_len))
+}
+
 impl Model {
     fn get_semantic_byte_slice<'a, T: PodTransmutable>(buffer_data_array: &'a [gltf::buffer::Data], accessor: &Accessor) -> &'a [T] {
         let view = accessor.view();
@@ -749,7 +762,7 @@ impl Model {
 
         let mut device_buffers: Vec<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = Vec::with_capacity(buffer_data_array.len());
 
-        for (index, gltf::buffer::Data(buffer_data)) in buffer_data_array.into_iter().enumerate() {
+        for gltf::buffer::Data(buffer_data) in buffer_data_array.into_iter() {
             let (device_buffer, buffer_initialization) = unsafe {
                 ImmutableBuffer::raw(
                     device.clone(),
@@ -773,79 +786,88 @@ impl Model {
             device_buffers.push(device_buffer);
         }
 
-        let mut device_images: Vec<Arc<dyn ImageViewAccess + Send + Sync>> = Vec::with_capacity(document.textures().len());
+        let mut device_images: Vec<Arc<dyn ImageViewAccess + Send + Sync>> = vec![helper_resources.empty_image.clone(); image_data_array.len()]; // Vec::with_capacity(document.textures().len());
 
-        for (index, image_data) in image_data_array.into_iter().enumerate() {
-            let gltf::image::Data {
-                pixels,
-                format,
-                width,
-                height,
-            } = image_data;
+        for material in document.materials() {
+            let pbr = material.pbr_metallic_roughness();
+            let images_slice = [(ColorSpace::Srgb,   pbr.base_color_texture().map(|wrapped| wrapped.texture())),
+                                (ColorSpace::Linear, pbr.metallic_roughness_texture().map(|wrapped| wrapped.texture())),
+                                (ColorSpace::Linear, material.normal_texture().map(|wrapped| wrapped.texture())),
+                                (ColorSpace::Linear, material.occlusion_texture().map(|wrapped| wrapped.texture())),
+                                (ColorSpace::Srgb,   material.emissive_texture().map(|wrapped| wrapped.texture()))];
 
-            macro_rules! push_image_with_format_impl {
-                ([$($vk_format:tt)+], $push_init_tasks:expr) => {{
-                    let (device_image, image_initialization) = ImmutableImage::uninitialized(
-                        device.clone(),
-                        Dimensions::Dim2d {
-                            width,
-                            height,
-                        },
-                        $($vk_format)+,
-                        MipmapsCount::One,
-                        ImageUsage {
-                            transfer_source: true,
-                            transfer_destination: true,
-                            sampled: true,
-                            ..ImageUsage::none()
-                        },
-                        ImageLayout::ShaderReadOnlyOptimal,
-                        queue_families.clone(),
-                    )?;
-                    ($push_init_tasks)(image_initialization);
-                    device_images.push(device_image);
-                }}
-            }
+            for (space, image) in images_slice.into_iter()
+                                     .filter(|(_, option)| option.is_some())
+                                     .map(|(space, option)| (space, option.as_ref().unwrap())) {
+                let gltf::image::Data {
+                    pixels,
+                    format,
+                    width,
+                    height,
+                } = image_data_array[image.index()].clone(); // FIXME: Avoid cloning
 
-            macro_rules! push_image_with_format {
-                ([$($vk_format:tt)+]) => {{
-                    push_image_with_format_impl! {
-                        [$($vk_format)+],
-                        |image_initialization: ImmutableImageInitialization<$($vk_format)+>| {
-                            initialization_tasks.push(InitializationTask::Image {
-                                data: pixels,
-                                device_image: Arc::new(image_initialization),
-                                texel_conversion: None,
-                            });
+                macro_rules! insert_image_with_format_impl {
+                    ([$($vk_format:tt)+], $insert_init_tasks:expr) => {{
+                        let (device_image, image_initialization) = ImmutableImage::uninitialized(
+                            device.clone(),
+                            Dimensions::Dim2d {
+                                width,
+                                height,
+                            },
+                            $($vk_format)+,
+                            MipmapsCount::One,
+                            ImageUsage {
+                                transfer_source: true,
+                                transfer_destination: true,
+                                sampled: true,
+                                ..ImageUsage::none()
+                            },
+                            ImageLayout::ShaderReadOnlyOptimal,
+                            queue_families.clone(),
+                        )?;
+                        ($insert_init_tasks)(image_initialization);
+                        device_images[image.index()] = device_image;
+                    }}
+                }
+
+                macro_rules! insert_image_with_format {
+                    ([$($vk_format:tt)+]) => {{
+                        insert_image_with_format_impl! {
+                            [$($vk_format)+],
+                            |image_initialization: ImmutableImageInitialization<$($vk_format)+>| {
+                                initialization_tasks.push(InitializationTask::Image {
+                                    data: pixels,
+                                    device_image: Arc::new(image_initialization),
+                                    texel_conversion: None,
+                                });
+                            }
                         }
-                    }
-                }};
+                    }};
 
-                ([$($vk_format:tt)+], $texel_conversion:expr) => {{
-                    push_image_with_format_impl! {
-                        [$($vk_format)+],
-                        |image_initialization: ImmutableImageInitialization<$($vk_format)+>| {
-                            initialization_tasks.push(InitializationTask::Image {
-                                data: pixels,
-                                device_image: Arc::new(image_initialization),
-                                texel_conversion: Some($texel_conversion),
-                            });
+                    ([$($vk_format:tt)+], $texel_conversion:expr) => {{
+                        insert_image_with_format_impl! {
+                            [$($vk_format)+],
+                            |image_initialization: ImmutableImageInitialization<$($vk_format)+>| {
+                                initialization_tasks.push(InitializationTask::Image {
+                                    data: pixels,
+                                    device_image: Arc::new(image_initialization),
+                                    texel_conversion: Some($texel_conversion),
+                                });
+                            }
                         }
-                    }
-                }}
-            }
+                    }}
+                }
 
-            match format {
-                GltfFormat::R8 => push_image_with_format!([R8Uint]),
-                GltfFormat::R8G8 => push_image_with_format!([R8G8Uint]),
-                GltfFormat::R8G8B8 => push_image_with_format!([R8G8B8A8Srgb], Box::new(|data_slice| {
-                    let unsized_iterator = data_slice.chunks(3).flat_map(|rgb| {
-                        ArrayIterator::new([rgb[0], rgb[1], rgb[2], 0xFF])
-                    });
-                    let iterator_len = data_slice.len() / 3 * 4;
-                    Box::new(ForcedExactSizeIterator::new(unsized_iterator, iterator_len))
-                })),
-                GltfFormat::R8G8B8A8 => push_image_with_format!([R8G8B8A8Srgb]),
+                match (format, space) {
+                    (GltfFormat::R8, ColorSpace::Linear) => insert_image_with_format!([R8Unorm]),
+                    (GltfFormat::R8, ColorSpace::Srgb) => insert_image_with_format!([R8Srgb]),
+                    (GltfFormat::R8G8, ColorSpace::Linear) => insert_image_with_format!([R8G8Unorm]),
+                    (GltfFormat::R8G8, ColorSpace::Srgb) => insert_image_with_format!([R8G8Srgb]),
+                    (GltfFormat::R8G8B8, ColorSpace::Linear) => insert_image_with_format!([R8G8B8A8Unorm], Box::new(convert_double_channel_to_triple_channel)),
+                    (GltfFormat::R8G8B8, ColorSpace::Srgb) => insert_image_with_format!([R8G8B8A8Srgb], Box::new(convert_double_channel_to_triple_channel)),
+                    (GltfFormat::R8G8B8A8, ColorSpace::Linear) => insert_image_with_format!([R8G8B8A8Unorm]),
+                    (GltfFormat::R8G8B8A8, ColorSpace::Srgb) => insert_image_with_format!([R8G8B8A8Srgb]),
+                }
             }
         }
 

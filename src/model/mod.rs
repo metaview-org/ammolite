@@ -596,6 +596,8 @@ impl Model {
         let byte_len = accessor.size() * accessor.count();
         let byte_slice: &[u8] = &buffer_data_array[view.buffer().index()][byte_offset..(byte_offset + byte_len)];
 
+        // println!("byte_slice: [{}] offset: {}; len: {}", unsafe { std::intrinsics::type_name::<T>() }, byte_offset, byte_len);
+
         safe_transmute::guarded_transmute_pod_many_pedantic(byte_slice)
             .unwrap_or_else(|err| panic!("Invalid byte slice to convert to &[{}]: {}", unsafe { std::intrinsics::type_name::<T>() }, err))
     }
@@ -610,6 +612,8 @@ impl Model {
         let slice: BufferSlice<[u8], _> = BufferSlice::from_typed_buffer_access(buffer)
             .slice(buffer_offset..(buffer_offset + buffer_bytes))
             .unwrap();
+
+        // println!("buffer_view: [{}] offset: {}; len: {}", unsafe { std::intrinsics::type_name::<T>() }, buffer_offset, buffer_bytes);
 
         unsafe { slice.reinterpret::<[T]>() }
     }
@@ -661,11 +665,12 @@ impl Model {
 
                 // Compute tangents for the model if they are missing.
                 if primitive.get(&Semantic::Tangents).is_none() {
+                    let vertex_count = primitive.get(&Semantic::Positions).unwrap().count();
                     let index_count = primitive.indices()
                         .map(|index_accessor| index_accessor.count())
-                        .unwrap_or_else(|| primitive.get(&Semantic::Positions).unwrap().count());
+                        .unwrap_or(vertex_count);
 
-                    let converted_byte_len = mem::size_of::<GltfVertexTangent>() * index_count;
+                    let converted_byte_len = mem::size_of::<GltfVertexTangent>() * vertex_count;
                     let (device_tangent_buffer, tangent_buffer_initialization) = unsafe {
                         ImmutableBuffer::<[u8]>::raw(
                             device.clone(),
@@ -681,7 +686,7 @@ impl Model {
                     let tangent_buffer_initialization: BufferSlice<[u8], _> = unsafe {
                         BufferSlice::from_typed_buffer_access(tangent_buffer_initialization).reinterpret::<[u8]>()
                     };
-                    let mut buffer_data: Vec<GltfVertexTangent> = vec![GltfVertexTangent([0.0; 4]); index_count];
+                    let mut buffer_data: Vec<GltfVertexTangent> = vec![GltfVertexTangent([0.0; 4]); vertex_count];
                     let vertices_per_face = 3;
                     let face_count = index_count / vertices_per_face;
 
@@ -722,7 +727,7 @@ impl Model {
                         &|face_index, vertex_index| { &normal_slice[get_semantic_index(face_index, vertex_index)].0 }, // normal: &'a Fn(usize, usize) -> &'a [f32; 3],
                         &|face_index, vertex_index| { &tex_coord_slice[get_semantic_index(face_index, vertex_index)].0 }, // tex_coord: &'a Fn(usize, usize) -> &'a [f32; 2],
                         &mut |face_index, vertex_index, tangent| {
-                            // println!("{} {} -> {:?}", face_index, vertex_index, tangent);
+                            // println!("{} {} [{}] -> {:?}", face_index, vertex_index, get_semantic_index(face_index, vertex_index), tangent);
                             buffer_data[get_semantic_index(face_index, vertex_index)] = GltfVertexTangent(tangent);
                         }, // set_tangent: &'a mut FnMut(usize, usize, [f32; 4])
                     );

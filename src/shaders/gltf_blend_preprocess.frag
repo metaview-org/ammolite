@@ -80,6 +80,7 @@ void main() {
     vec3 projected_position = f_homogeneous_position.xyz / f_homogeneous_position.w;
     vec4 base_color = get_final_color(projected_position,
                                       f_normal,
+                                      f_tangent,
                                       base_color_texture_provided,
                                       base_color_factor,
                                       base_color_texture,

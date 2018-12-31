@@ -27,5 +27,6 @@ void main() {
 
     f_homogeneous_position = gl_Position;
     f_normal = normal;
+    f_tangent = tangent;
     f_tex_coord = tex_coord;
 }

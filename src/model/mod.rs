@@ -512,6 +512,8 @@ impl HelperResources {
                 .add_buffer(device_default_material_ubo_buffer.clone()).unwrap()
                 .add_image(empty_device_image.clone()).unwrap()
                 .add_sampler(cheapest_sampler.clone()).unwrap()
+                .add_image(empty_device_image.clone()).unwrap()
+                .add_sampler(cheapest_sampler.clone()).unwrap()
                 .build().unwrap()
         );
 
@@ -590,7 +592,11 @@ impl Model {
     fn get_semantic_byte_slice<'a, T: PodTransmutable>(buffer_data_array: &'a [gltf::buffer::Data], accessor: &Accessor) -> &'a [T] {
         let view = accessor.view();
 
-        assert!(view.stride().is_none(), "The stride of the index view must be `None`.");
+        // TODO: Most buffers have the corresponding default stride, but some don't.
+        // Stride is applied in `BuffersIter` of `GltfVertexBufferDefinition`.
+        // view.stride().map(|stride| panic!("The stride of the view to a buffer of `{}` must be `None`, but is `{}`.",
+        //                                   unsafe { std::intrinsics::type_name::<T>() },
+        //                                   stride));
 
         let byte_offset = view.offset() + accessor.offset();
         let byte_len = accessor.size() * accessor.count();
@@ -904,11 +910,23 @@ impl Model {
                 .base_color_texture()
                 .and_then(|texture_info| texture_info.texture().sampler().index())
                 .map(|sampler_index| device_samplers[sampler_index].clone());
+            let normal_texture_option: Option<Arc<dyn ImageViewAccess + Send + Sync>> = material
+                .normal_texture()
+                .map(|texture_info| {
+                    let image_index = texture_info.texture().source().index();
+                    device_images[image_index].clone()
+                });
+            let normal_sampler_option: Option<Arc<Sampler>> = material
+                .normal_texture()
+                .and_then(|texture_info| texture_info.texture().sampler().index())
+                .map(|sampler_index| device_samplers[sampler_index].clone());
             let material_ubo = MaterialUBO::new(
                 pbr.base_color_factor().into(),
                 pbr.metallic_factor(),
                 pbr.roughness_factor(),
                 base_color_texture_option.is_some(),
+                normal_texture_option.is_some(),
+                material.normal_texture().map(|normal_texture| normal_texture.scale()).unwrap_or(1.0),
                 material.alpha_cutoff(),
             );
             let (device_material_ubo_buffer, material_ubo_buffer_initialization) = unsafe {
@@ -921,11 +939,17 @@ impl Model {
                 .unwrap_or_else(|| helper_resources.empty_image.clone());
             let base_color_sampler: Arc<Sampler> = base_color_sampler_option
                 .unwrap_or_else(|| helper_resources.cheapest_sampler.clone());
+            let normal_texture: Arc<dyn ImageViewAccess + Send + Sync> = normal_texture_option
+                .unwrap_or_else(|| helper_resources.empty_image.clone());
+            let normal_sampler: Arc<Sampler> = normal_sampler_option
+                .unwrap_or_else(|| helper_resources.cheapest_sampler.clone());
             let descriptor_set: Arc<dyn DescriptorSet + Send + Sync> = Arc::new(
                 PersistentDescriptorSet::start(pipeline.clone(), 2)
                     .add_buffer(device_material_ubo_buffer.clone()).unwrap()
                     .add_image(base_color_texture).unwrap()
                     .add_sampler(base_color_sampler).unwrap()
+                    .add_image(normal_texture).unwrap()
+                    .add_sampler(normal_sampler).unwrap()
                     .build().unwrap()
             );
 

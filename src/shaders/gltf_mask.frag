@@ -17,10 +17,14 @@ layout(set = 2, binding = 0) uniform MaterialUBO {
     float metallic_factor;
     float roughness_factor;
     bool base_color_texture_provided;
+    bool normal_texture_provided;
+    float normal_texture_scale;
     float alpha_cutoff;
 };
 layout(set = 2, binding = 1) uniform texture2D base_color_texture;
 layout(set = 2, binding = 2) uniform sampler base_color_sampler;
+layout(set = 2, binding = 3) uniform texture2D normal_texture;
+layout(set = 2, binding = 4) uniform sampler normal_sampler;
 
 layout(location = 0) in vec4 f_homogeneous_position;
 layout(location = 1) in vec3 f_normal;
@@ -38,6 +42,10 @@ void main() {
                                       base_color_factor,
                                       base_color_texture,
                                       base_color_sampler,
+                                      normal_texture_provided,
+                                      normal_texture_scale,
+                                      normal_texture,
+                                      normal_sampler,
                                       f_tex_coord);
 
     if (base_color.a < alpha_cutoff) {

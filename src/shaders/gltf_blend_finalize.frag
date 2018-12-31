@@ -16,10 +16,14 @@ layout(set = 2, binding = 0) uniform MaterialUBO {
     float metallic_factor;
     float roughness_factor;
     bool base_color_texture_provided;
+    bool normal_texture_provided;
+    float normal_texture_scale;
     float alpha_cutoff;
 };
 layout(set = 2, binding = 1) uniform texture2D base_color_texture;
 layout(set = 2, binding = 2) uniform sampler base_color_sampler;
+layout(set = 2, binding = 3) uniform texture2D normal_texture;
+layout(set = 2, binding = 4) uniform sampler normal_sampler;
 
 layout(set = 3, binding = 0, input_attachment_index = 0) uniform subpassInput attachment_accumulation;
 layout(set = 3, binding = 1, input_attachment_index = 1) uniform subpassInput attachment_revealage;

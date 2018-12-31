@@ -167,12 +167,14 @@ impl NodeUBO {
 }
 
 impl MaterialUBO {
-    pub fn new(base_color_factor: Vec4, metallic_factor: f32, roughness_factor: f32, base_color_texture_provided: bool, alpha_cutoff: f32) -> Self {
+    pub fn new(base_color_factor: Vec4, metallic_factor: f32, roughness_factor: f32, base_color_texture_provided: bool, normal_texture_provided: bool, normal_texture_scale: f32, alpha_cutoff: f32) -> Self {
         MaterialUBO {
             base_color_factor: base_color_factor.0,
             metallic_factor,
             roughness_factor,
             base_color_texture_provided: base_color_texture_provided as u32,
+            normal_texture_provided: normal_texture_provided as u32,
+            normal_texture_scale,
             alpha_cutoff,
         }
     }
@@ -185,6 +187,8 @@ impl Default for MaterialUBO {
             1.0,
             1.0,
             false,
+            false,
+            1.0,
             0.0,
         )
     }
@@ -636,7 +640,7 @@ fn construct_perspective_projection_matrix(near_plane: f32, far_plane: f32, aspe
 fn main() {
     /*
      * Initialization
-*/
+     */
 
     // TODO: Explore method arguments
     let win_extensions = vulkano_win::required_extensions();

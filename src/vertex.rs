@@ -180,6 +180,5 @@ impl_buffers! {
     [position_buffer: PositionBuffer] of [position: GltfVertexPosition],
     [normal_buffer: NormalBuffer] of [normal: GltfVertexNormal],
     [tangent_buffer: TangentBuffer] of [tangent: GltfVertexTangent],
-    // [tangent_buffer_2: TangentBuffer2] of [tangent2: GltfVertexTangent],
     [tex_coord_buffer: TexCoordBuffer] of [tex_coord: GltfVertexTexCoord],
 }

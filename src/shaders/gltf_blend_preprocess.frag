@@ -26,7 +26,7 @@ layout(set = 2, binding = 2) uniform sampler base_color_sampler;
 layout(set = 2, binding = 3) uniform texture2D normal_texture;
 layout(set = 2, binding = 4) uniform sampler normal_sampler;
 
-layout(location = 0) in vec4 f_homogeneous_position;
+layout(location = 0) in vec3 f_position;
 layout(location = 1) in vec3 f_normal;
 layout(location = 2) in vec4 f_tangent;
 layout(location = 3) in vec2 f_tex_coord;
@@ -34,19 +34,13 @@ layout(location = 3) in vec2 f_tex_coord;
 layout(location = 0) out vec4 out_accumulation_src;
 layout(location = 1) out vec4 out_revealage_src; //FIXME
 
-float linearize_z(vec4 homogeneous_position) {
-    mat4 inverse_projection = inverse(projection);
-
-    return (inverse_projection * homogeneous_position).z;
-}
-
-float weight_function_inverse(vec4 homogeneous_position, float alpha) {
-    float z = linearize_z(homogeneous_position);
+float weight_function_inverse(vec4 position, float alpha) {
+    float z = position.z;
     return 1.0 / (z + 1.0);
 }
 
-float weight_function_paper_eq_7(vec4 homogeneous_position, float alpha) {
-    float z = linearize_z(homogeneous_position);
+float weight_function_paper_eq_7(vec4 position, float alpha) {
+    float z = position.z;
     float base_mem1 = abs(z) / 5.0;
     float mem1 = base_mem1 * base_mem1;
     float base_mem2 = abs(z) / 200.0;
@@ -54,8 +48,8 @@ float weight_function_paper_eq_7(vec4 homogeneous_position, float alpha) {
     return alpha * max(1e-2, min(3e3, 10.0 / (1e-5 + mem1 + mem2)));
 }
 
-float weight_function_paper_eq_8(vec4 homogeneous_position, float alpha) {
-    float z = linearize_z(homogeneous_position);
+float weight_function_paper_eq_8(vec4 position, float alpha) {
+    float z = position.z;
     float base_mem1 = abs(z) / 10.0;
     float mem1 = base_mem1 * base_mem1 * base_mem1;
     float base_mem2 = abs(z) / 200.0;
@@ -63,26 +57,26 @@ float weight_function_paper_eq_8(vec4 homogeneous_position, float alpha) {
     return alpha * max(1e-2, min(3e3, 10.0 / (1e-5 + mem1 + mem2)));
 }
 
-float weight_function_paper_eq_9(vec4 homogeneous_position, float alpha) {
-    float z = linearize_z(homogeneous_position);
+float weight_function_paper_eq_9(vec4 position, float alpha) {
+    float z = position.z;
     float base_mem = abs(z) / 200.0;
     float mem = base_mem * base_mem * base_mem * base_mem;
     return alpha * max(1e-2, min(3e3, 0.03 / (1e-5 + mem)));
 }
 
-float weight_function_paper_eq_10(vec4 homogeneous_position, float alpha) {
-    float one_minus_z = 1.0 - homogeneous_position.z;
+float weight_function_paper_eq_10(vec4 position, float alpha) {
+    float one_minus_z = 1.0 - gl_FragCoord.z;
     float cubed = one_minus_z * one_minus_z * one_minus_z;
     return alpha * max(1e-2, 3e3 * cubed);
 }
 
-float weight_function(vec4 homogeneous_position, float alpha) {
-    return weight_function_paper_eq_8(homogeneous_position, alpha);
+float weight_function(vec4 position, float alpha) {
+    return weight_function_paper_eq_8(position, alpha);
 }
 
 void main() {
-    vec3 projected_position = f_homogeneous_position.xyz / f_homogeneous_position.w;
-    vec4 base_color = get_final_color(projected_position,
+    vec4 base_color = get_final_color(view,
+                                      f_position,
                                       f_normal,
                                       f_tangent,
                                       base_color_texture_provided,

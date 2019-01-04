@@ -514,6 +514,12 @@ impl HelperResources {
                 .add_sampler(cheapest_sampler.clone()).unwrap()
                 .add_image(empty_device_image.clone()).unwrap()
                 .add_sampler(cheapest_sampler.clone()).unwrap()
+                .add_image(empty_device_image.clone()).unwrap()
+                .add_sampler(cheapest_sampler.clone()).unwrap()
+                .add_image(empty_device_image.clone()).unwrap()
+                .add_sampler(cheapest_sampler.clone()).unwrap()
+                .add_image(empty_device_image.clone()).unwrap()
+                .add_sampler(cheapest_sampler.clone()).unwrap()
                 .build().unwrap()
         );
 
@@ -932,6 +938,16 @@ impl Model {
                 .base_color_texture()
                 .and_then(|texture_info| texture_info.texture().sampler().index())
                 .map(|sampler_index| device_samplers[sampler_index].clone());
+            let metallic_roughness_texture_option: Option<Arc<dyn ImageViewAccess + Send + Sync>> = pbr
+                .metallic_roughness_texture()
+                .map(|texture_info| {
+                    let image_index = texture_info.texture().source().index();
+                    device_images[image_index].clone()
+                });
+            let metallic_roughness_sampler_option: Option<Arc<Sampler>> = pbr
+                .metallic_roughness_texture()
+                .and_then(|texture_info| texture_info.texture().sampler().index())
+                .map(|sampler_index| device_samplers[sampler_index].clone());
             let normal_texture_option: Option<Arc<dyn ImageViewAccess + Send + Sync>> = material
                 .normal_texture()
                 .map(|texture_info| {
@@ -942,14 +958,38 @@ impl Model {
                 .normal_texture()
                 .and_then(|texture_info| texture_info.texture().sampler().index())
                 .map(|sampler_index| device_samplers[sampler_index].clone());
+            let occlusion_texture_option: Option<Arc<dyn ImageViewAccess + Send + Sync>> = material
+                .occlusion_texture()
+                .map(|texture_info| {
+                    let image_index = texture_info.texture().source().index();
+                    device_images[image_index].clone()
+                });
+            let occlusion_sampler_option: Option<Arc<Sampler>> = material
+                .occlusion_texture()
+                .and_then(|texture_info| texture_info.texture().sampler().index())
+                .map(|sampler_index| device_samplers[sampler_index].clone());
+            let emissive_texture_option: Option<Arc<dyn ImageViewAccess + Send + Sync>> = material
+                .emissive_texture()
+                .map(|texture_info| {
+                    let image_index = texture_info.texture().source().index();
+                    device_images[image_index].clone()
+                });
+            let emissive_sampler_option: Option<Arc<Sampler>> = material
+                .emissive_texture()
+                .and_then(|texture_info| texture_info.texture().sampler().index())
+                .map(|sampler_index| device_samplers[sampler_index].clone());
             let material_ubo = MaterialUBO::new(
-                pbr.base_color_factor().into(),
-                pbr.metallic_factor(),
-                pbr.roughness_factor(),
+                material.alpha_cutoff(),
                 base_color_texture_option.is_some(),
+                pbr.base_color_factor().into(),
+                metallic_roughness_texture_option.is_some(),
+                [pbr.metallic_factor(), pbr.roughness_factor()].into(),
                 normal_texture_option.is_some(),
                 material.normal_texture().map(|normal_texture| normal_texture.scale()).unwrap_or(1.0),
-                material.alpha_cutoff(),
+                occlusion_texture_option.is_some(),
+                material.occlusion_texture().map(|occlusion_texture| occlusion_texture.strength()).unwrap_or(1.0),
+                emissive_texture_option.is_some(),
+                material.emissive_factor().into(),
             );
             let (device_material_ubo_buffer, material_ubo_buffer_initialization) = unsafe {
                 ImmutableBuffer::<MaterialUBO>::uninitialized(
@@ -961,17 +1001,35 @@ impl Model {
                 .unwrap_or_else(|| helper_resources.empty_image.clone());
             let base_color_sampler: Arc<Sampler> = base_color_sampler_option
                 .unwrap_or_else(|| helper_resources.cheapest_sampler.clone());
+            let metallic_roughness_texture: Arc<dyn ImageViewAccess + Send + Sync> = metallic_roughness_texture_option
+                .unwrap_or_else(|| helper_resources.empty_image.clone());
+            let metallic_roughness_sampler: Arc<Sampler> = metallic_roughness_sampler_option
+                .unwrap_or_else(|| helper_resources.cheapest_sampler.clone());
             let normal_texture: Arc<dyn ImageViewAccess + Send + Sync> = normal_texture_option
                 .unwrap_or_else(|| helper_resources.empty_image.clone());
             let normal_sampler: Arc<Sampler> = normal_sampler_option
+                .unwrap_or_else(|| helper_resources.cheapest_sampler.clone());
+            let occlusion_texture: Arc<dyn ImageViewAccess + Send + Sync> = occlusion_texture_option
+                .unwrap_or_else(|| helper_resources.empty_image.clone());
+            let occlusion_sampler: Arc<Sampler> = occlusion_sampler_option
+                .unwrap_or_else(|| helper_resources.cheapest_sampler.clone());
+            let emissive_texture: Arc<dyn ImageViewAccess + Send + Sync> = emissive_texture_option
+                .unwrap_or_else(|| helper_resources.empty_image.clone());
+            let emissive_sampler: Arc<Sampler> = emissive_sampler_option
                 .unwrap_or_else(|| helper_resources.cheapest_sampler.clone());
             let descriptor_set: Arc<dyn DescriptorSet + Send + Sync> = Arc::new(
                 PersistentDescriptorSet::start(pipeline.clone(), 2)
                     .add_buffer(device_material_ubo_buffer.clone()).unwrap()
                     .add_image(base_color_texture).unwrap()
                     .add_sampler(base_color_sampler).unwrap()
+                    .add_image(metallic_roughness_texture).unwrap()
+                    .add_sampler(metallic_roughness_sampler).unwrap()
                     .add_image(normal_texture).unwrap()
                     .add_sampler(normal_sampler).unwrap()
+                    .add_image(occlusion_texture).unwrap()
+                    .add_sampler(occlusion_sampler).unwrap()
+                    .add_image(emissive_texture).unwrap()
+                    .add_sampler(emissive_sampler).unwrap()
                     .build().unwrap()
             );
 

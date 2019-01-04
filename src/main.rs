@@ -167,15 +167,34 @@ impl NodeUBO {
 }
 
 impl MaterialUBO {
-    pub fn new(base_color_factor: Vec4, metallic_factor: f32, roughness_factor: f32, base_color_texture_provided: bool, normal_texture_provided: bool, normal_texture_scale: f32, alpha_cutoff: f32) -> Self {
+    pub fn new(
+        alpha_cutoff: f32,
+        base_color_texture_provided: bool,
+        base_color_factor: Vec4,
+        metallic_roughness_texture_provided: bool,
+        metallic_roughness_factor: Vec2,
+        normal_texture_provided: bool,
+        normal_texture_scale: f32,
+        occlusion_texture_provided: bool,
+        occlusion_strength: f32,
+        emissive_texture_provided: bool,
+        emissive_factor: Vec3,
+    ) -> Self {
         MaterialUBO {
-            base_color_factor: base_color_factor.0,
-            metallic_factor,
-            roughness_factor,
+            alpha_cutoff,
             base_color_texture_provided: base_color_texture_provided as u32,
+            base_color_factor: base_color_factor.0,
+            metallic_roughness_texture_provided: metallic_roughness_texture_provided as u32,
+            metallic_roughness_factor: metallic_roughness_factor.0,
             normal_texture_provided: normal_texture_provided as u32,
             normal_texture_scale,
-            alpha_cutoff,
+            occlusion_texture_provided: occlusion_texture_provided as u32,
+            occlusion_strength,
+            emissive_texture_provided: emissive_texture_provided as u32,
+            emissive_factor: emissive_factor.0,
+            _dummy0: Default::default(),
+            _dummy1: Default::default(),
+            _dummy2: Default::default(),
         }
     }
 }
@@ -183,13 +202,17 @@ impl MaterialUBO {
 impl Default for MaterialUBO {
     fn default() -> Self {
         Self::new(
+            0.5,
+            false,
             [1.0, 1.0, 1.0, 1.0].into(),
-            1.0,
+            false,
+            [1.0, 1.0].into(),
+            false,
             1.0,
             false,
-            false,
             1.0,
-            0.0,
+            false,
+            [0.0, 0.0, 0.0].into(),
         )
     }
 }
@@ -208,6 +231,7 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
     // )
     let window = WindowBuilder::new()
         .with_title("ammolite")
+        .with_dimensions((1280, 720).into())
         .build_vk_surface(&events_loop, instance.clone()).unwrap();
 
     window.window().hide_cursor(true);

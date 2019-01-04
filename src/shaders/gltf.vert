@@ -1,7 +1,5 @@
 #version 450
-
-#define PROJECT(vector4) (vector4.w == 0 ? vector4.xyz : (vector4.xyz / vector4.w))
-#define GRAM_SCHMIDT(a, b) (a - (b) * dot((a), (b)))
+#include "gltf_common.h"
 
 layout(set = 0, binding = 0) uniform SceneUBO {
     vec2 dimensions;

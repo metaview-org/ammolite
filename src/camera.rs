@@ -8,6 +8,8 @@ use ::construct_view_matrix;
 
 pub trait Camera {
     fn get_view_matrix(&self) -> Mat4;
+    fn get_position(&self) -> Vec3;
+    fn get_direction(&self) -> Vec3;
     fn update(&mut self,
               delta_time: &Duration,
               cursor_delta: &(f64, f64),
@@ -17,7 +19,7 @@ pub trait Camera {
 
 #[derive(Clone, PartialEq)]
 pub struct PitchYawCamera3 {
-    location: Vec3,
+    position: Vec3,
     yaw: f64,
     pitch: f64,
     mouse_sensitivity: f64,
@@ -30,7 +32,7 @@ unsafe impl Sync for PitchYawCamera3 {}
 impl PitchYawCamera3 {
     pub fn new() -> PitchYawCamera3 {
         Self {
-            location: [0.0, 0.0, 0.0].into(),
+            position: [0.0, 0.0, 0.0].into(),
             yaw: 0.0,
             pitch: 0.0,
             mouse_sensitivity: 0.002,
@@ -39,9 +41,9 @@ impl PitchYawCamera3 {
         }
     }
 
-    pub fn new_with_location(location: Vec3) -> Self {
+    pub fn new_with_position(position: Vec3) -> Self {
         Self {
-            location,
+            position,
             .. Self::default()
         }
     }
@@ -60,7 +62,7 @@ impl PitchYawCamera3 {
     }
 
     fn get_translation_vector(&self) -> Vec3 {
-        self.location.clone()
+        self.position.clone()
     }
 
     fn get_rotation_axis_angles(&self) -> Vec3 {
@@ -82,6 +84,18 @@ impl Camera for PitchYawCamera3 {
         * Mat4::rotation_yaw(rotation[1])
         * Mat4::rotation_roll(rotation[2])
         * Mat4::translation(&-self.get_translation_vector())
+    }
+
+    fn get_position(&self) -> Vec3 {
+        self.position.clone()
+    }
+
+    fn get_direction(&self) -> Vec3 {
+        [
+            (self.pitch.cos() * self.yaw.cos()) as f32,
+            self.pitch.sin() as f32,
+            (self.pitch.cos() * self.yaw.sin()) as f32,
+        ].into()
     }
 
     fn update(&mut self,
@@ -129,7 +143,7 @@ impl Camera for PitchYawCamera3 {
             pressed_keys.contains(&VirtualKeyCode::Space).as_option()
                 .map(|()| direction *= 0.1);
 
-            self.location += &direction;
+            self.position += &direction;
         }
     }
 }

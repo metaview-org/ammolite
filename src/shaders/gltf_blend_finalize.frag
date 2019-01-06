@@ -2,6 +2,7 @@
 
 layout(set = 0, binding = 0) uniform SceneUBO {
     vec2 dimensions;
+    vec3 camera_position;
     mat4 model;
     mat4 view;
     mat4 projection;
@@ -43,9 +44,9 @@ layout(set = 2, binding = 10) uniform sampler emissive_sampler;
 layout(set = 3, binding = 0, input_attachment_index = 0) uniform subpassInput attachment_accumulation;
 layout(set = 3, binding = 1, input_attachment_index = 1) uniform subpassInput attachment_revealage;
 
-layout(location = 0) in vec3 f_position;
-layout(location = 1) in vec3 f_normal;
-layout(location = 2) in vec4 f_tangent;
+layout(location = 0) in vec3 f_world_position;
+layout(location = 1) in vec3 f_world_normal;
+layout(location = 2) in vec4 f_world_tangent;
 layout(location = 3) in vec2 f_tex_coord;
 
 layout(location = 0) out vec4 out_color;

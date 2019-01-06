@@ -3,6 +3,7 @@
 
 layout(set = 0, binding = 0) uniform SceneUBO {
     vec2 dimensions;
+    vec3 camera_position;
     mat4 model;
     mat4 view;
     mat4 projection;
@@ -17,10 +18,17 @@ layout(location = 1) in vec3 normal;
 layout(location = 2) in vec4 tangent;
 layout(location = 3) in vec2 tex_coord;
 
-layout(location = 0) out vec3 f_position;
-layout(location = 1) out vec3 f_normal;
-layout(location = 2) out vec4 f_tangent;
+layout(location = 0) out vec3 f_world_position;
+layout(location = 1) out vec3 f_world_normal;
+layout(location = 2) out vec4 f_world_tangent;
 layout(location = 3) out vec2 f_tex_coord;
+
+const mat4 y_inversion = mat4(
+    1.0,  0.0,  0.0,  0.0,
+    0.0, -1.0,  0.0,  0.0,
+    0.0,  0.0,  1.0,  0.0,
+    0.0,  0.0,  0.0,  1.0
+);
 
 void main() {
     // Ensure the normal and tangent are orthonormal
@@ -29,18 +37,22 @@ void main() {
     vec3 corrected_tangent = GRAM_SCHMIDT(normalized_tangent, normalized_normal);
 
     // Apply the transformation of primitives to view space
-    vec4 view_position = view * model * matrix * vec4(position, 1.0);
-    vec4 view_normal = transpose(inverse(view * model * matrix)) * vec4(normalized_normal, 0.0);
-    vec4 view_tangent = view * model * matrix * vec4(corrected_tangent, 0.0);
+    vec4 world_position = model * matrix * vec4(position, 1.0);
+    // Applying both transformations at once using the following line of code
+    // wouldn't work for some reason.
+    /* vec4 world_normal = transpose(inverse(model * matrix)) * vec4(normalized_normal, 0.0); */
+    /* vec4 world_normal = inverse(model) * inverse(matrix) * vec4(normalized_normal, 0.0); */
+    vec4 world_normal = inverse(matrix * model * y_inversion) * vec4(normalized_normal, 0.0);
+    vec4 world_tangent = y_inversion * model * matrix * vec4(corrected_tangent, 0.0);
 
     // Ensure the normal and tangent are orthonormal, again
-    vec3 normalized_projected_view_normal = normalize(PROJECT(view_normal));
-    vec3 projected_view_tangent = PROJECT(view_tangent);
-    vec3 corrected_view_tangent = GRAM_SCHMIDT(projected_view_tangent, normalized_projected_view_normal);
+    vec3 normalized_projected_world_normal = normalize(PROJECT(world_normal));
+    vec3 projected_world_tangent = PROJECT(world_tangent);
+    vec3 corrected_world_tangent = GRAM_SCHMIDT(projected_world_tangent, normalized_projected_world_normal);
 
-    f_position = PROJECT(view_position);
-    f_normal = normalized_projected_view_normal;
-    f_tangent = vec4(normalize(corrected_view_tangent), tangent.w);
+    f_world_position = PROJECT(world_position);
+    f_world_normal = normalized_projected_world_normal;
+    f_world_tangent = vec4(normalize(corrected_world_tangent), tangent.w);
     f_tex_coord = tex_coord;
-    gl_Position = projection * view_position;
+    gl_Position = y_inversion * projection * view * world_position;
 }

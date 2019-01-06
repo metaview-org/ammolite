@@ -7,6 +7,5 @@
 
 #define PROJECT(vector4) (vector4.w == 0 ? vector4.xyz : (vector4.xyz / vector4.w))
 #define GRAM_SCHMIDT(a, b) (a - (b) * dot((a), (b)))
-#define LERP(a, b, t) ((t) * (a) + (1.0 - (t)) * (b))
 
 #endif

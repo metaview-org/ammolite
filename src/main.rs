@@ -147,13 +147,15 @@ mod gltf_blend_finalize_frag {
 pub use gltf_opaque_frag::ty::*;
 
 impl SceneUBO {
-    pub fn new(dimensions: Vec2, model: Mat4, view: Mat4, projection: Mat4) -> SceneUBO {
+    pub fn new(dimensions: Vec2, camera_position: Vec3, model: Mat4, view: Mat4, projection: Mat4) -> SceneUBO {
         SceneUBO {
             dimensions: dimensions.0,
-            _dummy0: Default::default(),
+            camera_position: camera_position.0,
             model: model.0,
             view: view.0,
             projection: projection.0,
+            _dummy0: Default::default(),
+            _dummy1: Default::default(),
         }
     }
 }
@@ -619,10 +621,10 @@ fn construct_orthographic_projection_matrix(near_plane: f32, far_plane: f32, dim
     let z_f = far_plane;
 
     // Scale the X/Y-coordinates according to the dimensions. Translate and scale the Z-coordinate.
-    mat4!([1.0 / dimensions[0],                  0.0,               0.0,                0.0,
-                           0.0, -1.0 / dimensions[1],               0.0,                0.0,
-                           0.0,                  0.0, 1.0 / (z_f - z_n), -z_n / (z_f - z_n),
-                           0.0,                  0.0,               0.0,                1.0])
+    mat4!([1.0 / dimensions[0],                 0.0,               0.0,                0.0,
+                           0.0, 1.0 / dimensions[1],               0.0,                0.0,
+                           0.0,                 0.0, 1.0 / (z_f - z_n), -z_n / (z_f - z_n),
+                           0.0,                 0.0,               0.0,                1.0])
 }
 
 #[allow(unused)]
@@ -637,8 +639,10 @@ fn construct_perspective_projection_matrix(near_plane: f32, far_plane: f32, aspe
     // screen at that point in space of the vector.
     // The X coordinate needs to be divided by the aspect ratio to make it independent of the
     // window size.
-    // The Y coordinate is negated so as to adjust the vectors to the Vulkan coordinate system,
-    // which has the Y axis pointing downwards, contrary to OpenGL.
+    // Even though we could negate the Y coordinate so as to adjust the vectors to the Vulkan
+    // coordinate system, which has the Y axis pointing downwards, contrary to OpenGL, we need to
+    // apply the same transformation to other vertex attributes such as normal and tangent vectors,
+    // but those are not projected.
     let f = 1.0 / (fov_rad / 2.0).tan();
 
     // We derive the coefficients for the Z coordinate from the following equation:
@@ -656,7 +660,7 @@ fn construct_perspective_projection_matrix(near_plane: f32, far_plane: f32, aspe
 
     // TODO: Investigate the mysterious requirement of flipping the X coordinate
     mat4!([-f / aspect_ratio, 0.0,                0.0,                       0.0,
-                         0.0,  -f,                0.0,                       0.0,
+                         0.0,   f,                0.0,                       0.0,
                          0.0, 0.0, -z_f / (z_n - z_f), (z_n * z_f) / (z_n - z_f),
                          0.0, 0.0,                1.0,                       0.0])
 }
@@ -710,7 +714,8 @@ fn main() {
     // );
 
     let mut main_ubo = SceneUBO::new(
-        Vec2([dimensions[0] as f32, dimensions[1] as f32]),
+        [dimensions[0] as f32, dimensions[1] as f32].into(),
+        [0.0, 0.0, 0.0].into(),
         Mat4::identity(),
         Mat4::identity(),
         Mat4::identity(),
@@ -860,16 +865,19 @@ fn main() {
     let mut camera = PitchYawCamera3::new();
     let mut pressed_keys: HashSet<VirtualKeyCode> = HashSet::new();
     let mut pressed_mouse_buttons: HashSet<MouseButton> = HashSet::new();
+    let mut cursor_capture = true;
 
     loop {
         let now = Instant::now();
         let delta_time = now.duration_since(previous_frame_instant);
         previous_frame_instant = now;
-        let cursor_delta = {
+        let cursor_delta = if cursor_capture {
             let (mut x, mut y) = cursor_position.into();
             x -= dimensions[0] as f64 / 2.0;
             y -= dimensions[1] as f64 / 2.0;
             (x, y)
+        } else {
+            (0.0, 0.0)
         };
 
         camera.update(&delta_time, &cursor_delta, &pressed_keys, &pressed_mouse_buttons);
@@ -978,8 +986,11 @@ fn main() {
 
         let nanoseconds_elapsed: u128 = delta_time.as_nanos();
         let seconds_elapsed: f64 = (nanoseconds_elapsed as f64) / 1.0e9;
+        println!("Camera position: {:?}", camera.get_position());
+        println!("Camera direction: {:?}", camera.get_direction());
         main_ubo = SceneUBO::new(
             Vec2([dimensions[0] as f32, dimensions[1] as f32]),
+            camera.get_position(),
             construct_model_matrix(1.0,
                                    &[1.0, 0.0, 2.0].into(),
                                    &[seconds_elapsed as f32 * 0.0, seconds_elapsed as f32 * 0.0, 0.0].into()),
@@ -1106,13 +1117,25 @@ fn main() {
                 } => done = true,
 
                 Event::WindowEvent {
+                    event: WindowEvent::KeyboardInput {
+                        input: KeyboardInput {
+                            state: ElementState::Released,
+                            virtual_keycode: Some(VirtualKeyCode::LAlt),
+                            ..
+                        },
+                        ..
+                    },
+                    ..
+                } => cursor_capture ^= true,
+
+                Event::WindowEvent {
                     // FIXME: "it should not be used to implement non-cursor-like interactions such as 3D camera control."
                     event: WindowEvent::CursorMoved {
                         position,
                         ..
                     },
                     ..
-                } => {
+                } if cursor_capture => {
                     cursor_position = position.into();
                     window.window().set_cursor_position(
                         (dimensions[0] as f64 / 2.0, dimensions[1] as f64 / 2.0).into()

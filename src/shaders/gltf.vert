@@ -2,6 +2,7 @@
 #include "gltf_common.h"
 
 layout(set = 0, binding = 0) uniform SceneUBO {
+    float time_elapsed;
     vec2 dimensions;
     vec3 camera_position;
     mat4 model;

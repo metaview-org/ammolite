@@ -1,5 +1,6 @@
 #![feature(duration_as_u128)]
 #![feature(core_intrinsics)]
+#![feature(duration_float)]
 
 #[macro_use]
 extern crate vulkano;
@@ -147,8 +148,9 @@ mod gltf_blend_finalize_frag {
 pub use gltf_opaque_frag::ty::*;
 
 impl SceneUBO {
-    pub fn new(dimensions: Vec2, camera_position: Vec3, model: Mat4, view: Mat4, projection: Mat4) -> SceneUBO {
+    pub fn new(time_elapsed: f32, dimensions: Vec2, camera_position: Vec3, model: Mat4, view: Mat4, projection: Mat4) -> SceneUBO {
         SceneUBO {
+            time_elapsed,
             dimensions: dimensions.0,
             camera_position: camera_position.0,
             model: model.0,
@@ -714,6 +716,7 @@ fn main() {
     // );
 
     let mut main_ubo = SceneUBO::new(
+        0.0,
         [dimensions[0] as f32, dimensions[1] as f32].into(),
         [0.0, 0.0, 0.0].into(),
         Mat4::identity(),
@@ -984,16 +987,17 @@ fn main() {
             Err(err) => panic!("{:?}", err)
         };
 
-        let nanoseconds_elapsed: u128 = delta_time.as_nanos();
-        let seconds_elapsed: f64 = (nanoseconds_elapsed as f64) / 1.0e9;
-        println!("Camera position: {:?}", camera.get_position());
-        println!("Camera direction: {:?}", camera.get_direction());
+        let time_elapsed = init_instant.elapsed().as_float_secs() as f32;
+
+        // println!("Camera position: {:?}", camera.get_position());
+        // println!("Camera direction: {:?}", camera.get_direction());
         main_ubo = SceneUBO::new(
+            time_elapsed,
             Vec2([dimensions[0] as f32, dimensions[1] as f32]),
             camera.get_position(),
             construct_model_matrix(1.0,
                                    &[1.0, 0.0, 2.0].into(),
-                                   &[seconds_elapsed as f32 * 0.0, seconds_elapsed as f32 * 0.0, 0.0].into()),
+                                   &[time_elapsed.sin() * 0.0 * 1.0, time_elapsed.cos() * 0.0 * 3.0 / 2.0, 0.0].into()),
             camera.get_view_matrix(),
             // construct_view_matrix(&[(seconds_elapsed as f32 * 0.5).cos(), 0.0, 0.0].into(),
             //                       &[0.0, 0.0, 0.0].into()),

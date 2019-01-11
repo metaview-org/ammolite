@@ -751,8 +751,11 @@ impl Model {
                         &|face_index, vertex_index| { &position_slice[get_semantic_index(face_index, vertex_index)].0 }, // position: &'a Fn(usize, usize) -> &'a [f32; 3],
                         &|face_index, vertex_index| { &normal_slice[get_semantic_index(face_index, vertex_index)].0 }, // normal: &'a Fn(usize, usize) -> &'a [f32; 3],
                         &|face_index, vertex_index| { &tex_coord_slice[get_semantic_index(face_index, vertex_index)].0 }, // tex_coord: &'a Fn(usize, usize) -> &'a [f32; 2],
-                        &mut |face_index, vertex_index, tangent| {
-                            // println!("{} {} [{}] -> {:?}", face_index, vertex_index, get_semantic_index(face_index, vertex_index), tangent);
+                        &mut |face_index, vertex_index, mut tangent| {
+                            // The algorithm generates tangents in right-handed coordinate space,
+                            // but models with pre-generated tangents seem to be in left-handed
+                            // coordinate space.
+                            tangent[3] *= -1.0;
                             buffer_data[get_semantic_index(face_index, vertex_index)] = GltfVertexTangent(tangent);
                         }, // set_tangent: &'a mut FnMut(usize, usize, [f32; 4])
                     );

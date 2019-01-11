@@ -1,6 +1,7 @@
 #include "gltf_common.h"
 
 #define GET_FINAL_COLOR() get_final_color(      \
+        time_elapsed,                           \
         dimensions,                             \
         view,                                   \
         camera_position,                        \
@@ -142,7 +143,8 @@ vec3 sample_normal(in bool normal_texture_provided,
     vec3 scaled_normal = normalize((normal_sample * 2.0 - 1.0)
             * vec3(normal_texture_scale, normal_texture_scale, 1.0));
 
-    return scaled_normal;
+    // convert left-handed to right-handed coordinates
+    return vec3(scaled_normal.x, -scaled_normal.y, scaled_normal.z);
 }
 
 vec3 surface_reflection_ratio(in BRDFParams params) {
@@ -258,6 +260,7 @@ vec3 pbr(in vec4 base_color,
 } while (false);
 
 vec4 get_final_color(
+        in float time_elapsed,
         in vec2 dimensions,
         in mat4 view,
         in vec3 camera_position,
@@ -339,9 +342,17 @@ vec4 get_final_color(
         vec3(-1.0, -1.5, 2.0),
         vec3(-1.0, 1.5, -2.0)
     };
+
+    /* if (normalized_frag_coord.x + normalized_frag_coord.y > sin(time_elapsed) + 1.0) { */
+    /*     world_normal = normalize(tangent_to_canonical * sampled_normal); */
+    /* } */
+
     world_normal = normalize(tangent_to_canonical * sampled_normal);
 
-    /* float color_weight = clamp(dot(world_normal, light_world_direction), 0.0, 1.0); */
+    /* return vec4(world_normal, 1.0); */
+
+    /* vec3 light_world_direction_x = vec3(0.0, 0.0, 1.0); */
+    /* float color_weight = clamp(dot(world_normal, light_world_direction_x), 0.0, 1.0); */
     /* vec3 diffuse_color = base_color.rgb * mix(0.1, 1.0, color_weight); */
     /* return vec4(diffuse_color, base_color.a); */
 
@@ -374,6 +385,10 @@ vec4 get_final_color(
 
         accumulated_color += f;
 
+        /* VISUALIZE_VECTOR(eye_direction, vec2(0.0 / 3.0, 0.5), vec2(1.0 / 3.0, 1.0), dimensions); */
+        /* VISUALIZE_VECTOR(light_world_direction, vec2(1.0 / 3.0, 0.5), vec2(2.0 / 3.0, 1.0), dimensions); */
+        /* VISUALIZE_VECTOR(world_normal, vec2(2.0 / 3.0, 0.5), vec2(3.0 / 3.0, 1.0), dimensions); */
+
         /* VISUALIZE_VECTOR(base_color.rgb, vec2(0.5, 0.0), vec2(1.0, 0.5), dimensions); */
         /* VISUALIZE_VECTOR(metallic_roughness.xxx, vec2(0.0, 0.5), vec2(0.5, 1.0), dimensions); */
         /* VISUALIZE_VECTOR(metallic_roughness.yyy, vec2(0.5, 0.5), vec2(1.0, 1.0), dimensions); */
@@ -388,5 +403,5 @@ vec4 get_final_color(
         /* VISUALIZE_VECTOR(vec3(D), vec2(0.0, 0.0), vec2(1.0, 1.0), dimensions); */
     }
 
-    return vec4(accumulated_color / 3.0, base_color.a);
+    return vec4(accumulated_color, base_color.a);
 }

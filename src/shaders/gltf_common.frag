@@ -148,12 +148,12 @@ vec3 sample_normal(in bool normal_texture_provided,
 }
 
 vec3 surface_reflection_ratio(in BRDFParams params) {
-    /* float reflectance = max(max(params.F_0.r, params.F_0.g), params.F_0.b); */
-    /* float reflectance90 = clamp(reflectance * 25.0, 0.0, 1.0); */
-    /* vec3 r0 = params.F_0; */
-    /* vec3 r90 = vec3(1.0, 1.0, 1.0) * reflectance90; */
+    float reflectance = max(max(params.F_0.r, params.F_0.g), params.F_0.b);
+    float reflectance90 = clamp(reflectance * 25.0, 0.0, 1.0);
+    vec3 r0 = params.F_0;
+    vec3 r90 = vec3(1.0, 1.0, 1.0) * reflectance90;
 
-    /* return r0 + (r90 - r0) * pow(clamp(1.0 - params.VdotH, 0.0, 1.0), 5.0); */
+    return r0 + (r90 - r0) * pow(clamp(1.0 - params.VdotH, 0.0, 1.0), 5.0);
 
     // Fresnel Schlick
     float term = 1.0 - params.VdotH;
@@ -182,15 +182,14 @@ float microfaced_distribution(in BRDFParams params) {
 
 // See https://github.com/KhronosGroup/glTF-WebGL-PBR/ for an exemplary
 // implementation
-vec3 brdf(in BRDFParams params, out vec3 F, out float G, out float D) {
+vec3 brdf(in BRDFParams params, out vec3 F, out float G, out float D, out vec3 f_diffuse, out vec3 f_specular) {
     F = surface_reflection_ratio(params);
     G = geometric_occlusion(params);
     D = microfaced_distribution(params);
     vec3 diffuse = params.c_diff / PI;
 
-    vec3 f_diffuse = (1.0 - F) * diffuse;
-    vec3 f_specular = (F * G * D)
-        / (4.0 * params.NdotL * params.NdotV);
+    f_diffuse = (1.0 - F) * diffuse;
+    f_specular = (F * G * D) / (4.0 * params.NdotL * params.NdotV);
 
     return f_diffuse + f_specular;
 }
@@ -203,7 +202,9 @@ vec3 pbr(in vec4 base_color,
          in vec3 normal,
          out vec3 F,
          out float G,
-         out float D) {
+         out float D,
+         out vec3 f_diffuse,
+         out vec3 f_specular) {
     const vec3 dielectric_specular = vec3(0.04, 0.04, 0.04);
     const vec3 black = vec3(0, 0, 0);
 
@@ -229,7 +230,7 @@ vec3 pbr(in vec4 base_color,
         roughness
     );
 
-    return brdf(brdf_params, F, G, D);
+    return brdf(brdf_params, F, G, D, f_diffuse, f_specular);
 }
 
 // Immediately returns if the current fragment is within the specified region.
@@ -356,13 +357,13 @@ vec4 get_final_color(
     /* vec3 diffuse_color = base_color.rgb * mix(0.1, 1.0, color_weight); */
     /* return vec4(diffuse_color, base_color.a); */
 
-    vec3 eye_direction = normalize(world_position - camera_position);
+    vec3 eye_direction = normalize(camera_position - world_position);
     vec3 accumulated_color = vec3(0.0);
 
     for (int i = 0; i < 3; i++) {
-        vec3 light_world_direction = normalize(world_position - light_world_position[i]);
-        float HdotV = dot(light_world_direction, eye_direction);
-        vec3 vecHdotV = vec3(HdotV);
+        vec3 light_world_direction = normalize(light_world_position[i] - world_position);
+        /* float HdotV = dot(light_world_direction, eye_direction); */
+        /* vec3 vecHdotV = vec3(HdotV); */
 
         /* VISUALIZE_VECTOR_INVERT(world_normal, vec2(0.0, 0.0), vec2(1.0, 0.5), dimensions); */
         /* VISUALIZE_VECTOR_INVERT(light_world_direction, vec2(0.0, 0.5), vec2(1.0, 1.0), dimensions); */
@@ -375,23 +376,30 @@ vec4 get_final_color(
         vec3 F;
         float G;
         float D;
+        vec3 f_diffuse;
+        vec3 f_specular;
         vec3 f = pbr(base_color,
                      metallic_roughness.x,
                      metallic_roughness.y,
                      eye_direction,
                      light_world_direction,
                      world_normal,
-                     F, G, D);
+                     F, G, D, f_diffuse, f_specular);
 
         accumulated_color += f;
 
-        /* VISUALIZE_VECTOR(eye_direction, vec2(0.0 / 3.0, 0.5), vec2(1.0 / 3.0, 1.0), dimensions); */
-        /* VISUALIZE_VECTOR(light_world_direction, vec2(1.0 / 3.0, 0.5), vec2(2.0 / 3.0, 1.0), dimensions); */
+        /* VISUALIZE_VECTOR(-eye_direction, vec2(0.0 / 3.0, 0.5), vec2(1.0 / 3.0, 1.0), dimensions); */
+        /* VISUALIZE_VECTOR(-light_world_direction, vec2(1.0 / 3.0, 0.5), vec2(2.0 / 3.0, 1.0), dimensions); */
         /* VISUALIZE_VECTOR(world_normal, vec2(2.0 / 3.0, 0.5), vec2(3.0 / 3.0, 1.0), dimensions); */
 
         /* VISUALIZE_VECTOR(base_color.rgb, vec2(0.5, 0.0), vec2(1.0, 0.5), dimensions); */
         /* VISUALIZE_VECTOR(metallic_roughness.xxx, vec2(0.0, 0.5), vec2(0.5, 1.0), dimensions); */
         /* VISUALIZE_VECTOR(metallic_roughness.yyy, vec2(0.5, 0.5), vec2(1.0, 1.0), dimensions); */
+        /* VISUALIZE_VECTOR(f_diffuse, vec2(0.0, 0.5), vec2(0.5, 1.0), dimensions); */
+        /* VISUALIZE_VECTOR(f_specular, vec2(0.5, 0.5), vec2(1.0, 1.0), dimensions); */
+        VISUALIZE_VECTOR(vec3(dot(world_normal, eye_direction)), vec2(0.0, 0.5), vec2(0.5, 1.0), dimensions);
+        VISUALIZE_VECTOR(vec3(dot(world_normal, light_world_direction)), vec2(0.5, 0.5), vec2(1.0, 1.0), dimensions);
+        return vec4(f, base_color.a);
 
         /* VISUALIZE_VECTOR(vec3(D), vec2(0.0), vec2(1.0), dimensions); */
 

@@ -39,21 +39,16 @@ void main() {
 
     // Apply the transformation of primitives to view space
     vec4 world_position = model * matrix * vec4(position, 1.0);
-    // Applying both transformations at once using the following line of code
-    // wouldn't work for some reason.
-    /* vec4 world_normal = transpose(inverse(model * matrix)) * vec4(normalized_normal, 0.0); */
-    /* vec4 world_normal = inverse(model) * inverse(matrix) * vec4(normalized_normal, 0.0); */
-    vec4 world_normal = inverse(matrix * model * y_inversion) * vec4(normalized_normal, 0.0);
-    vec4 world_tangent = y_inversion * model * matrix * vec4(corrected_tangent, 0.0);
+    // Note: trying to invert and transpose the 4x4 matrix results in artifacts
+    vec3 world_normal = normalize(transpose(inverse(mat3(model * matrix))) * normalized_normal);
+    vec3 world_tangent = mat3(model * matrix) * corrected_tangent.xyz;
 
     // Ensure the normal and tangent are orthonormal, again
-    vec3 normalized_projected_world_normal = normalize(PROJECT(world_normal));
-    vec3 projected_world_tangent = PROJECT(world_tangent);
-    vec3 corrected_world_tangent = GRAM_SCHMIDT(projected_world_tangent, normalized_projected_world_normal);
+    vec3 corrected_world_tangent = normalize(GRAM_SCHMIDT(world_tangent, world_normal));
 
     f_world_position = PROJECT(world_position);
-    f_world_normal = normalized_projected_world_normal;
-    f_world_tangent = vec4(normalize(corrected_world_tangent), tangent.w);
+    f_world_normal = world_normal;
+    f_world_tangent = vec4(corrected_world_tangent, tangent.w);
     f_tex_coord = tex_coord;
     gl_Position = y_inversion * projection * view * world_position;
 }

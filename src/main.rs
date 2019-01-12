@@ -223,6 +223,17 @@ impl Default for MaterialUBO {
 
 const SCREEN_DIMENSIONS: [u32; 2] = [3840, 1080];
 
+fn swapchain_format_priority(format: &Format) -> u32 {
+    match *format {
+        Format::R8G8B8Srgb | Format::B8G8R8Srgb | Format::R8G8B8A8Srgb | Format::B8G8R8A8Srgb => 0,
+        _ => 1,
+    }
+}
+
+fn swapchain_format_compare(a: &Format, b: &Format) -> std::cmp::Ordering {
+    swapchain_format_priority(a).cmp(&swapchain_format_priority(b))
+}
+
 fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surface<Window>>, [u32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Arc<Swapchain<Window>>, Vec<Arc<SwapchainImage<Window>>>) {
     // TODO: Better device selection & SLI support
     let physical_device = PhysicalDevice::enumerate(instance).next().expect("No physical device available.");
@@ -297,8 +308,13 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
         let alpha = capabilities.supported_composite_alpha.iter().next().unwrap();
         dimensions = capabilities.current_extent.unwrap_or(dimensions);
 
-        // Choosing the internal format that the images will have.
-        let format = capabilities.supported_formats[0].0;
+        // Order supported swapchain formats by priority and choose the most preferred one.
+        // The swapchain format must be in SRGB space.
+        let mut supported_formats: Vec<Format> = capabilities.supported_formats.iter()
+            .map(|(current_format, _)| *current_format)
+            .collect();
+        supported_formats.sort_by(swapchain_format_compare);
+        let format = supported_formats[0];
 
         // Please take a look at the docs for the meaning of the parameters we didn't mention.
         Swapchain::new(

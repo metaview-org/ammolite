@@ -143,8 +143,9 @@ vec3 sample_normal(in bool normal_texture_provided,
     vec3 scaled_normal = normalize((normal_sample * 2.0 - 1.0)
             * vec3(normal_texture_scale, normal_texture_scale, 1.0));
 
-    // convert left-handed to right-handed coordinates
-    return vec3(scaled_normal.x, -scaled_normal.y, scaled_normal.z);
+    /* // convert left-handed to right-handed coordinates */
+    /* return vec3(scaled_normal.x, -scaled_normal.y, scaled_normal.z); */
+    return scaled_normal;
 }
 
 vec3 surface_reflection_ratio(in BRDFParams params) {
@@ -189,7 +190,7 @@ vec3 brdf(in BRDFParams params, out vec3 F, out float G, out float D, out vec3 f
     vec3 diffuse = params.c_diff / PI;
 
     f_diffuse = (1.0 - F) * diffuse;
-    f_specular = (F * G * D) / (4.0 * params.NdotL * params.NdotV);
+    f_specular = (F * G * D) / 4.0 * params.NdotL * params.NdotV;
 
     return f_diffuse + f_specular;
 }
@@ -197,8 +198,9 @@ vec3 brdf(in BRDFParams params, out vec3 F, out float G, out float D, out vec3 f
 vec3 pbr(in vec4 base_color,
          in float metallic,
          in float roughness,
-         in vec3 eye_dir, // pointing outwards from the eye
-         in vec3 light_dir, // pointing outwards from the light
+         in vec3 radiance,
+         in vec3 eye_dir, // pointing towards the eye
+         in vec3 light_dir, // pointing towards the light
          in vec3 normal,
          out vec3 F,
          out float G,
@@ -219,18 +221,20 @@ vec3 pbr(in vec4 base_color,
     vec3 N = normal;
 
     BRDFParams brdf_params = BRDFParams(
-        clamp(dot(N, L), 0.001, 1.0),
-        clamp(abs(dot(N, V)), 0.001, 1.0),
-        clamp(dot(N, H), 0.0, 1.0),
-        clamp(dot(L, H), 0.0, 1.0),
-        clamp(dot(V, H), 0.0, 1.0),
+        max(dot(N, L), 0.001),
+        max(dot(N, V), 0.001),
+        max(dot(N, H), 0.0),
+        max(dot(L, H), 0.0),
+        max(dot(V, H), 0.0),
         c_diff,
         F_0,
         alpha,
         roughness
     );
 
-    return brdf(brdf_params, F, G, D, f_diffuse, f_specular);
+    vec3 f = brdf(brdf_params, F, G, D, f_diffuse, f_specular);
+
+    return f * radiance * brdf_params.NdotL;
 }
 
 // Immediately returns if the current fragment is within the specified region.
@@ -344,9 +348,11 @@ vec4 get_final_color(
         vec3(-1.0, 1.5, -2.0)
     };
 
-    /* if (normalized_frag_coord.x + normalized_frag_coord.y > sin(time_elapsed) + 1.0) { */
+    /* if (normalized_frag_coord.x + normalized_frag_coord.y > 1.0) { */
     /*     world_normal = normalize(tangent_to_canonical * sampled_normal); */
     /* } */
+
+    /* return vec4(world_normal, 1.0); */
 
     world_normal = normalize(tangent_to_canonical * sampled_normal);
 
@@ -358,58 +364,40 @@ vec4 get_final_color(
     /* return vec4(diffuse_color, base_color.a); */
 
     vec3 eye_direction = normalize(camera_position - world_position);
-    vec3 accumulated_color = vec3(0.0);
+    vec3 accumulated_radiance = vec3(0.0);
 
     for (int i = 0; i < 3; i++) {
         vec3 light_world_direction = normalize(light_world_position[i] - world_position);
-        /* float HdotV = dot(light_world_direction, eye_direction); */
-        /* vec3 vecHdotV = vec3(HdotV); */
-
-        /* VISUALIZE_VECTOR_INVERT(world_normal, vec2(0.0, 0.0), vec2(1.0, 0.5), dimensions); */
-        /* VISUALIZE_VECTOR_INVERT(light_world_direction, vec2(0.0, 0.5), vec2(1.0, 1.0), dimensions); */
-        /* VISUALIZE_VECTOR(vecHdotV, vec2(0.0, 0.0), vec2(1.0, 1.0), dimensions); */
-
-        /* VISUALIZE_VECTOR_INVERT(eye_direction, vec2(0.0 / 3.0, 0.5), vec2(1.0 / 3.0, 1.0), dimensions); */
-        /* VISUALIZE_VECTOR_INVERT(light_world_direction, vec2(1.0 / 3.0, 0.5), vec2(2.0 / 3.0, 1.0), dimensions); */
-        /* VISUALIZE_VECTOR_INVERT(world_normal, vec2(2.0 / 3.0, 0.5), vec2(3.0 / 3.0, 1.0), dimensions); */
+        vec3 incoming_light_radiance = vec3(1.0);
 
         vec3 F;
         float G;
         float D;
         vec3 f_diffuse;
         vec3 f_specular;
-        vec3 f = pbr(base_color,
-                     metallic_roughness.x,
-                     metallic_roughness.y,
-                     eye_direction,
-                     light_world_direction,
-                     world_normal,
-                     F, G, D, f_diffuse, f_specular);
+        vec3 outgoing_radiance = pbr(
+            base_color,
+            metallic_roughness.x,
+            metallic_roughness.y,
+            incoming_light_radiance,
+            eye_direction,
+            light_world_direction,
+            world_normal,
+            F, G, D, f_diffuse, f_specular
+        );
 
-        accumulated_color += f;
-
-        /* VISUALIZE_VECTOR(-eye_direction, vec2(0.0 / 3.0, 0.5), vec2(1.0 / 3.0, 1.0), dimensions); */
-        /* VISUALIZE_VECTOR(-light_world_direction, vec2(1.0 / 3.0, 0.5), vec2(2.0 / 3.0, 1.0), dimensions); */
-        /* VISUALIZE_VECTOR(world_normal, vec2(2.0 / 3.0, 0.5), vec2(3.0 / 3.0, 1.0), dimensions); */
-
-        /* VISUALIZE_VECTOR(base_color.rgb, vec2(0.5, 0.0), vec2(1.0, 0.5), dimensions); */
-        /* VISUALIZE_VECTOR(metallic_roughness.xxx, vec2(0.0, 0.5), vec2(0.5, 1.0), dimensions); */
-        /* VISUALIZE_VECTOR(metallic_roughness.yyy, vec2(0.5, 0.5), vec2(1.0, 1.0), dimensions); */
-        /* VISUALIZE_VECTOR(f_diffuse, vec2(0.0, 0.5), vec2(0.5, 1.0), dimensions); */
-        /* VISUALIZE_VECTOR(f_specular, vec2(0.5, 0.5), vec2(1.0, 1.0), dimensions); */
-        VISUALIZE_VECTOR(vec3(dot(world_normal, eye_direction)), vec2(0.0, 0.5), vec2(0.5, 1.0), dimensions);
-        VISUALIZE_VECTOR(vec3(dot(world_normal, light_world_direction)), vec2(0.5, 0.5), vec2(1.0, 1.0), dimensions);
-        return vec4(f, base_color.a);
-
-        /* VISUALIZE_VECTOR(vec3(D), vec2(0.0), vec2(1.0), dimensions); */
-
-        // TODO: Transform all primitives to World space, where possible.
-        /* VISUALIZE_VECTOR(F, vec2(0.0 / 3.0, 0.5), vec2(1.0 / 3.0, 1.0), dimensions); */
-        /* VISUALIZE_VECTOR(vec3(G), vec2(1.0 / 3.0, 0.5), vec2(2.0 / 3.0, 1.0), dimensions); */
-        /* VISUALIZE_VECTOR(vec3(D), vec2(2.0 / 3.0, 0.5), vec2(3.0 / 3.0, 1.0), dimensions); */
-
-        /* VISUALIZE_VECTOR(vec3(D), vec2(0.0, 0.0), vec2(1.0, 1.0), dimensions); */
+        accumulated_radiance += outgoing_radiance;
     }
 
-    return vec4(accumulated_color, base_color.a);
+    // Apply ambient radiance
+    vec3 ambient_radiance = vec3(0.03) * base_color.rgb * occlusion;
+    accumulated_radiance += ambient_radiance;
+
+    // Apply emission
+    accumulated_radiance += emissive;
+
+    // Apply transparency
+    vec4 color = vec4(accumulated_radiance, base_color.a);
+
+    return color;
 }

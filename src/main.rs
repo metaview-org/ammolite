@@ -65,8 +65,8 @@ use crate::math::vector::*;
 use crate::model::Model;
 use crate::model::DrawContext;
 use crate::model::InitializationDrawContext;
-use crate::model::UninitializedResource;
 use crate::model::HelperResources;
+use crate::model::resource::UninitializedResource;
 use crate::vertex::GltfVertexBufferDefinition;
 use crate::camera::*;
 

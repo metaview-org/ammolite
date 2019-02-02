@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::path::Path;
 use std::mem;
 use std::fmt;
-use rayon::prelude::*;
 use vulkano::sampler::SamplerAddressMode;
 use vulkano::sampler::Filter;
 use vulkano::sampler::MipmapMode;
@@ -25,7 +24,6 @@ use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::buffer::immutable::ImmutableBuffer;
 use vulkano::descriptor::descriptor_set::DescriptorSet;
 use vulkano::sampler::Sampler;
-use vulkano::image::ImageDimensions;
 use vulkano::image::immutable::ImmutableImage;
 use vulkano::image::immutable::ImmutableImageInitialization;
 use vulkano::image::Dimensions;
@@ -260,7 +258,7 @@ impl fmt::Debug for InitializationTask {
 }
 
 impl InitializationTask {
-    fn initialize(self, device: &Arc<Device>, queue_family: QueueFamily, command_buffer_builder: AutoCommandBufferBuilder) -> Result<AutoCommandBufferBuilder, Error> {
+    fn initialize(self, device: &Arc<Device>, _queue_family: QueueFamily, command_buffer_builder: AutoCommandBufferBuilder) -> Result<AutoCommandBufferBuilder, Error> {
         match self {
             InitializationTask::Buffer { data, initialization_buffer, .. } => {
                 let staging_buffer: Arc<CpuAccessibleBuffer<[u8]>> = CpuAccessibleBuffer::from_iter(
@@ -291,17 +289,17 @@ impl InitializationTask {
                     },
                 )?;
 
-                let mut command_buffer_builder = command_buffer_builder
+                let command_buffer_builder = command_buffer_builder
                     .copy_buffer_to_image(staging_buffer, device_image.clone())?;
-
-                let (width, height) = if let ImageDimensions::Dim2d { width, height, .. } = device_image.dimensions() {
-                    (width, height)
-                } else {
-                    panic!("Texture mipmap generation is not implemented for non-2d textures.");
-                };
 
                 // TODO: Set mip count to Log2
                 //
+                // let (width, height) = if let ImageDimensions::Dim2d { width, height, .. } = device_image.dimensions() {
+                //     (width, height)
+                // } else {
+                //     panic!("Texture mipmap generation is not implemented for non-2d textures.");
+                // };
+
                 // for mip_level in 1..device_image.mipmap_levels() {
                 //     let source_mip_level = mip_level - 1;
                 //     let mip_dimensions = (width >> mip_level, height >> mip_level);
@@ -522,6 +520,7 @@ impl HelperResources {
 pub struct Model {
     document: Document,
     device_buffers: Vec<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>,
+    #[allow(dead_code)]
     device_images: Vec<Arc<dyn ImageViewAccess + Send + Sync>>,
     converted_index_buffers_by_accessor_index: Vec<Option<Arc<dyn TypedBufferAccess<Content=[u16]> + Send + Sync>>>,
     tangent_buffers: Vec<Vec<Option<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>>>,

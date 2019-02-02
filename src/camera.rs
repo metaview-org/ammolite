@@ -101,7 +101,7 @@ impl Camera for PitchYawCamera3 {
               delta_time: &Duration,
               cursor_delta: &(f64, f64),
               pressed_keys: &HashSet<VirtualKeyCode>,
-              pressed_mouse_buttons: &HashSet<MouseButton>) {
+              _pressed_mouse_buttons: &HashSet<MouseButton>) {
         self.update_rotation(cursor_delta);
 
         let delta_seconds = (delta_time.as_nanos() as f64) / 1.0e9;

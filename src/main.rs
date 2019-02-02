@@ -4,7 +4,6 @@
 
 #[macro_use]
 extern crate vulkano;
-#[macro_use]
 extern crate vulkano_shaders;
 #[macro_use]
 extern crate failure;
@@ -207,8 +206,6 @@ impl Default for MaterialUBO {
     }
 }
 
-const SCREEN_DIMENSIONS: [u32; 2] = [3840, 1080];
-
 fn swapchain_format_priority(format: &Format) -> u32 {
     match *format {
         Format::R8G8B8Srgb | Format::B8G8R8Srgb | Format::R8G8B8A8Srgb | Format::B8G8R8A8Srgb => 0,
@@ -393,7 +390,7 @@ fn create_render_pass(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) 
 
 fn create_pipeline_gltf_opaque(
     device: &Arc<Device>,
-    swapchain: &Arc<Swapchain<Window>>,
+    _swapchain: &Arc<Swapchain<Window>>,
     render_pass: &Arc<RenderPassAbstract + Send + Sync>,
     shared_vs: &gltf_vert::Shader
 ) -> Arc<GraphicsPipelineAbstract + Send + Sync> {
@@ -422,7 +419,7 @@ fn create_pipeline_gltf_opaque(
 
 fn create_pipeline_gltf_mask(
     device: &Arc<Device>,
-    swapchain: &Arc<Swapchain<Window>>,
+    _swapchain: &Arc<Swapchain<Window>>,
     render_pass: &Arc<RenderPassAbstract + Send + Sync>,
     shared_vs: &gltf_vert::Shader
 ) -> Arc<GraphicsPipelineAbstract + Send + Sync> {
@@ -441,7 +438,7 @@ fn create_pipeline_gltf_mask(
 
 fn create_pipeline_gltf_blend_preprocess(
     device: &Arc<Device>,
-    swapchain: &Arc<Swapchain<Window>>,
+    _swapchain: &Arc<Swapchain<Window>>,
     render_pass: &Arc<RenderPassAbstract + Send + Sync>,
     shared_vs: &gltf_vert::Shader
 ) -> Arc<GraphicsPipelineAbstract + Send + Sync> {
@@ -494,7 +491,7 @@ fn create_pipeline_gltf_blend_preprocess(
 
 fn create_pipeline_gltf_blend_finalize(
     device: &Arc<Device>,
-    swapchain: &Arc<Swapchain<Window>>,
+    _swapchain: &Arc<Swapchain<Window>>,
     render_pass: &Arc<RenderPassAbstract + Send + Sync>,
     shared_vs: &gltf_vert::Shader
 ) -> Arc<GraphicsPipelineAbstract + Send + Sync> {
@@ -554,56 +551,6 @@ fn create_staging_buffers_data<T>(device: &Arc<Device>, queue_family: QueueFamil
     ).unwrap();
 
     (staging_buffer, device_buffer)
-}
-
-fn create_staging_buffers_iter<T, I>(device: &Arc<Device>, queue_family: QueueFamily, usage: BufferUsage, iterator: I)
-    -> (Arc<CpuAccessibleBuffer<[T]>>, Arc<DeviceLocalBuffer<[T]>>)
-    where T: Clone + 'static,
-          I: ExactSizeIterator<Item=T> {
-    let iterator_len = iterator.len();
-    let staging_buffer = CpuAccessibleBuffer::<[T]>::from_iter(
-        device.clone(),
-        BufferUsage {
-            transfer_destination: true,
-            transfer_source: true,
-            .. usage.clone()
-        },
-        iterator,
-    ).unwrap();
-    let device_buffer = DeviceLocalBuffer::<[T]>::array(
-        device.clone(),
-        iterator_len,
-        BufferUsage {
-            transfer_destination: true,
-            .. usage.clone()
-        },
-        [queue_family].into_iter().cloned(),
-    ).unwrap();
-
-    (staging_buffer, device_buffer)
-}
-
-fn create_vertex_index_buffers<V, I, VI, II>(device: &Arc<Device>, queue_family: QueueFamily, vertex_iterator: VI, index_iterator: II)
-    -> ((Arc<CpuAccessibleBuffer<[V]>>, Arc<DeviceLocalBuffer<[V]>>),
-        (Arc<CpuAccessibleBuffer<[I]>>, Arc<DeviceLocalBuffer<[I]>>))
-    where V: vulkano::pipeline::vertex::Vertex + Clone + 'static,
-          I: vulkano::pipeline::input_assembly::Index + Clone + 'static,
-          VI: ExactSizeIterator<Item=V>,
-          II: ExactSizeIterator<Item=I> {
-    (
-        create_staging_buffers_iter(
-            &device,
-            queue_family,
-            BufferUsage::vertex_buffer(),
-            vertex_iterator,
-        ),
-        create_staging_buffers_iter(
-            &device,
-            queue_family,
-            BufferUsage::index_buffer(),
-            index_iterator,
-        ),
-    )
 }
 
 fn construct_model_matrix(scale: f32, translation: &Vec3, rotation: &Vec3) -> Mat4 {
@@ -778,40 +725,7 @@ fn main() {
     //     )
     // }).collect();
     let mut main_framebuffers: Option<Vec<Arc<Framebuffer<_, _>>>> = None;
-    let mut depth_image: Option<Arc<AttachmentImage>> = None;
-    let mut blend_accumulation_image: Option<Arc<AttachmentImage>> = None;
-    let mut blend_revealage_image: Option<Arc<AttachmentImage>> = None;
     let mut descriptor_set_gltf_blend: Option<Arc<DescriptorSet + Send + Sync>> = None;
-
-    blend_accumulation_image = Some(AttachmentImage::with_usage(
-        device.clone(),
-        dimensions.clone(),
-        Format::R32G32B32A32Sfloat,
-        ImageUsage {
-            color_attachment: true,
-            input_attachment: true,
-            transient_attachment: true,
-            .. ImageUsage::none()
-        }
-    ).unwrap());
-    blend_revealage_image = Some(AttachmentImage::with_usage(
-        device.clone(),
-        dimensions.clone(),
-        Format::R32G32B32A32Sfloat, //FIXME
-        ImageUsage {
-            color_attachment: true,
-            input_attachment: true,
-            transient_attachment: true,
-            .. ImageUsage::none()
-        }
-    ).unwrap());
-
-    descriptor_set_gltf_blend = Some(Arc::new(
-        PersistentDescriptorSet::start(pipeline_gltf_blend_finalize.clone(), 3)
-            .add_image(blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
-            .add_image(blend_revealage_image.as_ref().unwrap().clone()).unwrap()
-            .build().unwrap()
-    ));
 
     // We need to keep track of whether the swapchain is invalid for the current window,
     // for example when the window is resized.
@@ -922,7 +836,7 @@ fn main() {
         // Because framebuffers contains an Arc on the old swapchain, we need to
         // recreate framebuffers as well.
         if main_framebuffers.is_none() {
-            depth_image = Some(AttachmentImage::with_usage(
+            let depth_image = Some(AttachmentImage::with_usage(
                 device.clone(),
                 dimensions.clone(),
                 Format::D32Sfloat,
@@ -931,7 +845,7 @@ fn main() {
                     .. ImageUsage::none()
                 }
             ).unwrap());
-            blend_accumulation_image = Some(AttachmentImage::with_usage(
+            let blend_accumulation_image = Some(AttachmentImage::with_usage(
                 device.clone(),
                 dimensions.clone(),
                 Format::R32G32B32A32Sfloat,
@@ -942,7 +856,7 @@ fn main() {
                     .. ImageUsage::none()
                 }
             ).unwrap());
-            blend_revealage_image = Some(AttachmentImage::with_usage(
+            let blend_revealage_image = Some(AttachmentImage::with_usage(
                 device.clone(),
                 dimensions.clone(),
                 Format::R32G32B32A32Sfloat, //FIXME

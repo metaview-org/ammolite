@@ -332,8 +332,8 @@ mod tests {
 
     #[test]
     fn matrix_vector_rotation() {
-        let mat = Mat4::rotation(&[0.0, consts::FRAC_PI_2, 0.0].into())
-            * Mat4::rotation(&[consts::FRAC_PI_2, 0.0, 0.0].into());
+        let mat = Mat4::rotation_yaw(consts::FRAC_PI_2)
+            * Mat4::rotation_pitch(consts::FRAC_PI_2);
         let vec: Vec3 = [1.0, 2.0, 3.0].into();
 
         assert_eq!(mat * vec, [1.9999999, -3.0, -1.0000001].into());

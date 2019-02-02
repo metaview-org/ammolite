@@ -299,7 +299,6 @@ vec4 get_final_color(
         in texture2D emissive_texture,
         in sampler emissive_sampler
 ) {
-    world_position = normalize(world_position);
     world_normal = normalize(world_normal);
     world_tangent = vec4(normalize(world_tangent.xyz), world_tangent.w);
 

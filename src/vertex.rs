@@ -10,9 +10,9 @@ use vulkano::pipeline::vertex::InputRate;
 use vulkano::pipeline::vertex::AttributeInfo;
 use vulkano::pipeline::shader::ShaderInterfaceDef;
 use typenum::*;
-use iter::ArrayIterator;
-use ::gltf_vert::MainInput;
 use safe_transmute::PodTransmutable;
+use crate::iter::ArrayIterator;
+use crate::gltf_vert::MainInput;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

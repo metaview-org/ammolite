@@ -3,8 +3,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 use winit::{MouseButton, VirtualKeyCode};
 use boolinator::Boolinator;
-use math::*;
-use ::construct_view_matrix;
+use crate::math::*;
 
 pub trait Camera {
     fn get_view_matrix(&self) -> Mat4;

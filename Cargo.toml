@@ -2,6 +2,7 @@
 name = "ammolite"
 version = "0.1.0"
 authors = ["Jakub Hlusička <limeth@protonmail.com>"]
+edition = "2018"
 
 [dependencies]
 # vulkano = "0.11.1"

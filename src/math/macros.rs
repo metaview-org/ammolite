@@ -5,7 +5,7 @@ macro_rules! impl_mat_macro {
             {
                 $component_array:expr
             } => {{
-                use math::matrix::Matrix;
+                use crate::math::matrix::{Matrix, $ty_name};
                 let components: [f32; $dims * $dims] = $component_array;
                 let mut result = <$ty_name as Matrix>::zero();
 

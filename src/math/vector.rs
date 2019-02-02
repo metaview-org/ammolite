@@ -1,7 +1,7 @@
 use std::ops::{Add, Deref, DerefMut, Sub, Neg, AddAssign, SubAssign, Div, Mul, DivAssign, MulAssign};
 use std::fmt::{Debug, Formatter, Error};
 use typenum::{Unsigned, U1, U2, U3, U4};
-use math::matrix::Mat4;
+use crate::math::matrix::Mat4;
 
 pub trait Vector: Neg + Sized + Clone + Debug + PartialEq {
     type Dimensions: Unsigned + Add<U1> + Sub<U1>;

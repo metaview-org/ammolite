@@ -30,35 +30,27 @@ pub mod vertex;
 pub mod camera;
 pub mod sampler;
 
-use std::mem;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::ops::Deref;
-use std::ffi::CString;
-use std::time::{Instant, Duration};
-use vulkano::format::ClearValue;
+use std::time::Instant;
 use vulkano::descriptor::descriptor_set::DescriptorSet;
 use vulkano::framebuffer::RenderPassAbstract;
 use vulkano::pipeline::blend::AttachmentBlend;
 use vulkano::pipeline::blend::BlendFactor;
 use vulkano::pipeline::blend::BlendOp;
 use vulkano::pipeline::GraphicsPipelineAbstract;
-use vulkano::pipeline::shader::EntryPointAbstract;
-use vulkano::pipeline::shader::GraphicsEntryPointAbstract;
 use vulkano::instance::RawInstanceExtensions;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer};
-use vulkano::command_buffer::{AutoCommandBuffer, AutoCommandBufferBuilder, DynamicState};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
 use vulkano::device::{Device, RawDeviceExtensions, DeviceExtensions, Queue, Features};
 use vulkano::instance::{Instance, PhysicalDevice, QueueFamily};
 use vulkano::sync::{FlushError, GpuFuture};
-use vulkano::format::{self, Format, FormatTy};
-use vulkano::image::{AttachmentImage, ImageUsage, Dimensions, ImageLayout};
-use vulkano::image::immutable::{ImmutableImage, ImmutableImageInitialization};
+use vulkano::format::Format;
+use vulkano::image::{AttachmentImage, ImageUsage};
 use vulkano::image::swapchain::SwapchainImage;
-use vulkano::framebuffer::{Framebuffer, RenderPass, RenderPassDesc, Subpass};
+use vulkano::framebuffer::{Framebuffer, Subpass};
 use vulkano::pipeline::GraphicsPipeline;
 use vulkano::pipeline::viewport::Viewport;
-use vulkano::pipeline::vertex::SingleBufferDefinition;
 use vulkano::pipeline::depth_stencil::DepthStencil;
 use vulkano::pipeline::depth_stencil::Compare;
 use vulkano::pipeline::depth_stencil::DepthBounds;
@@ -67,23 +59,19 @@ use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSetImg;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSetBuf;
 use vulkano::swapchain::{self, PresentMode, SurfaceTransform, Swapchain, AcquireError, SwapchainCreationError, Surface};
-use vulkano::sampler::{Sampler, SamplerAddressMode, BorderColor, MipmapMode, Filter};
 use vulkano_win::VkSurfaceBuild;
 use winit::{ElementState, MouseButton, Event, WindowEvent, KeyboardInput, VirtualKeyCode, EventsLoop, WindowBuilder, Window};
-use image::{ImageBuffer, Pixel};
-use math::matrix::*;
-use math::vector::*;
-use gltf::{Document, Gltf};
-use gltf::mesh::util::ReadIndices;
-use byteorder::{ReadBytesExt, WriteBytesExt, BigEndian, LittleEndian};
-use model::Model;
-use model::DrawContext;
-use model::InitializationDrawContext;
-use model::UninitializedResource;
-use model::SimpleUninitializedResource;
-use model::HelperResources;
-use vertex::GltfVertexBufferDefinition;
-use camera::*;
+use crate::math::matrix::*;
+use crate::math::vector::*;
+use crate::model::Model;
+use crate::model::DrawContext;
+use crate::model::InitializationDrawContext;
+use crate::model::UninitializedResource;
+use crate::model::HelperResources;
+use crate::vertex::GltfVertexBufferDefinition;
+use crate::camera::*;
+
+pub use crate::gltf_opaque_frag::ty::*;
 
 pub type MainDescriptorSet = Arc<PersistentDescriptorSet<Arc<GraphicsPipeline<GltfVertexBufferDefinition, Box<dyn PipelineLayoutAbstract + Sync + Send>, Arc<RenderPassAbstract + Send + Sync>>>, ((((), PersistentDescriptorSetBuf<Arc<DeviceLocalBuffer<SceneUBO>>>), PersistentDescriptorSetImg<Arc<AttachmentImage>>), vulkano::descriptor::descriptor_set::PersistentDescriptorSetSampler)>>;
 
@@ -144,8 +132,6 @@ mod gltf_blend_finalize_frag {
         path: "src/shaders/gltf_blend_finalize.frag",
     }
 }
-
-pub use gltf_opaque_frag::ty::*;
 
 impl SceneUBO {
     pub fn new(time_elapsed: f32, dimensions: Vec2, camera_position: Vec3, model: Mat4, view: Mat4, projection: Mat4) -> SceneUBO {

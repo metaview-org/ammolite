@@ -3,7 +3,7 @@ use std::slice;
 use std::ops::{Deref, DerefMut, Mul, Neg};
 use std::fmt::{Debug, Formatter, Error};
 use typenum::Unsigned;
-use math::vector::*;
+use crate::math::vector::*;
 
 pub trait Matrix: Neg + Mul<Output=Self> + PartialEq + Sized + Debug {
     type Vector: Vector;

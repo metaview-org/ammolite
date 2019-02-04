@@ -401,26 +401,15 @@ impl Model {
             unsafe { tangent_slice.reinterpret::<[GltfVertexTangent]>() }
         };
 
-        // FIXME: use get_semantic_buffer_view
         let tex_coord_slice: BufferSlice<[GltfVertexTexCoord], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = {
-            let tex_coord_slice: BufferSlice<[u8], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = tex_coords_accessor.map(|tex_coords_accessor| {
-                let buffer_view = tex_coords_accessor.view();
-                let buffer_index = buffer_view.buffer().index();
-                let buffer_offset = tex_coords_accessor.offset() + buffer_view.offset();
-                let buffer_bytes = tex_coords_accessor.size() * tex_coords_accessor.count();
-
-                let tex_coord_buffer: Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync> = self.device_buffers[buffer_index].clone();
-
-                BufferSlice::from_typed_buffer_access(tex_coord_buffer)
-                    .slice(buffer_offset..(buffer_offset + buffer_bytes))
-                    .unwrap()
-            }).unwrap_or_else(|| {
+            if let &Some(ref tex_coord_accessor) = &tex_coords_accessor {
+                self.get_semantic_buffer_view(tex_coord_accessor)
+            } else {
                 let zero_buffer = context.helper_resources.zero_buffer.clone();
+                let zero_buffer_slice = BufferSlice::from_typed_buffer_access(zero_buffer);
 
-                BufferSlice::from_typed_buffer_access(zero_buffer)
-            });
-
-            unsafe { tex_coord_slice.reinterpret::<[GltfVertexTexCoord]>() }
+                unsafe { zero_buffer_slice.reinterpret::<[GltfVertexTexCoord]>() }
+            }
         };
 
         let vertex_color_slice: BufferSlice<[GltfVertexColor], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = {
@@ -469,7 +458,6 @@ impl Model {
                     // }
 
                     $command_buffer = $command_buffer.draw_indexed(
-                        // $context.combined_pipeline.clone(),
                         pipeline.clone(),
                         $context.dynamic,
                         $vertex_buffers.get_individual_buffers(),
@@ -486,7 +474,6 @@ impl Model {
                         .expect("Could not access a pre-generated `u16` index buffer, maybe it was not generated?")
                         .clone();
                     command_buffer = command_buffer.draw_indexed(
-                        // context.combined_pipeline.clone(),
                         pipeline.clone(),
                         context.dynamic,
                         vertex_buffers.get_individual_buffers(),
@@ -506,7 +493,6 @@ impl Model {
             }
         } else {
             command_buffer = command_buffer.draw(
-                // context.combined_pipeline.clone(),
                 pipeline.clone(),
                 context.dynamic,
                 vertex_buffers.get_individual_buffers(),

@@ -35,8 +35,13 @@ use crate::iter::ForcedExactSizeIterator;
 use crate::vertex::{GltfVertexPosition, GltfVertexNormal, GltfVertexTangent, GltfVertexTexCoord};
 use crate::sampler::IntoVulkanEquivalent;
 use crate::math::*;
-use crate::model::{Model, ColorSpace, HelperResources};
+use crate::model::{Model, HelperResources};
 use crate::model::resource::*;
+
+enum ColorSpace {
+    Srgb,
+    Linear,
+}
 
 fn convert_double_channel_to_triple_channel<'a>(data_slice: &'a [u8]) -> Box<ExactSizeIterator<Item=u8> + 'a> {
     let unsized_iterator = data_slice.chunks(3).flat_map(|rgb| {
@@ -155,17 +160,24 @@ pub fn import_tangent_buffers<'a, I>(device: &Arc<Device>,
 
                 let position_accessor = primitive.get(&Semantic::Positions).unwrap();
                 let normal_accessor = primitive.get(&Semantic::Normals).unwrap();
-                let tex_coord_accessor = primitive.get(&Semantic::TexCoords(0)).unwrap();
+                let tex_coord_accessor = primitive.get(&Semantic::TexCoords(0));
                 let position_slice: &[GltfVertexPosition] = Model::get_semantic_byte_slice(&buffer_data_array[..], &position_accessor);
                 let normal_slice: &[GltfVertexNormal] = Model::get_semantic_byte_slice(&buffer_data_array[..], &normal_accessor);
-                let tex_coord_slice: &[GltfVertexTexCoord] = Model::get_semantic_byte_slice(&buffer_data_array[..], &tex_coord_accessor);
+                let tex_coord_slice: Option<&[GltfVertexTexCoord]> = tex_coord_accessor.map(|tex_coord_accessor| Model::get_semantic_byte_slice(&buffer_data_array[..], &tex_coord_accessor));
+                let zero_tex_coord: [f32; 2] = Default::default();
 
                 mikktspace::generate_tangents(
                     &|| { vertices_per_face }, // vertices_per_face: &'a Fn() -> usize, 
                     &|| { face_count }, // face_count: &'a Fn() -> usize, 
                     &|face_index, vertex_index| { &position_slice[get_semantic_index(face_index, vertex_index)].0 }, // position: &'a Fn(usize, usize) -> &'a [f32; 3],
                     &|face_index, vertex_index| { &normal_slice[get_semantic_index(face_index, vertex_index)].0 }, // normal: &'a Fn(usize, usize) -> &'a [f32; 3],
-                    &|face_index, vertex_index| { &tex_coord_slice[get_semantic_index(face_index, vertex_index)].0 }, // tex_coord: &'a Fn(usize, usize) -> &'a [f32; 2],
+                    &|face_index, vertex_index| {
+                        if let Some(tex_coord_slice) = tex_coord_slice {
+                            &tex_coord_slice[get_semantic_index(face_index, vertex_index)].0
+                        } else {
+                            &zero_tex_coord
+                        }
+                    }, // tex_coord: &'a Fn(usize, usize) -> &'a [f32; 2],
                     &mut |face_index, vertex_index, mut tangent| {
                         // The algorithm generates tangents in right-handed coordinate space,
                         // but models with pre-generated tangents seem to be in left-handed
@@ -239,6 +251,7 @@ pub fn import_device_images<'a, I>(device: &Arc<Device>,
         height: u32,
     };
 
+    // Make image data accessible with an Arc
     let image_data_array: Vec<ArcImageData> = image_data_array.into_iter()
         .map(|gltf::image::Data { pixels, format, width, height }| {
             ArcImageData { pixels: Arc::new(pixels), format, width, height }
@@ -246,15 +259,15 @@ pub fn import_device_images<'a, I>(device: &Arc<Device>,
 
     for material in document.materials() {
         let pbr = material.pbr_metallic_roughness();
-        let images_slice = [(ColorSpace::Srgb,   pbr.base_color_texture().map(|wrapped| wrapped.texture())),
+        let textures_slice = [(ColorSpace::Srgb,   pbr.base_color_texture().map(|wrapped| wrapped.texture())),
                             (ColorSpace::Linear, pbr.metallic_roughness_texture().map(|wrapped| wrapped.texture())),
                             (ColorSpace::Linear, material.normal_texture().map(|wrapped| wrapped.texture())),
                             (ColorSpace::Linear, material.occlusion_texture().map(|wrapped| wrapped.texture())),
                             (ColorSpace::Srgb,   material.emissive_texture().map(|wrapped| wrapped.texture()))];
 
-        for (space, image) in images_slice.into_iter()
+        for (space, image) in textures_slice.into_iter()
                                  .filter(|(_, option)| option.is_some())
-                                 .map(|(space, option)| (space, option.as_ref().unwrap())) {
+                                 .map(|(space, option)| (space, option.as_ref().unwrap().source())) {
             let &ArcImageData {
                 ref pixels,
                 format,
@@ -294,6 +307,11 @@ pub fn import_device_images<'a, I>(device: &Arc<Device>,
                             initialization_tasks.push(InitializationTask::Image {
                                 data: pixels.clone(),
                                 device_image: Arc::new(image_initialization),
+
+
+
+
+
                                 texel_conversion: None,
                             });
                         }

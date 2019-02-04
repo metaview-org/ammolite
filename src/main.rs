@@ -1,3 +1,7 @@
+//! TODO:
+//! * Single-sided/Double-sided textures
+//! * Vertex attribute interleaving
+
 #![feature(duration_as_u128)]
 #![feature(core_intrinsics)]
 #![feature(duration_float)]
@@ -203,6 +207,14 @@ impl Default for MaterialUBO {
             false,
             [0.0, 0.0, 0.0].into(),
         )
+    }
+}
+
+impl PushConstants {
+    pub fn new(vertex_color_provided: bool) -> Self {
+        Self {
+            vertex_color_provided: vertex_color_provided as u32,
+        }
     }
 }
 

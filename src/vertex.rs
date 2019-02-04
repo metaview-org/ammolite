@@ -15,24 +15,29 @@ use crate::iter::ArrayIterator;
 use crate::gltf_vert::MainInput;
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct GltfVertexPosition(pub [f32; 3]);
 unsafe impl PodTransmutable for GltfVertexPosition {}
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct GltfVertexNormal(pub [f32; 3]);
 unsafe impl PodTransmutable for GltfVertexNormal {}
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct GltfVertexTangent(pub [f32; 4]);
 unsafe impl PodTransmutable for GltfVertexTangent {}
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct GltfVertexTexCoord(pub [f32; 2]);
 unsafe impl PodTransmutable for GltfVertexTexCoord {}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct GltfVertexColor(pub [f32; 4]);
+unsafe impl PodTransmutable for GltfVertexColor {}
 
 macro_rules! impl_buffers {
     {
@@ -175,10 +180,11 @@ macro_rules! impl_buffers {
 }
 
 impl_buffers! {
-    4, U4;
+    5, U5;
 
     [position_buffer: PositionBuffer] of [position: GltfVertexPosition],
     [normal_buffer: NormalBuffer] of [normal: GltfVertexNormal],
     [tangent_buffer: TangentBuffer] of [tangent: GltfVertexTangent],
     [tex_coord_buffer: TexCoordBuffer] of [tex_coord: GltfVertexTexCoord],
+    [vertex_color_buffer: VertexColorBuffer] of [vertex_color: GltfVertexColor],
 }

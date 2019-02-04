@@ -18,11 +18,13 @@ layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec4 tangent;
 layout(location = 3) in vec2 tex_coord;
+layout(location = 4) in vec4 vertex_color;
 
 layout(location = 0) out vec3 f_world_position;
 layout(location = 1) out vec3 f_world_normal;
 layout(location = 2) out vec4 f_world_tangent;
 layout(location = 3) out vec2 f_tex_coord;
+layout(location = 4) out vec4 f_vertex_color;
 
 const mat4 y_inversion = mat4(
     1.0,  0.0,  0.0,  0.0,
@@ -50,5 +52,6 @@ void main() {
     f_world_normal = world_normal;
     f_world_tangent = vec4(corrected_world_tangent, tangent.w);
     f_tex_coord = tex_coord;
+    f_vertex_color = vertex_color;
     gl_Position = y_inversion * projection * view * world_position;
 }

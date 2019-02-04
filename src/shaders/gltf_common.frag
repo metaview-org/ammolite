@@ -1,4 +1,5 @@
 #include "gltf_common.h"
+#include "gltf_common_inputs.frag"
 
 #define GET_FINAL_COLOR() get_final_color(      \
         time_elapsed,                           \
@@ -9,6 +10,7 @@
         f_world_normal,                         \
         f_world_tangent,                        \
         f_tex_coord,                            \
+        f_vertex_color,                         \
                                                 \
         base_color_texture_provided,            \
         base_color_factor,                      \
@@ -56,17 +58,24 @@ vec4 sample_base_color(in bool base_color_texture_provided,
                        in vec4 base_color_factor,
                        in texture2D base_color_texture,
                        in sampler base_color_sampler,
-                       in vec2 f_tex_coord) {
+                       in vec2 f_tex_coord,
+                       in vec4 f_vertex_color) {
+    vec4 base_color;
+
     if (base_color_texture_provided) {
-        vec4 texture_value = texture(
+        base_color = texture(
             sampler2D(base_color_texture, base_color_sampler),
             vec2(f_tex_coord)
         );
-
-        return base_color_factor * texture_value;
     } else {
-        return base_color_factor;
+        base_color = vec4(1.0);
     }
+
+    if (vertex_color_provided) {
+        base_color *= f_vertex_color;
+    }
+
+    return base_color_factor * base_color;
 }
 
 vec2 sample_metallic_roughness(in bool metallic_roughness_texture_provided,
@@ -264,43 +273,10 @@ vec3 pbr(in vec4 base_color,
     }                                                                          \
 } while (false);
 
-vec4 get_final_color(
-        in float time_elapsed,
-        in vec2 dimensions,
-        in mat4 view,
-        in vec3 camera_position,
-        in vec3 world_position,
-        in vec3 world_normal,
-        in vec4 world_tangent,
-        in vec2 f_tex_coord,
-
-        in bool base_color_texture_provided,
-        in vec4 base_color_factor,
-        in texture2D base_color_texture,
-        in sampler base_color_sampler,
-
-        in bool metallic_roughness_texture_provided,
-        in vec2 metallic_roughness_factor,
-        in texture2D metallic_roughness_texture,
-        in sampler metallic_roughness_sampler,
-
-        in bool normal_texture_provided,
-        in float normal_texture_scale,
-        in texture2D normal_texture,
-        in sampler normal_sampler,
-
-        in bool occlusion_texture_provided,
-        in float occlusion_strength,
-        in texture2D occlusion_texture,
-        in sampler occlusion_sampler,
-
-        in bool emissive_texture_provided,
-        in vec3 emissive_factor,
-        in texture2D emissive_texture,
-        in sampler emissive_sampler
-) {
-    world_normal = normalize(world_normal);
-    world_tangent = vec4(normalize(world_tangent.xyz), world_tangent.w);
+vec4 get_final_color() {
+    vec3 world_position = f_world_position;
+    vec3 world_normal = normalize(f_world_normal);
+    vec4 world_tangent = vec4(normalize(f_world_tangent.xyz), f_world_tangent.w);
 
     vec2 normalized_frag_coord = get_normalized_frag_coord(dimensions);
     vec3 world_bitangent = cross(world_normal, world_tangent.xyz) * world_tangent.w;
@@ -309,7 +285,8 @@ vec4 get_final_color(
         base_color_factor,
         base_color_texture,
         base_color_sampler,
-        f_tex_coord
+        f_tex_coord,
+        f_vertex_color
     );
     vec2 metallic_roughness = sample_metallic_roughness(
         metallic_roughness_texture_provided,

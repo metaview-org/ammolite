@@ -36,8 +36,8 @@ use gltf::Node;
 use gltf::accessor::DataType;
 use failure::Error;
 use safe_transmute::PodTransmutable;
-use crate::MaterialUBO;
-use crate::vertex::{GltfVertexPosition, GltfVertexNormal, GltfVertexTangent, GltfVertexTexCoord, GltfVertexBuffers};
+use crate::{MaterialUBO, PushConstants};
+use crate::vertex::*;
 use self::error::*;
 use self::resource::*;
 
@@ -54,7 +54,6 @@ pub struct InitializationDrawContext<'a, F, C>
 pub struct DrawContext<'a> {
     pub device: Arc<Device>,
     pub queue_family: QueueFamily<'a>,
-    // pub combined_pipeline: Arc<GraphicsPipelineAbstract + Sync + Send>,
     pub pipeline_gltf_opaque: Arc<GraphicsPipelineAbstract + Sync + Send>,
     pub pipeline_gltf_mask: Arc<GraphicsPipelineAbstract + Sync + Send>,
     pub pipeline_gltf_blend_preprocess: Arc<GraphicsPipelineAbstract + Sync + Send>,
@@ -62,16 +61,8 @@ pub struct DrawContext<'a> {
     pub dynamic: &'a DynamicState,
     pub main_descriptor_set: Arc<DescriptorSet + Send + Sync>,
     pub descriptor_set_blend: Arc<DescriptorSet + Send + Sync>,
-    // pub main_descriptor_set: Arc<PersistentDescriptorSet<Arc<dyn GraphicsPipelineAbstract + Sync + Send>, (((), PersistentDescriptorSetBuf<Arc<DeviceLocalBuffer<SceneUBO>>>), PersistentDescriptorSetImg<Arc<vulkano::image::AttachmentImage>>)>>,
-    // pub main_descriptor_set: Arc<PersistentDescriptorSet<Arc<dyn GraphicsPipelineAbstract + Sync + Send>, ((((), PersistentDescriptorSetBuf<Arc<DeviceLocalBuffer<SceneUBO>>>), PersistentDescriptorSetImg<Arc<AttachmentImage>>), PersistentDescriptorSetImg<Arc<AttachmentImage>>)>>,
     pub helper_resources: HelperResources,
 }
-
-// struct FormatConversionIterator<I, O> {
-//     data: Vec<u8>,
-//     input_chunk_len: usize,
-//     conversion_fn: Box<dyn for<'a> Fn(&'a I) -> O>
-// }
 
 #[derive(Clone)]
 pub struct HelperResources {
@@ -102,7 +93,11 @@ impl HelperResources {
             queue_families.clone(),
         )?;
 
-        let zero_buffer_len = (1 << 15) * 2; // FIXME: Figure out a way to dynamically resize the zero buffer
+        // FIXME: Figure out a way to dynamically resize the zero buffer
+        // Currently, the count of all possible indices (u16) times the largest vertex attribute (vec4)
+        // TODO: Investigate whether it would be possible to use 0 stride and reduce the size of
+        // this buffer to just the size of one item (vec4)
+        let zero_buffer_len = (1 << 16) * (4 * 4); 
         let (zero_device_buffer, zero_buffer_initialization) = unsafe {
             ImmutableBuffer::raw(
                 device.clone(),
@@ -190,11 +185,6 @@ pub struct Model {
     // Note: Do not ever try to express the descriptor set explicitly.
     node_descriptor_sets: Vec<Arc<dyn DescriptorSet + Send + Sync>>,
     material_descriptor_sets: Vec<Arc<dyn DescriptorSet + Send + Sync>>,
-}
-
-enum ColorSpace {
-    Srgb,
-    Linear,
 }
 
 impl Model {
@@ -387,8 +377,11 @@ impl Model {
         let positions_accessor = primitive.get(&Semantic::Positions).unwrap();
         let normals_accessor = primitive.get(&Semantic::Normals).expect("Normals must be provided by the glTF model for now.");
         let tangents_accessor = primitive.get(&Semantic::Tangents);
+        // TODO: There may be multiple tex coord buffers per primitive
         let tex_coords_accessor = primitive.get(&Semantic::TexCoords(0));
         let indices_accessor = primitive.indices();
+        // TODO: There may be multiple color buffers per primitive
+        let vertex_color_accessor = primitive.get(&Semantic::Colors(0));
 
         let position_slice: BufferSlice<[GltfVertexPosition], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>
             = self.get_semantic_buffer_view(&positions_accessor);
@@ -408,6 +401,7 @@ impl Model {
             unsafe { tangent_slice.reinterpret::<[GltfVertexTangent]>() }
         };
 
+        // FIXME: use get_semantic_buffer_view
         let tex_coord_slice: BufferSlice<[GltfVertexTexCoord], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = {
             let tex_coord_slice: BufferSlice<[u8], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = tex_coords_accessor.map(|tex_coords_accessor| {
                 let buffer_view = tex_coords_accessor.view();
@@ -429,12 +423,28 @@ impl Model {
             unsafe { tex_coord_slice.reinterpret::<[GltfVertexTexCoord]>() }
         };
 
+        let vertex_color_slice: BufferSlice<[GltfVertexColor], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = {
+            if let &Some(ref vertex_color_accessor) = &vertex_color_accessor {
+                self.get_semantic_buffer_view(vertex_color_accessor)
+            } else {
+                let zero_buffer = context.helper_resources.zero_buffer.clone();
+                let zero_buffer_slice = BufferSlice::from_typed_buffer_access(zero_buffer);
+
+                unsafe { zero_buffer_slice.reinterpret::<[GltfVertexColor]>() }
+            }
+        };
+
         let vertex_buffers = GltfVertexBuffers {
             position_buffer: Some(Arc::new(position_slice)),
             normal_buffer: Some(Arc::new(normal_slice)),
             tangent_buffer: Some(Arc::new(tangent_slice)),
             tex_coord_buffer: Some(Arc::new(tex_coord_slice)),
+            vertex_color_buffer: Some(Arc::new(vertex_color_slice)),
         };
+
+        let push_constants = PushConstants::new(
+            vertex_color_accessor.is_some(),
+        );
 
         if let Some(indices_accessor) = indices_accessor {
             macro_rules! draw_indexed {
@@ -465,7 +475,7 @@ impl Model {
                         $vertex_buffers.get_individual_buffers(),
                         index_slice,
                         $sets.clone(),
-                        () /* push_constants */).unwrap();
+                        push_constants).unwrap();
                 }
             }
 
@@ -482,7 +492,7 @@ impl Model {
                         vertex_buffers.get_individual_buffers(),
                         index_buffer,
                         sets.clone(),
-                        () /* push_constants */).unwrap();
+                        push_constants).unwrap();
                 },
                 DataType::U16 => {
                     draw_indexed!(u16; command_buffer, context, vertex_buffers, indices_accessor, sets);
@@ -501,7 +511,7 @@ impl Model {
                 context.dynamic,
                 vertex_buffers.get_individual_buffers(),
                 sets.clone(),
-                () /* push_constants */).unwrap();
+                push_constants).unwrap();
         }
 
         command_buffer

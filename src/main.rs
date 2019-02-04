@@ -1,5 +1,5 @@
 //! TODO:
-//! * Single-sided/Double-sided textures
+//! * Invert normals for the back face of double-sided materials
 //! * Vertex attribute interleaving
 
 #![feature(duration_as_u128)]
@@ -21,27 +21,25 @@ extern crate gltf;
 extern crate byteorder;
 extern crate rayon;
 extern crate generic_array;
+extern crate arrayvec;
 extern crate boolinator;
 extern crate mikktspace;
 extern crate safe_transmute;
 
 #[macro_use]
 pub mod math;
-pub mod model;
 pub mod iter;
+pub mod shaders;
 pub mod vertex;
-pub mod camera;
 pub mod sampler;
+pub mod pipeline;
+pub mod camera;
+pub mod model;
 
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 use vulkano::descriptor::descriptor_set::DescriptorSet;
-use vulkano::framebuffer::RenderPassAbstract;
-use vulkano::pipeline::blend::AttachmentBlend;
-use vulkano::pipeline::blend::BlendFactor;
-use vulkano::pipeline::blend::BlendOp;
-use vulkano::pipeline::GraphicsPipelineAbstract;
 use vulkano::instance::RawInstanceExtensions;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
@@ -51,16 +49,9 @@ use vulkano::sync::{FlushError, GpuFuture};
 use vulkano::format::Format;
 use vulkano::image::{AttachmentImage, ImageUsage};
 use vulkano::image::swapchain::SwapchainImage;
-use vulkano::framebuffer::{Framebuffer, Subpass};
-use vulkano::pipeline::GraphicsPipeline;
+use vulkano::framebuffer::{Framebuffer};
 use vulkano::pipeline::viewport::Viewport;
-use vulkano::pipeline::depth_stencil::DepthStencil;
-use vulkano::pipeline::depth_stencil::Compare;
-use vulkano::pipeline::depth_stencil::DepthBounds;
-use vulkano::descriptor::PipelineLayoutAbstract;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
-use vulkano::descriptor::descriptor_set::PersistentDescriptorSetImg;
-use vulkano::descriptor::descriptor_set::PersistentDescriptorSetBuf;
 use vulkano::swapchain::{self, PresentMode, SurfaceTransform, Swapchain, AcquireError, SwapchainCreationError, Surface};
 use vulkano_win::VkSurfaceBuild;
 use winit::{ElementState, MouseButton, Event, WindowEvent, KeyboardInput, VirtualKeyCode, EventsLoop, WindowBuilder, Window};
@@ -71,152 +62,10 @@ use crate::model::DrawContext;
 use crate::model::InitializationDrawContext;
 use crate::model::HelperResources;
 use crate::model::resource::UninitializedResource;
-use crate::vertex::GltfVertexBufferDefinition;
 use crate::camera::*;
+use crate::pipeline::GraphicsPipelineSets;
 
-pub use crate::gltf_opaque_frag::ty::*;
-
-pub type MainDescriptorSet = Arc<PersistentDescriptorSet<Arc<GraphicsPipeline<GltfVertexBufferDefinition, Box<dyn PipelineLayoutAbstract + Sync + Send>, Arc<RenderPassAbstract + Send + Sync>>>, ((((), PersistentDescriptorSetBuf<Arc<DeviceLocalBuffer<SceneUBO>>>), PersistentDescriptorSetImg<Arc<AttachmentImage>>), vulkano::descriptor::descriptor_set::PersistentDescriptorSetSampler)>>;
-
-#[derive(Copy, Clone)]
-pub struct Position {
-    position: [f32; 3],
-    tex_coord: [f32; 2],
-}
-
-impl_vertex!(Position, position, tex_coord);
-
-#[derive(Copy, Clone)]
-pub struct MainVertex {
-    position: [f32; 3],
-    tex_coord: [f32; 2],
-}
-
-impl_vertex!(MainVertex, position, tex_coord);
-
-#[derive(Copy, Clone)]
-struct ScreenVertex {
-    position: [f32; 3],
-}
-
-impl_vertex!(ScreenVertex, position);
-
-mod gltf_vert {
-    vulkano_shaders::shader! {
-        ty: "vertex",
-        path: "src/shaders/gltf.vert",
-    }
-}
-
-mod gltf_opaque_frag {
-    vulkano_shaders::shader! {
-        ty: "fragment",
-        path: "src/shaders/gltf_opaque.frag",
-    }
-}
-
-mod gltf_mask_frag {
-    vulkano_shaders::shader! {
-        ty: "fragment",
-        path: "src/shaders/gltf_mask.frag",
-    }
-}
-
-mod gltf_blend_preprocess_frag {
-    vulkano_shaders::shader! {
-        ty: "fragment",
-        path: "src/shaders/gltf_blend_preprocess.frag",
-    }
-}
-
-mod gltf_blend_finalize_frag {
-    vulkano_shaders::shader! {
-        ty: "fragment",
-        path: "src/shaders/gltf_blend_finalize.frag",
-    }
-}
-
-impl SceneUBO {
-    pub fn new(time_elapsed: f32, dimensions: Vec2, camera_position: Vec3, model: Mat4, view: Mat4, projection: Mat4) -> SceneUBO {
-        SceneUBO {
-            time_elapsed,
-            dimensions: dimensions.0,
-            camera_position: camera_position.0,
-            model: model.0,
-            view: view.0,
-            projection: projection.0,
-            _dummy0: Default::default(),
-            _dummy1: Default::default(),
-        }
-    }
-}
-
-impl NodeUBO {
-    pub fn new(matrix: Mat4) -> NodeUBO {
-        NodeUBO {
-            matrix: matrix.0,
-        }
-    }
-}
-
-impl MaterialUBO {
-    pub fn new(
-        alpha_cutoff: f32,
-        base_color_texture_provided: bool,
-        base_color_factor: Vec4,
-        metallic_roughness_texture_provided: bool,
-        metallic_roughness_factor: Vec2,
-        normal_texture_provided: bool,
-        normal_texture_scale: f32,
-        occlusion_texture_provided: bool,
-        occlusion_strength: f32,
-        emissive_texture_provided: bool,
-        emissive_factor: Vec3,
-    ) -> Self {
-        MaterialUBO {
-            alpha_cutoff,
-            base_color_texture_provided: base_color_texture_provided as u32,
-            base_color_factor: base_color_factor.0,
-            metallic_roughness_texture_provided: metallic_roughness_texture_provided as u32,
-            metallic_roughness_factor: metallic_roughness_factor.0,
-            normal_texture_provided: normal_texture_provided as u32,
-            normal_texture_scale,
-            occlusion_texture_provided: occlusion_texture_provided as u32,
-            occlusion_strength,
-            emissive_texture_provided: emissive_texture_provided as u32,
-            emissive_factor: emissive_factor.0,
-            _dummy0: Default::default(),
-            _dummy1: Default::default(),
-            _dummy2: Default::default(),
-        }
-    }
-}
-
-impl Default for MaterialUBO {
-    fn default() -> Self {
-        Self::new(
-            0.5,
-            false,
-            [1.0, 1.0, 1.0, 1.0].into(),
-            false,
-            [1.0, 1.0].into(),
-            false,
-            1.0,
-            false,
-            1.0,
-            false,
-            [0.0, 0.0, 0.0].into(),
-        )
-    }
-}
-
-impl PushConstants {
-    pub fn new(vertex_color_provided: bool) -> Self {
-        Self {
-            vertex_color_provided: vertex_color_provided as u32,
-        }
-    }
-}
+pub use crate::shaders::gltf_opaque_frag::ty::*;
 
 fn swapchain_format_priority(format: &Format) -> u32 {
     match *format {
@@ -336,210 +185,6 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
 //     // TODO: Querying available formats is not implemented (exposed) in vulkano.
 //     unimplemented!()
 // }
-
-fn create_render_pass(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Arc<RenderPassAbstract + Send + Sync> {
-    Arc::new(ordered_passes_renderpass! {
-        device.clone(),
-        attachments: {
-            color: {
-                load: Clear,
-                store: Store,
-                format: swapchain.format(),
-                samples: 1,
-                initial_layout: ImageLayout::Undefined,
-                final_layout: ImageLayout::ColorAttachmentOptimal,
-            },
-            depth_stencil: {
-                load: Clear,
-                store: DontCare,
-                format: Format::D32Sfloat,
-                samples: 1,
-                initial_layout: ImageLayout::Undefined,
-                final_layout: ImageLayout::DepthStencilAttachmentOptimal,
-            },
-            transparency_accumulation: {
-                load: Clear,
-                store: DontCare,
-                format: Format::R32G32B32A32Sfloat,
-                samples: 1,
-                // initial_layout: ImageLayout::Undefined,
-                // final_layout: ImageLayout::General,
-            },
-            transparency_revealage: {
-                load: Clear,
-                store: DontCare,
-                format: Format::R32G32B32A32Sfloat, //FIXME
-                samples: 1,
-                // initial_layout: ImageLayout::Undefined,
-                // final_layout: ImageLayout::General,
-            }
-        },
-        passes: [
-            {
-                color: [color],
-                depth_stencil: { depth_stencil },
-                input: []
-                // $(resolve: [$($resolve_atch:ident),*])*$(,)*
-            },
-            {
-                color: [color],
-                depth_stencil: { depth_stencil },
-                input: []
-            },
-            {
-                color: [transparency_accumulation, transparency_revealage],
-                depth_stencil: { depth_stencil },
-                input: []
-            },
-            {
-                color: [color],
-                depth_stencil: { depth_stencil },
-                input: [transparency_accumulation, transparency_revealage]
-            }
-        ]
-    }.expect("Could not create a render pass."))
-}
-
-fn create_pipeline_gltf_opaque(
-    device: &Arc<Device>,
-    _swapchain: &Arc<Swapchain<Window>>,
-    render_pass: &Arc<RenderPassAbstract + Send + Sync>,
-    shared_vs: &gltf_vert::Shader
-) -> Arc<GraphicsPipelineAbstract + Send + Sync> {
-    let fs = gltf_opaque_frag::Shader::load(device.clone()).expect("Failed to create shader module.");
-
-    Arc::new(GraphicsPipeline::start()
-        // .with_pipeline_layout(device.clone(), pipeline_layout)
-        // Specifies the vertex type
-        .vertex_input(GltfVertexBufferDefinition)
-        // .vertex_input_single_buffer::<Position>()
-        .vertex_shader(shared_vs.main_entry_point(), ())
-        // Configures the builder so that we use one viewport, and that the state of this viewport
-        // is dynamic. This makes it possible to change the viewport for each draw command. If the
-        // viewport state wasn't dynamic, then we would have to create a new pipeline object if we
-        // wanted to draw to another image of a different size.
-        //
-        // Note: If you configure multiple viewports, you can use geometry shaders to choose which
-        // viewport the shape is going to be drawn to. This topic isn't covered here.
-        .viewports_dynamic_scissors_irrelevant(1)
-        .depth_stencil(DepthStencil::simple_depth_test())
-        .fragment_shader(fs.main_entry_point(), ())
-        .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
-        .build(device.clone())
-        .unwrap())
-}
-
-fn create_pipeline_gltf_mask(
-    device: &Arc<Device>,
-    _swapchain: &Arc<Swapchain<Window>>,
-    render_pass: &Arc<RenderPassAbstract + Send + Sync>,
-    shared_vs: &gltf_vert::Shader
-) -> Arc<GraphicsPipelineAbstract + Send + Sync> {
-    let fs = gltf_mask_frag::Shader::load(device.clone()).expect("Failed to create shader module.");
-
-    Arc::new(GraphicsPipeline::start()
-        .vertex_input(GltfVertexBufferDefinition)
-        .vertex_shader(shared_vs.main_entry_point(), ())
-        .viewports_dynamic_scissors_irrelevant(1)
-        .depth_stencil(DepthStencil::simple_depth_test())
-        .fragment_shader(fs.main_entry_point(), ())
-        .render_pass(Subpass::from(render_pass.clone(), 1).unwrap())
-        .build(device.clone())
-        .unwrap())
-}
-
-fn create_pipeline_gltf_blend_preprocess(
-    device: &Arc<Device>,
-    _swapchain: &Arc<Swapchain<Window>>,
-    render_pass: &Arc<RenderPassAbstract + Send + Sync>,
-    shared_vs: &gltf_vert::Shader
-) -> Arc<GraphicsPipelineAbstract + Send + Sync> {
-    let fs = gltf_blend_preprocess_frag::Shader::load(device.clone()).expect("Failed to create shader module.");
-
-    Arc::new(GraphicsPipeline::start()
-        .vertex_input(GltfVertexBufferDefinition)
-        .vertex_shader(shared_vs.main_entry_point(), ())
-        .viewports_dynamic_scissors_irrelevant(1)
-        .depth_stencil(DepthStencil {
-            depth_compare: Compare::Less,
-            depth_write: false,
-            depth_bounds_test: DepthBounds::Disabled,
-            stencil_front: Default::default(),
-            stencil_back: Default::default(),
-        })
-        .fragment_shader(fs.main_entry_point(), ())
-        .blend_individual([
-            AttachmentBlend {
-                enabled: true,
-                color_op: BlendOp::Add,
-                color_source: BlendFactor::One,
-                color_destination: BlendFactor::One,
-                alpha_op: BlendOp::Add,
-                alpha_source: BlendFactor::One,
-                alpha_destination: BlendFactor::One,
-                mask_red: true,
-                mask_green: true,
-                mask_blue: true,
-                mask_alpha: true,
-            },
-            AttachmentBlend {
-                enabled: true,
-                color_op: BlendOp::Add,
-                color_source: BlendFactor::Zero,
-                color_destination: BlendFactor::OneMinusSrcAlpha,
-                alpha_op: BlendOp::Add,
-                alpha_source: BlendFactor::Zero,
-                alpha_destination: BlendFactor::OneMinusSrcAlpha,
-                mask_red: true,
-                mask_green: true,
-                mask_blue: true,
-                mask_alpha: true,
-            },
-        ].into_iter().cloned())
-        .render_pass(Subpass::from(render_pass.clone(), 2).unwrap())
-        .build(device.clone())
-        .unwrap())
-}
-
-fn create_pipeline_gltf_blend_finalize(
-    device: &Arc<Device>,
-    _swapchain: &Arc<Swapchain<Window>>,
-    render_pass: &Arc<RenderPassAbstract + Send + Sync>,
-    shared_vs: &gltf_vert::Shader
-) -> Arc<GraphicsPipelineAbstract + Send + Sync> {
-    let fs = gltf_blend_finalize_frag::Shader::load(device.clone()).expect("Failed to create shader module.");
-
-    Arc::new(GraphicsPipeline::start()
-        .vertex_input(GltfVertexBufferDefinition)
-        .vertex_shader(shared_vs.main_entry_point(), ())
-        .viewports_dynamic_scissors_irrelevant(1)
-        .depth_stencil(DepthStencil {
-            depth_compare: Compare::Less,
-            depth_write: false,
-            depth_bounds_test: DepthBounds::Disabled,
-            stencil_front: Default::default(),
-            stencil_back: Default::default(),
-        })
-        .fragment_shader(fs.main_entry_point(), ())
-        .blend_individual([
-            AttachmentBlend {
-                enabled: true,
-                color_op: BlendOp::Add,
-                color_source: BlendFactor::OneMinusSrcAlpha,
-                color_destination: BlendFactor::SrcAlpha,
-                alpha_op: BlendOp::Add,
-                alpha_source: BlendFactor::OneMinusSrcAlpha,
-                alpha_destination: BlendFactor::SrcAlpha,
-                mask_red: true,
-                mask_green: true,
-                mask_blue: true,
-                mask_alpha: true,
-            },
-        ].into_iter().cloned())
-        .render_pass(Subpass::from(render_pass.clone(), 3).unwrap())
-        .build(device.clone())
-        .unwrap())
-}
 
 fn create_staging_buffers_data<T>(device: &Arc<Device>, queue_family: QueueFamily, usage: BufferUsage, data: T)
     -> (Arc<CpuAccessibleBuffer<T>>, Arc<DeviceLocalBuffer<T>>)
@@ -665,16 +310,7 @@ fn main() {
     //     screen_indices.into_iter().cloned(),
     // );
 
-    let vertex_shader = gltf_vert::Shader::load(device.clone()).expect("Failed to create shader module.");
-    let render_pass = create_render_pass(&device, &swapchain);
-    let pipeline_gltf_opaque = create_pipeline_gltf_opaque(&device, &swapchain, &render_pass, &vertex_shader);
-    let pipeline_gltf_mask = create_pipeline_gltf_mask(&device, &swapchain, &render_pass, &vertex_shader);
-    let pipeline_gltf_blend_preprocess = create_pipeline_gltf_blend_preprocess(&device, &swapchain, &render_pass, &vertex_shader);
-    let pipeline_gltf_blend_finalize = create_pipeline_gltf_blend_finalize(&device, &swapchain, &render_pass, &vertex_shader);
-    // let combined_pipeline = combine_graphics_pipelines!(
-    //     &device,
-    //     [pipeline_gltf_opaque.clone(), pipeline_gltf_mask.clone()]
-    // );
+    let (pipeline_sets, render_pass) = GraphicsPipelineSets::create(&device, &swapchain);
 
     let mut main_ubo = SceneUBO::new(
         0.0,
@@ -719,7 +355,7 @@ fn main() {
     //     1.0,  // max_lod
     // ).unwrap();
     let main_descriptor_set_gltf_opaque = Arc::new(
-        PersistentDescriptorSet::start(pipeline_gltf_opaque.clone(), 0)
+        PersistentDescriptorSet::start(pipeline_sets.opaque.0[0].clone(), 0) // FIXME: Use a layout instead
             .add_buffer(main_ubo_device_buffer.clone()).unwrap()
             .build().unwrap()
     );
@@ -755,7 +391,7 @@ fn main() {
     let (init_command_buffer_builder, helper_resources) = HelperResources::new(
         &device,
         [queue_family].into_iter().cloned(),
-        pipeline_gltf_opaque.clone(), //FIXME: Replace with a pipeline layout
+        pipeline_sets.opaque.0[0].clone(), //FIXME: Replace with a pipeline layout
     ).unwrap().initialize_resource(
         &device,
         queue_family.clone(),
@@ -769,7 +405,7 @@ fn main() {
         Model::import(
             &device,
             [queue_family].into_iter().cloned(),
-            pipeline_gltf_opaque.clone(), //FIXME: Replace with a pipeline layout
+            pipeline_sets.opaque.0[0].clone(), //FIXME: Replace with a pipeline layout
             &helper_resources,
             model_path,
         ).unwrap().initialize_resource(
@@ -880,7 +516,7 @@ fn main() {
                 }
             ).unwrap());
             descriptor_set_gltf_blend = Some(Arc::new(
-                PersistentDescriptorSet::start(pipeline_gltf_blend_finalize.clone(), 3)
+                PersistentDescriptorSet::start(pipeline_sets.blend_finalize.0[0].clone(), 3) // FIXME: Use a layout instead
                     .add_image(blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
                     .add_image(blend_revealage_image.as_ref().unwrap().clone()).unwrap()
                     .build().unwrap()
@@ -976,11 +612,7 @@ fn main() {
                 draw_context: DrawContext {
                     device: device.clone(),
                     queue_family,
-                    // combined_pipeline: combined_pipeline.clone(),
-                    pipeline_gltf_opaque: pipeline_gltf_opaque.clone(),
-                    pipeline_gltf_mask: pipeline_gltf_mask.clone(),
-                    pipeline_gltf_blend_preprocess: pipeline_gltf_blend_preprocess.clone(),
-                    pipeline_gltf_blend_finalize: pipeline_gltf_blend_finalize.clone(),
+                    pipeline_sets: pipeline_sets.clone(),
                     dynamic: &dynamic_state,
                     main_descriptor_set: main_descriptor_set_gltf_opaque.clone(),
                     descriptor_set_blend: descriptor_set_gltf_blend.as_ref().unwrap().clone(),

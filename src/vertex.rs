@@ -12,7 +12,7 @@ use vulkano::pipeline::shader::ShaderInterfaceDef;
 use typenum::*;
 use safe_transmute::PodTransmutable;
 use crate::iter::ArrayIterator;
-use crate::gltf_vert::MainInput;
+use crate::shaders::gltf_vert::MainInput;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -64,6 +64,7 @@ macro_rules! impl_buffers {
             }
         }
 
+        #[derive(Clone)]
         pub struct GltfVertexBufferDefinition;
 
         unsafe impl<$($($buffer_type_name)+,)+> VertexSource<GltfVertexBuffers<$($($buffer_type_name)+,)+>> for GltfVertexBufferDefinition

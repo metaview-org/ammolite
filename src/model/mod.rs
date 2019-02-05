@@ -38,7 +38,8 @@ use failure::Error;
 use safe_transmute::PodTransmutable;
 use crate::shaders::{MaterialUBO, PushConstants};
 use crate::vertex::*;
-use crate::pipeline::GraphicsPipelineSets;
+use crate::pipeline::GraphicsPipelineProperties;
+use crate::pipeline::GraphicsPipelineSetCache;
 use crate::pipeline::GraphicsPipelineFlag;
 use crate::pipeline::GraphicsPipelineFlags;
 use self::error::*;
@@ -57,7 +58,7 @@ pub struct InitializationDrawContext<'a, F, C>
 pub struct DrawContext<'a> {
     pub device: Arc<Device>,
     pub queue_family: QueueFamily<'a>,
-    pub pipeline_sets: GraphicsPipelineSets,
+    pub pipeline_cache: Arc<GraphicsPipelineSetCache>,
     pub dynamic: &'a DynamicState,
     pub main_descriptor_set: Arc<DescriptorSet + Send + Sync>,
     pub descriptor_set_blend: Arc<DescriptorSet + Send + Sync>,
@@ -304,21 +305,16 @@ impl Model {
                 let material = primitive.material();
 
                 if material.alpha_mode() == alpha_mode {
-                    let pipeline_set = match (alpha_mode, subpass) {
-                        (AlphaMode::Opaque, _) => &context.pipeline_sets.opaque,
-                        (AlphaMode::Mask, _) => &context.pipeline_sets.mask,
-                        (AlphaMode::Blend, 2) => &context.pipeline_sets.blend_preprocess,
-                        (AlphaMode::Blend, 3) => &context.pipeline_sets.blend_finalize,
+                    let properties = GraphicsPipelineProperties::from(&primitive, &material);
+                    let pipeline_set = context.pipeline_cache.get_or_create_pipeline(&properties);
+                    let pipeline = match (alpha_mode, subpass) {
+                        (AlphaMode::Opaque, _) => &pipeline_set.opaque,
+                        (AlphaMode::Mask, _) => &pipeline_set.mask,
+                        (AlphaMode::Blend, 2) => &pipeline_set.blend_preprocess,
+                        (AlphaMode::Blend, 3) => &pipeline_set.blend_finalize,
                         _ => panic!("Invalid alpha_mode/subpass combination."),
                     };
 
-                    let mut graphics_pipeline_flags = GraphicsPipelineFlags::default();
-
-                    if material.double_sided() {
-                        graphics_pipeline_flags |= GraphicsPipelineFlag::DoubleSided;
-                    }
-
-                    let pipeline = pipeline_set.get_pipeline(graphics_pipeline_flags);
                     let material_descriptor_set = material.index().map(|material_index| {
                         self.material_descriptor_sets[material_index].clone()
                     }).unwrap_or_else(|| {

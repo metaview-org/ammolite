@@ -11,6 +11,8 @@ use vulkano::pipeline::vertex::AttributeInfo;
 use vulkano::pipeline::shader::ShaderInterfaceDef;
 use typenum::*;
 use safe_transmute::PodTransmutable;
+use gltf::mesh::Semantic;
+use gltf::mesh::Primitive;
 use crate::iter::ArrayIterator;
 use crate::shaders::gltf_vert::MainInput;
 
@@ -39,11 +41,51 @@ unsafe impl PodTransmutable for GltfVertexTexCoord {}
 pub struct GltfVertexColor(pub [f32; 4]);
 unsafe impl PodTransmutable for GltfVertexColor {}
 
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub struct VertexAttributeProperties {
+    pub stride: usize,
+}
+
 macro_rules! impl_buffers {
     {
         $field_len:expr, $field_len_ty:ty;
-        $([$field_name:ident: $($buffer_type_name:tt)+] of [$attribute_name:ident: $($attribute_type:tt)+]),+,
+        $([$field_name:ident: $($buffer_type_name:tt)+] of [$attribute_name:ident: $($attribute_type:tt)+], stride: $stride:expr, semantic: $semantic:expr);+$(;)?
     } => {
+        #[derive(Debug, Clone, Eq, PartialEq, Hash)]
+        pub struct VertexAttributePropertiesSet {
+            $(pub $attribute_name: VertexAttributeProperties),*
+        }
+
+        impl<'a, 'b> From<&'b Primitive<'a>> for VertexAttributePropertiesSet {
+            fn from(primitive: &'b Primitive<'a>) -> Self {
+                let mut result = VertexAttributePropertiesSet::default();
+
+                $(
+                    if let Some(accessor) = primitive.get(&$semantic) {
+                        if let Some(stride) = accessor.view().stride() {
+                            result.$attribute_name.stride = stride;
+                        }
+                    } else {
+                        result.$attribute_name.stride = 0;
+                    }
+                )+
+
+                result
+            }
+        }
+
+        impl Default for VertexAttributePropertiesSet {
+            fn default() -> Self {
+                VertexAttributePropertiesSet {
+                    $(
+                        $attribute_name: VertexAttributeProperties {
+                            stride: $stride,
+                        }
+                    ),+
+                }
+            }
+        }
+
         pub struct GltfVertexBuffers<$($($buffer_type_name),+),+>
                 where $($($buffer_type_name)+: TypedBufferAccess<Content=[$($attribute_type)+]> + Send + Sync + 'static,)+ {
             $(pub $field_name: Option<Arc<$($buffer_type_name)+>>,)+
@@ -65,7 +107,15 @@ macro_rules! impl_buffers {
         }
 
         #[derive(Clone)]
-        pub struct GltfVertexBufferDefinition;
+        pub struct GltfVertexBufferDefinition {
+            pub properties_set: VertexAttributePropertiesSet,
+        }
+
+        impl GltfVertexBufferDefinition {
+            pub fn new(properties_set: VertexAttributePropertiesSet) -> Self {
+                Self { properties_set }
+            }
+        }
 
         unsafe impl<$($($buffer_type_name)+,)+> VertexSource<GltfVertexBuffers<$($($buffer_type_name)+,)+>> for GltfVertexBufferDefinition
                 where $($($buffer_type_name)+: TypedBufferAccess<Content=[$($attribute_type)+]> + Send + Sync + 'static,)+ {
@@ -142,7 +192,8 @@ macro_rules! impl_buffers {
                 // }
 
                 let attribute_names = [$(stringify!($attribute_name)),+];
-                let attribute_type_sizes = [$(mem::size_of::<$($attribute_type)+>()),+];
+                // let attribute_type_sizes = [$(mem::size_of::<$($attribute_type)+>()),+];
+                let attribute_properties = [$(&self.properties_set.$attribute_name),+];
 
                 debug_assert_eq!(
                     interface.elements().len(),
@@ -161,7 +212,8 @@ macro_rules! impl_buffers {
 
                     buffers[field_index] = (
                         field_index as u32,
-                        attribute_type_sizes[field_index],
+                        // attribute_type_sizes[field_index],
+                        attribute_properties[field_index].stride,
                         InputRate::Vertex
                     );
                     attribs[field_index] = (
@@ -183,9 +235,9 @@ macro_rules! impl_buffers {
 impl_buffers! {
     5, U5;
 
-    [position_buffer: PositionBuffer] of [position: GltfVertexPosition],
-    [normal_buffer: NormalBuffer] of [normal: GltfVertexNormal],
-    [tangent_buffer: TangentBuffer] of [tangent: GltfVertexTangent],
-    [tex_coord_buffer: TexCoordBuffer] of [tex_coord: GltfVertexTexCoord],
-    [vertex_color_buffer: VertexColorBuffer] of [vertex_color: GltfVertexColor],
+    [position_buffer: PositionBuffer] of [position: GltfVertexPosition], stride: 4 * 3, semantic: Semantic::Positions;
+    [normal_buffer: NormalBuffer] of [normal: GltfVertexNormal], stride: 4 * 3, semantic: Semantic::Normals;
+    [tangent_buffer: TangentBuffer] of [tangent: GltfVertexTangent], stride: 4 * 4, semantic: Semantic::Tangents;
+    [tex_coord_buffer: TexCoordBuffer] of [tex_coord: GltfVertexTexCoord], stride: 4 * 2, semantic: Semantic::TexCoords(0); //TODO
+    [vertex_color_buffer: VertexColorBuffer] of [vertex_color: GltfVertexColor], stride: 4 * 4, semantic: Semantic::Colors(0); //TODO
 }

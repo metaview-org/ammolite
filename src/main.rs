@@ -1,5 +1,6 @@
 //! TODO:
-//! * Vertex attribute interleaving
+//! * Animations
+//! * Morph primitives
 
 #![feature(core_intrinsics)]
 #![feature(duration_float)]
@@ -61,7 +62,7 @@ use crate::model::InitializationDrawContext;
 use crate::model::HelperResources;
 use crate::model::resource::UninitializedResource;
 use crate::camera::*;
-use crate::pipeline::GraphicsPipelineSets;
+use crate::pipeline::{GraphicsPipelineSet, GraphicsPipelineSetCache};
 
 pub use crate::shaders::gltf_opaque_frag::ty::*;
 
@@ -308,7 +309,7 @@ fn main() {
     //     screen_indices.into_iter().cloned(),
     // );
 
-    let (pipeline_sets, render_pass) = GraphicsPipelineSets::create(&device, &swapchain);
+    let pipeline_cache = Arc::new(GraphicsPipelineSetCache::create(&device, &swapchain));
 
     let mut main_ubo = SceneUBO::new(
         0.0,
@@ -353,7 +354,8 @@ fn main() {
     //     1.0,  // max_lod
     // ).unwrap();
     let main_descriptor_set_gltf_opaque = Arc::new(
-        PersistentDescriptorSet::start(pipeline_sets.opaque.0[0].clone(), 0) // FIXME: Use a layout instead
+        // FIXME: Use a layout instead
+        PersistentDescriptorSet::start(pipeline_cache.get_default_pipeline().unwrap().opaque.clone(), 0)
             .add_buffer(main_ubo_device_buffer.clone()).unwrap()
             .build().unwrap()
     );
@@ -389,7 +391,8 @@ fn main() {
     let (init_command_buffer_builder, helper_resources) = HelperResources::new(
         &device,
         [queue_family].into_iter().cloned(),
-        pipeline_sets.opaque.0[0].clone(), //FIXME: Replace with a pipeline layout
+        // FIXME: Replace with a pipeline layout
+        pipeline_cache.get_default_pipeline().unwrap().opaque.clone(),
     ).unwrap().initialize_resource(
         &device,
         queue_family.clone(),
@@ -403,7 +406,8 @@ fn main() {
         Model::import(
             &device,
             [queue_family].into_iter().cloned(),
-            pipeline_sets.opaque.0[0].clone(), //FIXME: Replace with a pipeline layout
+            // FIXME: Replace with a pipeline layout
+            pipeline_cache.get_default_pipeline().unwrap().opaque.clone(),
             &helper_resources,
             model_path,
         ).unwrap().initialize_resource(
@@ -514,14 +518,14 @@ fn main() {
                 }
             ).unwrap());
             descriptor_set_gltf_blend = Some(Arc::new(
-                PersistentDescriptorSet::start(pipeline_sets.blend_finalize.0[0].clone(), 3) // FIXME: Use a layout instead
+                // FIXME: Use a layout instead
+                PersistentDescriptorSet::start(pipeline_cache.get_default_pipeline().unwrap().blend_finalize.clone(), 3)
                     .add_image(blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
                     .add_image(blend_revealage_image.as_ref().unwrap().clone()).unwrap()
                     .build().unwrap()
             ));
             main_framebuffers = Some(images.iter().map(|image| {
-                // FIXME: Don't use a render pass explicitly
-                Arc::new(Framebuffer::start(render_pass.clone())
+                Arc::new(Framebuffer::start(pipeline_cache.render_pass.clone())
                          .add(image.clone()).unwrap()
                          .add(depth_image.as_ref().unwrap().clone()).unwrap()
                          .add(blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
@@ -610,7 +614,7 @@ fn main() {
                 draw_context: DrawContext {
                     device: device.clone(),
                     queue_family,
-                    pipeline_sets: pipeline_sets.clone(),
+                    pipeline_cache: pipeline_cache.clone(),
                     dynamic: &dynamic_state,
                     main_descriptor_set: main_descriptor_set_gltf_opaque.clone(),
                     descriptor_set_blend: descriptor_set_gltf_blend.as_ref().unwrap().clone(),

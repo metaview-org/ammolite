@@ -1,5 +1,6 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::ops::{BitOr, BitOrAssign, Not};
+use std::collections::HashMap;
 use vulkano::framebuffer::RenderPassAbstract;
 use vulkano::pipeline::blend::AttachmentBlend;
 use vulkano::pipeline::blend::BlendFactor;
@@ -18,7 +19,9 @@ use vulkano::framebuffer::RenderPassSubpassInterface;
 use vulkano::swapchain::Swapchain;
 use arrayvec::ArrayVec;
 use winit::Window;
-use crate::vertex::GltfVertexBufferDefinition;
+use gltf::material::Material;
+use gltf::mesh::Primitive;
+use crate::vertex::{GltfVertexBufferDefinition, VertexAttributePropertiesSet};
 use crate::shaders::*;
 
 #[derive(PartialEq, Eq)]
@@ -30,8 +33,20 @@ pub enum GraphicsPipelineFlag {
 
 const GRAPHICS_PIPELINE_SET_LEN: usize = 1 << GraphicsPipelineFlag::Len as usize;
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Debug, Clone, Eq, PartialEq, Default, Hash)]
 pub struct GraphicsPipelineFlags(usize);
+
+impl<'a, 'b> From<&'b Material<'a>> for GraphicsPipelineFlags {
+    fn from(material: &'b Material<'a>) -> Self {
+        let mut result = GraphicsPipelineFlags::default();
+
+        if material.double_sided() {
+            result |= GraphicsPipelineFlag::DoubleSided;
+        }
+
+        result
+    }
+}
 
 impl BitOr for GraphicsPipelineFlags {
     type Output = Self;
@@ -77,122 +92,69 @@ impl Not for GraphicsPipelineFlags {
     }
 }
 
-#[derive(Clone)]
-pub struct GraphicsPipelineSet(pub ArrayVec<[
-    Arc<GraphicsPipelineAbstract + Send + Sync>;
-    GRAPHICS_PIPELINE_SET_LEN
-]>);
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Default)]
+pub struct GraphicsPipelineProperties {
+    flags: GraphicsPipelineFlags,
+    vertex_attribute_properties_set: VertexAttributePropertiesSet,
+}
 
-impl GraphicsPipelineSet {
-    fn from_graphics_pipeline_builder<Vdef, Vs, Vss, Tcs, Tcss, Tes, Tess, Gs, Gss, Fs, Fss, Rp>(
-        device: &Arc<Device>,
-        graphics_pipeline_builder: GraphicsPipelineBuilder<Vdef, Vs, Vss, Tcs, Tcss, Tes, Tess, Gs, Gss, Fs, Fss, Rp>,
-    ) -> GraphicsPipelineSet
-        where Vdef: VertexDefinition<Vs::InputDefinition> + 'static + Send + Sync + Clone,
-              Vs: GraphicsEntryPointAbstract + Clone,
-              Fs: GraphicsEntryPointAbstract + Clone,
-              Gs: GraphicsEntryPointAbstract + 'static + Clone,
-              Tcs: GraphicsEntryPointAbstract + 'static + Clone,
-              Tes: GraphicsEntryPointAbstract + 'static + Clone,
-              Vss: SpecializationConstants + 'static + Clone,
-              Tcss: SpecializationConstants + 'static + Clone,
-              Tess: SpecializationConstants + 'static + Clone,
-              Gss: SpecializationConstants + 'static + Clone,
-              Fss: SpecializationConstants + 'static + Clone,
-              Vs::PipelineLayout: 'static + Send + Sync + Clone,
-              Fs::PipelineLayout: 'static + Send + Sync + Clone,
-              Tcs::PipelineLayout: 'static + Send + Sync + Clone,
-              Tes::PipelineLayout: 'static + Send + Sync + Clone,
-              Gs::PipelineLayout: 'static + Send + Sync + Clone,
-              Tcs::InputDefinition: ShaderInterfaceDefMatch<Vs::OutputDefinition> + 'static + Clone,
-              Tes::InputDefinition: ShaderInterfaceDefMatch<Tcs::OutputDefinition> + 'static + Clone,
-              Gs::InputDefinition: ShaderInterfaceDefMatch<Tes::OutputDefinition> + ShaderInterfaceDefMatch<Vs::OutputDefinition> + 'static + Clone,
-              Fs::InputDefinition: ShaderInterfaceDefMatch<Gs::OutputDefinition> + ShaderInterfaceDefMatch<Tes::OutputDefinition> + ShaderInterfaceDefMatch<Vs::OutputDefinition> + 'static + Clone,
-              Rp: RenderPassAbstract + RenderPassSubpassInterface<Fs::OutputDefinition> + 'static + Clone + Send + Sync {
-        let mut pipelines = ArrayVec::<[
-            Arc<GraphicsPipelineAbstract + Send + Sync>;
-            GRAPHICS_PIPELINE_SET_LEN
-        ]>::new();
-
-        for i in 0..(1 << GraphicsPipelineFlag::Len as usize) {
-            let mut builder = graphics_pipeline_builder.clone();
-
-            macro_rules! flag {
-                ($flag:ident in $i:expr) => {
-                    ($i & (1 << GraphicsPipelineFlag::$flag as usize)) != 0
-                }
-            }
-
-            if flag!(DoubleSided in i) {
-                builder = builder.cull_mode_disabled();
-            } else {
-                builder = builder.cull_mode_back();
-            }
-
-            pipelines.push(Arc::new(builder.build(device.clone()).unwrap()));
+impl GraphicsPipelineProperties {
+    pub fn from<'a>(primitive: &Primitive<'a>, material: &Material<'a>) -> Self {
+        GraphicsPipelineProperties {
+            flags: material.into(),
+            vertex_attribute_properties_set: primitive.into(),
         }
-
-        GraphicsPipelineSet(pipelines)
     }
+}
 
-    pub fn get_pipeline(&self, flags: GraphicsPipelineFlags) -> &Arc<GraphicsPipelineAbstract + Send + Sync> {
-        &self.0[flags.0]
-    }
+#[derive(Clone)]
+pub struct GraphicsPipelineSet {
+    pub opaque: Arc<GraphicsPipelineAbstract + Send + Sync>,
+    pub mask: Arc<GraphicsPipelineAbstract + Send + Sync>,
+    pub blend_preprocess: Arc<GraphicsPipelineAbstract + Send + Sync>,
+    pub blend_finalize: Arc<GraphicsPipelineAbstract + Send + Sync>,
+}
 
-    fn create_gltf_opaque(
-        device: &Arc<Device>,
-        render_pass: &Arc<RenderPassAbstract + Send + Sync>,
-        shared_vs: &gltf_vert::Shader
-    ) -> GraphicsPipelineSet {
-        let fs = gltf_opaque_frag::Shader::load(device.clone()).expect("Failed to create shader module.");
-        let builder/*FIXME remove : GraphicsPipelineBuilder<(), (), (), (), (), (), (), (), (), (), (), (), >*/ = GraphicsPipeline::start()
-            // .with_pipeline_layout(device.clone(), pipeline_layout)
-            // Specifies the vertex type
-            .vertex_input(GltfVertexBufferDefinition)
-            // .vertex_input_single_buffer::<Position>()
-            .vertex_shader(shared_vs.main_entry_point(), ())
-            // Configures the builder so that we use one viewport, and that the state of this viewport
-            // is dynamic. This makes it possible to change the viewport for each draw command. If the
-            // viewport state wasn't dynamic, then we would have to create a new pipeline object if we
-            // wanted to draw to another image of a different size.
-            //
-            // Note: If you configure multiple viewports, you can use geometry shaders to choose which
-            // viewport the shape is going to be drawn to. This topic isn't covered here.
-            .viewports_dynamic_scissors_irrelevant(1)
+// Consider improving the synchronization data type
+pub struct GraphicsPipelineSetCache {
+    pub map: Arc<RwLock<HashMap<GraphicsPipelineProperties, Arc<GraphicsPipelineSet>>>>,
+    pub device: Arc<Device>,
+    pub render_pass: Arc<RenderPassAbstract + Send + Sync>,
+    pub vertex_shader: gltf_vert::Shader, // Stored here to avoid unnecessary reloading
+}
+
+macro_rules! construct_pipeline_opaque {
+    ($cache:expr, $graphics_pipeline_builder:expr) => {{
+        let fs = gltf_opaque_frag::Shader::load($cache.device.clone()).expect("Failed to create shader module.");
+        let pipeline = $graphics_pipeline_builder.clone()
             .depth_stencil(DepthStencil::simple_depth_test())
             .fragment_shader(fs.main_entry_point(), ())
-            .render_pass(Subpass::from(render_pass.clone(), 0).unwrap());
+            .render_pass(Subpass::from($cache.render_pass.clone(), 0).unwrap())
+            .build($cache.device.clone())
+            .unwrap();
 
-        Self::from_graphics_pipeline_builder(device, builder)
-    }
+        Arc::new(pipeline)
+    }}
+}
 
-    fn create_gltf_mask(
-        device: &Arc<Device>,
-        render_pass: &Arc<RenderPassAbstract + Send + Sync>,
-        shared_vs: &gltf_vert::Shader
-    ) -> GraphicsPipelineSet {
-        let fs = gltf_mask_frag::Shader::load(device.clone()).expect("Failed to create shader module.");
-        let builder = GraphicsPipeline::start()
-            .vertex_input(GltfVertexBufferDefinition)
-            .vertex_shader(shared_vs.main_entry_point(), ())
-            .viewports_dynamic_scissors_irrelevant(1)
+macro_rules! construct_pipeline_mask {
+    ($cache:expr, $graphics_pipeline_builder:expr) => {{
+        let fs = gltf_mask_frag::Shader::load($cache.device.clone()).expect("Failed to create shader module.");
+        let pipeline = $graphics_pipeline_builder.clone()
             .depth_stencil(DepthStencil::simple_depth_test())
             .fragment_shader(fs.main_entry_point(), ())
-            .render_pass(Subpass::from(render_pass.clone(), 1).unwrap());
+            .render_pass(Subpass::from($cache.render_pass.clone(), 1).unwrap())
+            .build($cache.device.clone())
+            .unwrap();
 
-        Self::from_graphics_pipeline_builder(device, builder)
-    }
+        Arc::new(pipeline)
+    }}
+}
 
-    fn create_gltf_blend_preprocess(
-        device: &Arc<Device>,
-        render_pass: &Arc<RenderPassAbstract + Send + Sync>,
-        shared_vs: &gltf_vert::Shader
-    ) -> GraphicsPipelineSet {
-        let fs = gltf_blend_preprocess_frag::Shader::load(device.clone()).expect("Failed to create shader module.");
-        let builder = GraphicsPipeline::start()
-            .vertex_input(GltfVertexBufferDefinition)
-            .vertex_shader(shared_vs.main_entry_point(), ())
-            .viewports_dynamic_scissors_irrelevant(1)
+macro_rules! construct_pipeline_blend_preprocess {
+    ($cache:expr, $graphics_pipeline_builder:expr) => {{
+        let fs = gltf_blend_preprocess_frag::Shader::load($cache.device.clone()).expect("Failed to create shader module.");
+        let pipeline = $graphics_pipeline_builder.clone()
             .depth_stencil(DepthStencil {
                 depth_compare: Compare::Less,
                 depth_write: false,
@@ -229,21 +191,18 @@ impl GraphicsPipelineSet {
                     mask_alpha: true,
                 },
             ].into_iter().cloned())
-            .render_pass(Subpass::from(render_pass.clone(), 2).unwrap());
+            .render_pass(Subpass::from($cache.render_pass.clone(), 2).unwrap())
+            .build($cache.device.clone())
+            .unwrap();
 
-        GraphicsPipelineSet::from_graphics_pipeline_builder(device, builder)
-    }
+        Arc::new(pipeline)
+    }}
+}
 
-    fn create_gltf_blend_finalize(
-        device: &Arc<Device>,
-        render_pass: &Arc<RenderPassAbstract + Send + Sync>,
-        shared_vs: &gltf_vert::Shader
-    ) -> GraphicsPipelineSet {
-        let fs = gltf_blend_finalize_frag::Shader::load(device.clone()).expect("Failed to create shader module.");
-        let builder = GraphicsPipeline::start()
-            .vertex_input(GltfVertexBufferDefinition)
-            .vertex_shader(shared_vs.main_entry_point(), ())
-            .viewports_dynamic_scissors_irrelevant(1)
+macro_rules! construct_pipeline_blend_finalize {
+    ($cache:expr, $graphics_pipeline_builder:expr) => {{
+        let fs = gltf_blend_finalize_frag::Shader::load($cache.device.clone()).expect("Failed to create shader module.");
+        let pipeline = $graphics_pipeline_builder.clone()
             .depth_stencil(DepthStencil {
                 depth_compare: Compare::Less,
                 depth_write: false,
@@ -267,33 +226,29 @@ impl GraphicsPipelineSet {
                     mask_alpha: true,
                 },
             ].into_iter().cloned())
-            .render_pass(Subpass::from(render_pass.clone(), 3).unwrap());
+            .render_pass(Subpass::from($cache.render_pass.clone(), 3).unwrap())
+            .build($cache.device.clone())
+            .unwrap();
 
-        GraphicsPipelineSet::from_graphics_pipeline_builder(device, builder)
-    }
+        Arc::new(pipeline)
+    }}
 }
 
-#[derive(Clone)]
-pub struct GraphicsPipelineSets {
-    pub opaque: GraphicsPipelineSet,
-    pub mask: GraphicsPipelineSet,
-    pub blend_preprocess: GraphicsPipelineSet,
-    pub blend_finalize: GraphicsPipelineSet,
-}
+impl GraphicsPipelineSetCache {
+    pub fn create(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Self {
+        let mut result = GraphicsPipelineSetCache {
+            map: Arc::new(RwLock::new(HashMap::new())),
+            device: device.clone(),
+            render_pass: Self::create_render_pass(device, swapchain),
+            vertex_shader: gltf_vert::Shader::load(device.clone())
+                .expect("Failed to create shader module."),
+        };
 
-impl GraphicsPipelineSets {
-    pub fn create(device: &Arc<Device>,
-                  swapchain: &Arc<Swapchain<Window>>) -> (Self, Arc<RenderPassAbstract + Send + Sync>) {
-        let vertex_shader = gltf_vert::Shader::load(device.clone())
-            .expect("Failed to create shader module.");
-        let render_pass = Self::create_render_pass(device, swapchain);
+        result.create_pipeline(&GraphicsPipelineProperties::default());
+            // FIXME: Add proper error handling (see `Self::get_default_pipeline`)
+            // .expect("Couldn't create a pipeline set for default properties.");
 
-        (Self {
-            opaque: GraphicsPipelineSet::create_gltf_opaque(device, &render_pass, &vertex_shader),
-            mask: GraphicsPipelineSet::create_gltf_mask(device, &render_pass, &vertex_shader),
-            blend_preprocess: GraphicsPipelineSet::create_gltf_blend_preprocess(device, &render_pass, &vertex_shader),
-            blend_finalize: GraphicsPipelineSet::create_gltf_blend_finalize(device, &render_pass, &vertex_shader),
-        }, render_pass)
+        result
     }
 
     fn create_render_pass(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Arc<RenderPassAbstract + Send + Sync> {
@@ -357,5 +312,75 @@ impl GraphicsPipelineSets {
                 }
             ]
         }.expect("Could not create a render pass."))
+    }
+
+    pub fn get_pipeline(&self, properties: &GraphicsPipelineProperties) -> Option<Arc<GraphicsPipelineSet>> {
+        self.map
+            .as_ref()
+            .read()
+            .expect("The Graphics Pipeline Cache became poisoned.")
+            .get(properties)
+            .map(|pipeline| pipeline.clone())
+    }
+
+    // FIXME: There shouldn't be a need for this function, use the pipeline layout instead.
+    pub fn get_default_pipeline(&self) -> Option<Arc<GraphicsPipelineSet>> {
+        self.get_pipeline(&GraphicsPipelineProperties::default())
+    }
+
+    pub fn get_or_create_pipeline(&self, properties: &GraphicsPipelineProperties) -> Arc<GraphicsPipelineSet> {
+        if let Some(pipeline) = self.get_pipeline(properties) {
+            pipeline
+        } else {
+            self.create_pipeline(properties)
+        }
+    }
+
+    pub fn create_pipeline(&self, properties: &GraphicsPipelineProperties) -> Arc<GraphicsPipelineSet> {
+        let mut builder = GraphicsPipeline::start();
+
+        macro_rules! flag {
+            ($flag:ident in $i:expr) => {
+                ($i.0 & (1 << GraphicsPipelineFlag::$flag as usize)) != 0
+            }
+        }
+
+        if flag!(DoubleSided in properties.flags) {
+            builder = builder.cull_mode_disabled();
+        } else {
+            builder = builder.cull_mode_back();
+        }
+
+        let mut map = self.map
+            .as_ref()
+            .write()
+            .expect("The Graphics Pipeline Cache became poisoned.");
+
+        let vertex_input = GltfVertexBufferDefinition {
+            properties_set: properties.vertex_attribute_properties_set.clone(),
+        };
+
+        let builder = builder
+            .vertex_input(vertex_input)
+            .vertex_shader(self.vertex_shader.main_entry_point(), ())
+            // Configures the builder so that we use one viewport, and that the state of this viewport
+            // is dynamic. This makes it possible to change the viewport for each draw command. If the
+            // viewport state wasn't dynamic, then we would have to create a new pipeline object if we
+            // wanted to draw to another image of a different size.
+            //
+            // Note: If you configure multiple viewports, you can use geometry shaders to choose which
+            // viewport the shape is going to be drawn to. This topic isn't covered here.
+            .viewports_dynamic_scissors_irrelevant(1);
+
+        let pipeline_set = Arc::new(GraphicsPipelineSet {
+            opaque: construct_pipeline_opaque!(self, builder),
+            mask: construct_pipeline_mask!(self, builder),
+            blend_preprocess: construct_pipeline_blend_preprocess!(self, builder),
+            blend_finalize: construct_pipeline_blend_finalize!(self, builder),
+        });
+
+        map.insert(properties.clone(), pipeline_set.clone());
+
+        pipeline_set
     }
 }

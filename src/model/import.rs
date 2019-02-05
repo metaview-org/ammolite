@@ -201,26 +201,75 @@ pub fn import_tangent_buffers<'a, I>(device: &Arc<Device>,
 
 pub fn import_device_buffers<'a, I>(device: &Arc<Device>,
                                     queue_families: &I,
+                                    document: &Document,
                                     buffer_data_array: Vec<gltf::buffer::Data>,
                                     initialization_tasks: &mut Vec<InitializationTask>)
         -> Result<Vec<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>, Error>
         where I: IntoIterator<Item = QueueFamily<'a>> + Clone {
     let mut device_buffers: Vec<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = Vec::with_capacity(buffer_data_array.len());
+    let mut buffer_usage_vec = vec![BufferUsage::none(); buffer_data_array.len()];
 
-    for gltf::buffer::Data(buffer_data) in buffer_data_array.into_iter() {
+    // Scan document for buffer usage and optimize
+    for mesh in document.meshes() {
+        for primitive in mesh.primitives() {
+            macro_rules! check_accessor {
+                (indexed [$($semantic:tt)+] $buffer_usage_field:ident) => {
+                    for semantic_index in 0.. {
+                        let semantic = Semantic::$($semantic)+(semantic_index);
+
+                        if let Some(accessor) = primitive.get(&semantic) {
+                            let buffer_index = accessor.view().buffer().index();
+
+                            buffer_usage_vec[buffer_index].$buffer_usage_field = true;
+                        } else {
+                            break;
+                        }
+                    }
+                };
+
+                (unindexed [Indices] $buffer_usage_field:ident) => {
+                    if let Some(accessor) = primitive.indices() {
+                        let buffer_index = accessor.view().buffer().index();
+
+                        buffer_usage_vec[buffer_index].$buffer_usage_field = true;
+                    }
+                };
+
+                (unindexed [$($semantic:tt)+] $buffer_usage_field:ident) => {
+                    if let Some(accessor) = primitive.get(&Semantic::$($semantic)+) {
+                        let buffer_index = accessor.view().buffer().index();
+
+                        buffer_usage_vec[buffer_index].$buffer_usage_field = true;
+                    }
+                };
+            }
+
+            check_accessor!(unindexed [Indices] index_buffer);
+            check_accessor!(unindexed [Positions] vertex_buffer);
+            check_accessor!(unindexed [Normals] vertex_buffer);
+            check_accessor!(unindexed [Tangents] vertex_buffer);
+            check_accessor!(indexed [Colors] vertex_buffer);
+            check_accessor!(indexed [TexCoords] vertex_buffer);
+            // check_accessor!(indexed [Joints] ???);
+            // check_accessor!(indexed [Weights] ???);
+        }
+    }
+
+    // Initialize the buffers with predetermined usages
+    for (index, gltf::buffer::Data(buffer_data)) in buffer_data_array.into_iter().enumerate() {
+        let mut buffer_usage = buffer_usage_vec[index];
+
+        if buffer_usage == BufferUsage::none() {
+            panic!("Buffers with such usage are not yet implememented.");
+        }
+
+        buffer_usage.transfer_destination = true;
+
         let (device_buffer, buffer_initialization) = unsafe {
             ImmutableBuffer::raw(
                 device.clone(),
                 buffer_data.len(),
-                BufferUsage { // TODO: Scan document for buffer usage and optimize
-                    transfer_destination: true,
-                    uniform_buffer: true,
-                    storage_buffer: true,
-                    index_buffer: true,
-                    vertex_buffer: true,
-                    indirect_buffer: true,
-                    ..BufferUsage::none()
-                },
+                buffer_usage,
                 queue_families.clone(),
             )
         }?;
@@ -583,7 +632,7 @@ pub fn import_model<'a, I, S>(device: &Arc<Device>,
 
     let converted_index_buffers_by_accessor_index = import_index_buffers_by_accessor_index(device, &queue_families, &document, &buffer_data_array[..], &mut initialization_tasks)?;
     let tangent_buffers = import_tangent_buffers(device, &queue_families, &document, &buffer_data_array[..], &mut initialization_tasks)?;
-    let device_buffers = import_device_buffers(device, &queue_families, buffer_data_array, &mut initialization_tasks)?;
+    let device_buffers = import_device_buffers(device, &queue_families, &document, buffer_data_array, &mut initialization_tasks)?;
     let device_images = import_device_images(device, &queue_families, helper_resources, &document, image_data_array, &mut initialization_tasks)?;
     let node_descriptor_sets = create_node_descriptor_sets(device, &pipeline, &document, &mut initialization_tasks)?;
     let material_descriptor_sets = create_material_descriptor_sets(device, &pipeline, helper_resources, &document, &device_images[..], &mut initialization_tasks)?;

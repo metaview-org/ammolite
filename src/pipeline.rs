@@ -5,7 +5,7 @@ use vulkano::framebuffer::RenderPassAbstract;
 use vulkano::pipeline::blend::AttachmentBlend;
 use vulkano::pipeline::blend::BlendFactor;
 use vulkano::pipeline::blend::BlendOp;
-use vulkano::pipeline::{GraphicsPipelineAbstract, GraphicsPipelineBuilder};
+use vulkano::pipeline::GraphicsPipelineAbstract;
 use vulkano::device::Device;
 use vulkano::format::Format;
 use vulkano::framebuffer::Subpass;
@@ -13,11 +13,7 @@ use vulkano::pipeline::GraphicsPipeline;
 use vulkano::pipeline::depth_stencil::DepthStencil;
 use vulkano::pipeline::depth_stencil::Compare;
 use vulkano::pipeline::depth_stencil::DepthBounds;
-use vulkano::pipeline::shader::*;
-use vulkano::pipeline::vertex::VertexDefinition;
-use vulkano::framebuffer::RenderPassSubpassInterface;
 use vulkano::swapchain::Swapchain;
-use arrayvec::ArrayVec;
 use winit::Window;
 use gltf::material::Material;
 use gltf::mesh::Primitive;
@@ -30,8 +26,6 @@ pub enum GraphicsPipelineFlag {
     DoubleSided,
     Len,
 }
-
-const GRAPHICS_PIPELINE_SET_LEN: usize = 1 << GraphicsPipelineFlag::Len as usize;
 
 #[derive(Debug, Clone, Eq, PartialEq, Default, Hash)]
 pub struct GraphicsPipelineFlags(usize);
@@ -236,7 +230,7 @@ macro_rules! construct_pipeline_blend_finalize {
 
 impl GraphicsPipelineSetCache {
     pub fn create(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Self {
-        let mut result = GraphicsPipelineSetCache {
+        let result = GraphicsPipelineSetCache {
             map: Arc::new(RwLock::new(HashMap::new())),
             device: device.clone(),
             render_pass: Self::create_render_pass(device, swapchain),

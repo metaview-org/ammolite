@@ -1,4 +1,5 @@
 //! TODO:
+//! * 32-bit index buffers (EnvironmentTest and TextureTransformTest models)
 //! * Animations
 //! * Morph primitives
 
@@ -62,7 +63,7 @@ use crate::model::InitializationDrawContext;
 use crate::model::HelperResources;
 use crate::model::resource::UninitializedResource;
 use crate::camera::*;
-use crate::pipeline::{GraphicsPipelineSet, GraphicsPipelineSetCache};
+use crate::pipeline::GraphicsPipelineSetCache;
 
 pub use crate::shaders::gltf_opaque_frag::ty::*;
 

@@ -40,8 +40,6 @@ use crate::shaders::{MaterialUBO, PushConstants};
 use crate::vertex::*;
 use crate::pipeline::GraphicsPipelineProperties;
 use crate::pipeline::GraphicsPipelineSetCache;
-use crate::pipeline::GraphicsPipelineFlag;
-use crate::pipeline::GraphicsPipelineFlags;
 use self::error::*;
 use self::resource::*;
 

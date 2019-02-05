@@ -278,6 +278,11 @@ vec4 get_final_color() {
     vec3 world_normal = normalize(f_world_normal);
     vec4 world_tangent = vec4(normalize(f_world_tangent.xyz), f_world_tangent.w);
 
+    // Invert the normal for the back face of double-sided materials
+    if (!gl_FrontFacing) {
+        world_normal *= -1;
+    }
+
     vec2 normalized_frag_coord = get_normalized_frag_coord(dimensions);
     vec3 world_bitangent = cross(world_normal, world_tangent.xyz) * world_tangent.w;
     vec4 base_color = sample_base_color(

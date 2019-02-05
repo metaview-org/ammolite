@@ -1,5 +1,4 @@
 //! TODO:
-//! * Invert normals for the back face of double-sided materials
 //! * Vertex attribute interleaving
 
 #![feature(duration_as_u128)]

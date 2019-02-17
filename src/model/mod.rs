@@ -92,11 +92,8 @@ impl HelperResources {
             queue_families.clone(),
         )?;
 
-        // FIXME: Figure out a way to dynamically resize the zero buffer
-        // Currently, the count of all possible indices (u16) times the largest vertex attribute (vec4)
-        // TODO: Investigate whether it would be possible to use 0 stride and reduce the size of
-        // this buffer to just the size of one item (vec4)
-        let zero_buffer_len = (1 << 16) * (4 * 4); 
+        // Size of mat4 (square, rank 4 matrix of f32s):
+        let zero_buffer_len = 4 * 4 * 4; 
         let (zero_device_buffer, zero_buffer_initialization) = unsafe {
             ImmutableBuffer::raw(
                 device.clone(),

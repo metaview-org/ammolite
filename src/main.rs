@@ -1,5 +1,7 @@
 //! TODO:
 //! * 32-bit index buffers (EnvironmentTest and TextureTransformTest models)
+//! * Instancing
+//! * VR rendering
 //! * Animations
 //! * Morph primitives
 

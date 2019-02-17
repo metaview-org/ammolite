@@ -66,6 +66,8 @@ macro_rules! impl_buffers {
                             result.$attribute_name.stride = stride;
                         }
                     } else {
+                        // Set stride to 0 and because the zero buffer is used, in order to make
+                        // the GPU use the only the values at the beginning of the zero buffer
                         result.$attribute_name.stride = 0;
                     }
                 )+

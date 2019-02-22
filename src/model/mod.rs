@@ -4,6 +4,7 @@ pub mod import;
 
 use std::sync::Arc;
 use std::path::Path;
+use std::mem;
 use vulkano::sampler::SamplerAddressMode;
 use vulkano::sampler::Filter;
 use vulkano::sampler::MipmapMode;
@@ -176,6 +177,8 @@ pub struct Model {
     device_buffers: Vec<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>,
     #[allow(dead_code)]
     device_images: Vec<Arc<dyn ImageViewAccess + Send + Sync>>,
+    /// In case indexes are specified as u8 values, convert and store them as u16 values in this
+    /// field. This conversion is needed, because Vulkan doesn't support 8-bit indices.
     converted_index_buffers_by_accessor_index: Vec<Option<Arc<dyn TypedBufferAccess<Content=[u16]> + Send + Sync>>>,
     tangent_buffers: Vec<Vec<Option<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>>>,
     // Note: Do not ever try to express the descriptor set explicitly.
@@ -184,23 +187,19 @@ pub struct Model {
 }
 
 impl Model {
-    pub(crate) fn get_semantic_byte_slice<'a, T: PodTransmutable>(buffer_data_array: &'a [gltf::buffer::Data], accessor: &Accessor) -> &'a [T] {
+    pub(crate) fn index_byte_slice<'a, T: PodTransmutable>(buffer_data_array: &'a [gltf::buffer::Data], accessor: &Accessor, item_index: usize) -> &'a T {
         let view = accessor.view();
+        let stride = view.stride().unwrap_or_else(|| accessor.size());
+        let slice_offset = view.offset() + accessor.offset();
+        let slice_len = stride * accessor.count();
+        let slice: &[u8] = &buffer_data_array[view.buffer().index()][slice_offset..(slice_offset + slice_len)];
+        let item_slice_start_index = item_index * stride;
+        let item_slice_range = item_slice_start_index..(item_slice_start_index + mem::size_of::<T>());
+        let item_slice = &slice[item_slice_range];
+        let item_ptr = item_slice.as_ptr();
 
-        // TODO: Most buffers have the corresponding default stride, but some don't.
-        // Stride is applied in `BuffersIter` of `GltfVertexBufferDefinition`.
-        // view.stride().map(|stride| panic!("The stride of the view to a buffer of `{}` must be `None`, but is `{}`.",
-        //                                   unsafe { std::intrinsics::type_name::<T>() },
-        //                                   stride));
-
-        let byte_offset = view.offset() + accessor.offset();
-        let byte_len = accessor.size() * accessor.count();
-        let byte_slice: &[u8] = &buffer_data_array[view.buffer().index()][byte_offset..(byte_offset + byte_len)];
-
-        // println!("byte_slice: [{}] offset: {}; len: {}", unsafe { std::intrinsics::type_name::<T>() }, byte_offset, byte_len);
-
-        safe_transmute::guarded_transmute_pod_many_pedantic(byte_slice)
-            .unwrap_or_else(|err| panic!("Invalid byte slice to convert to &[{}]: {}", unsafe { std::intrinsics::type_name::<T>() }, err))
+        // safe_transmute::guarded_transmute_pod::<&'a T>(item_slice).unwrap()
+        unsafe { &*(item_ptr as *const T) }
     }
 
     pub(crate) fn get_semantic_buffer_view<T>(&self, accessor: &Accessor) -> BufferSlice<[T], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> {

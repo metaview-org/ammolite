@@ -20,6 +20,8 @@ use vulkano::image::ImageUsage;
 use vulkano::image::ImageLayout;
 use vulkano::image::MipmapsCount;
 use vulkano::image::traits::ImageViewAccess;
+use byteorder::NativeEndian;
+use byteorder::WriteBytesExt;
 use gltf::{self, Document};
 use gltf::mesh::Semantic;
 use gltf::Node;
@@ -32,6 +34,7 @@ use crate::NodeUBO;
 use crate::MaterialUBO;
 use crate::iter::ArrayIterator;
 use crate::iter::ForcedExactSizeIterator;
+use crate::iter::ByteBufferIterator;
 use crate::vertex::{GltfVertexPosition, GltfVertexNormal, GltfVertexTangent, GltfVertexTexCoord};
 use crate::sampler::IntoVulkanEquivalent;
 use crate::math::*;
@@ -64,8 +67,12 @@ pub fn import_index_buffers_by_accessor_index<'a, I>(device: &Arc<Device>,
         for primitive in mesh.primitives() {
             if let Some(index_accessor) = primitive.indices() {
                 if index_accessor.data_type() == DataType::U8 {
-                    let index_slice = Model::get_semantic_byte_slice(buffer_data_array, &index_accessor);
-                    let buffer_data: Vec<u8> = index_slice.into_iter().flat_map(|index| ArrayIterator::new([*index, 0])).collect(); // FIXME: Assumes byte order in u16
+                    let index_iterator: ByteBufferIterator<u8> = ByteBufferIterator::from_accessor(buffer_data_array, &index_accessor);
+                    let buffer_data: Vec<u8> = index_iterator.flat_map(|index| {
+                        let mut array = [0u8; 2];
+                        (&mut array[..]).write_u16::<NativeEndian>(index as u16).unwrap();
+                        ArrayIterator::new(array)
+                    }).collect();
                     let converted_byte_len = mem::size_of::<u16>() * index_accessor.count();
                     let (device_index_buffer, index_buffer_initialization) = unsafe {
                         ImmutableBuffer::<[u16]>::raw(
@@ -139,18 +146,18 @@ pub fn import_tangent_buffers<'a, I>(device: &Arc<Device>,
                 let get_semantic_index: Box<Fn(usize, usize) -> usize> = if let Some(index_accessor) = primitive.indices() {
                     match index_accessor.data_type() {
                         DataType::U8 => {
-                            let index_slice: &[u8] = Model::get_semantic_byte_slice(&buffer_data_array[..], &index_accessor);
-
-                            Box::new(move |face_index, vertex_index| {
-                                index_slice[face_index * vertices_per_face + vertex_index] as usize
-                            })
+                            Box::new(move |face_index, vertex_index| *Model::index_byte_slice::<u8>(
+                                &buffer_data_array[..],
+                                &index_accessor,
+                                face_index * vertices_per_face + vertex_index as usize,
+                            ) as usize)
                         },
                         DataType::U16 => {
-                            let index_slice: &[u16] = Model::get_semantic_byte_slice(&buffer_data_array[..], &index_accessor);
-
-                            Box::new(move |face_index, vertex_index| {
-                                index_slice[face_index * vertices_per_face + vertex_index] as usize
-                            })
+                            Box::new(move |face_index, vertex_index| *Model::index_byte_slice::<u16>(
+                                &buffer_data_array[..],
+                                &index_accessor,
+                                face_index * vertices_per_face + vertex_index as usize,
+                            ) as usize)
                         },
                         _ => unreachable!(),
                     }
@@ -161,19 +168,31 @@ pub fn import_tangent_buffers<'a, I>(device: &Arc<Device>,
                 let position_accessor = primitive.get(&Semantic::Positions).unwrap();
                 let normal_accessor = primitive.get(&Semantic::Normals).unwrap();
                 let tex_coord_accessor = primitive.get(&Semantic::TexCoords(0));
-                let position_slice: &[GltfVertexPosition] = Model::get_semantic_byte_slice(&buffer_data_array[..], &position_accessor);
-                let normal_slice: &[GltfVertexNormal] = Model::get_semantic_byte_slice(&buffer_data_array[..], &normal_accessor);
-                let tex_coord_slice: Option<&[GltfVertexTexCoord]> = tex_coord_accessor.map(|tex_coord_accessor| Model::get_semantic_byte_slice(&buffer_data_array[..], &tex_coord_accessor));
+                // let position_slice: &[GltfVertexPosition] = Model::get_semantic_byte_slice(&buffer_data_array[..], &position_accessor);
+                // let normal_slice: &[GltfVertexNormal] = Model::get_semantic_byte_slice(&buffer_data_array[..], &normal_accessor);
+                // let tex_coord_slice: Option<&[GltfVertexTexCoord]> = tex_coord_accessor.map(|tex_coord_accessor| Model::get_semantic_byte_slice(&buffer_data_array[..], &tex_coord_accessor));
                 let zero_tex_coord: [f32; 2] = Default::default();
 
                 mikktspace::generate_tangents(
                     &|| { vertices_per_face }, // vertices_per_face: &'a Fn() -> usize, 
                     &|| { face_count }, // face_count: &'a Fn() -> usize, 
-                    &|face_index, vertex_index| { &position_slice[get_semantic_index(face_index, vertex_index)].0 }, // position: &'a Fn(usize, usize) -> &'a [f32; 3],
-                    &|face_index, vertex_index| { &normal_slice[get_semantic_index(face_index, vertex_index)].0 }, // normal: &'a Fn(usize, usize) -> &'a [f32; 3],
+                    &|face_index, vertex_index| &Model::index_byte_slice::<GltfVertexPosition>(
+                        &buffer_data_array[..],
+                        &position_accessor,
+                        get_semantic_index(face_index, vertex_index),
+                    ).0, // position: &'a Fn(usize, usize) -> &'a [f32; 3],
+                    &|face_index, vertex_index| &Model::index_byte_slice::<GltfVertexNormal>(
+                        &buffer_data_array[..],
+                        &normal_accessor,
+                        get_semantic_index(face_index, vertex_index),
+                    ).0, // normal: &'a Fn(usize, usize) -> &'a [f32; 3],
                     &|face_index, vertex_index| {
-                        if let Some(tex_coord_slice) = tex_coord_slice {
-                            &tex_coord_slice[get_semantic_index(face_index, vertex_index)].0
+                        if let &Some(ref tex_coord_accessor) = &tex_coord_accessor {
+                            &Model::index_byte_slice::<GltfVertexTexCoord>(
+                                &buffer_data_array[..],
+                                &tex_coord_accessor,
+                                get_semantic_index(face_index, vertex_index),
+                            ).0
                         } else {
                             &zero_tex_coord
                         }

@@ -49,7 +49,11 @@ pub struct VertexAttributeProperties {
 macro_rules! impl_buffers {
     {
         $field_len:expr, $field_len_ty:ty;
-        $([$field_name:ident: $($buffer_type_name:tt)+] of [$attribute_name:ident: $($attribute_type:tt)+], stride: $stride:expr, semantic: $semantic:expr);+$(;)?
+        $([$field_name:ident: $($buffer_type_name:tt)+] of [$attribute_name:ident: $($attribute_type:tt)+] {
+            default_stride: $default_stride:expr,
+            missing_stride: $missing_stride:expr,
+            semantic: $semantic:expr$(,)?
+        }),+$(,)?
     } => {
         #[derive(Debug, Clone, Eq, PartialEq, Hash)]
         pub struct VertexAttributePropertiesSet {
@@ -57,6 +61,7 @@ macro_rules! impl_buffers {
         }
 
         impl<'a, 'b> From<&'b Primitive<'a>> for VertexAttributePropertiesSet {
+            #[allow(unreachable_code)]
             fn from(primitive: &'b Primitive<'a>) -> Self {
                 let mut result = VertexAttributePropertiesSet::default();
 
@@ -66,9 +71,9 @@ macro_rules! impl_buffers {
                             result.$attribute_name.stride = stride;
                         }
                     } else {
-                        // Set stride to 0 and because the zero buffer is used, in order to make
-                        // the GPU use the only the values at the beginning of the zero buffer
-                        result.$attribute_name.stride = 0;
+                        // For mandatory vertex attributes, set stride to default stride.
+                        // For other attributes, set stride to 0 because the zero buffer is used.
+                        result.$attribute_name.stride = $missing_stride;
                     }
                 )+
 
@@ -81,7 +86,7 @@ macro_rules! impl_buffers {
                 VertexAttributePropertiesSet {
                     $(
                         $attribute_name: VertexAttributeProperties {
-                            stride: $stride,
+                            stride: $default_stride,
                         }
                     ),+
                 }
@@ -237,9 +242,29 @@ macro_rules! impl_buffers {
 impl_buffers! {
     5, U5;
 
-    [position_buffer: PositionBuffer] of [position: GltfVertexPosition], stride: 4 * 3, semantic: Semantic::Positions;
-    [normal_buffer: NormalBuffer] of [normal: GltfVertexNormal], stride: 4 * 3, semantic: Semantic::Normals;
-    [tangent_buffer: TangentBuffer] of [tangent: GltfVertexTangent], stride: 4 * 4, semantic: Semantic::Tangents;
-    [tex_coord_buffer: TexCoordBuffer] of [tex_coord: GltfVertexTexCoord], stride: 4 * 2, semantic: Semantic::TexCoords(0); //TODO
-    [vertex_color_buffer: VertexColorBuffer] of [vertex_color: GltfVertexColor], stride: 4 * 4, semantic: Semantic::Colors(0); //TODO
+    [position_buffer: PositionBuffer] of [position: GltfVertexPosition] {
+        default_stride: 4 * 3,
+        missing_stride: unreachable!(),
+        semantic: Semantic::Positions,
+    },
+    [normal_buffer: NormalBuffer] of [normal: GltfVertexNormal] {
+        default_stride: 4 * 3,
+        missing_stride: 4 * 3,
+        semantic: Semantic::Normals,
+    },
+    [tangent_buffer: TangentBuffer] of [tangent: GltfVertexTangent] {
+        default_stride: 4 * 4,
+        missing_stride: 4 * 4,
+        semantic: Semantic::Tangents,
+    },
+    [tex_coord_buffer: TexCoordBuffer] of [tex_coord: GltfVertexTexCoord] {
+        default_stride: 4 * 2,
+        missing_stride: 0,
+        semantic: Semantic::TexCoords(0), //TODO
+    },
+    [vertex_color_buffer: VertexColorBuffer] of [vertex_color: GltfVertexColor] {
+        default_stride: 4 * 4,
+        missing_stride: 0,
+        semantic: Semantic::Colors(0), //TODO
+    },
 }

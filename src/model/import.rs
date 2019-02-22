@@ -102,116 +102,239 @@ pub fn import_index_buffers_by_accessor_index<'a, I>(device: &Arc<Device>,
     Ok(converted_index_buffers_by_accessor_index)
 }
 
-pub fn import_tangent_buffers<'a, I>(device: &Arc<Device>,
-                                     queue_families: &I,
-                                     document: &Document,
-                                     buffer_data_array: &[gltf::buffer::Data],
-                                     initialization_tasks: &mut Vec<InitializationTask>)
+pub fn precompute_missing_normal_buffers<'a, I>(device: &Arc<Device>,
+                                                queue_families: &I,
+                                                document: &Document,
+                                                buffer_data_array: &[gltf::buffer::Data],
+                                                initialization_tasks: &mut Vec<InitializationTask>)
+        -> Result<(
+               Vec<Vec<Option<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>>>,
+               Vec<Vec<Option<Vec<GltfVertexNormal>>>>
+           ), Error>
+        where I: IntoIterator<Item = QueueFamily<'a>> + Clone {
+    let mut normal_buffers: Vec<Vec<Option<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>>> = vec![Vec::new(); document.meshes().len()];
+    let mut normals: Vec<Vec<Option<Vec<GltfVertexNormal>>>> = vec![Vec::new(); document.meshes().len()];
+
+    for (mesh_index, mesh) in document.meshes().enumerate() {
+        normal_buffers[mesh_index] = vec![None; mesh.primitives().len()];
+        normals[mesh_index] = vec![None; mesh.primitives().len()];
+
+        for (primitive_index, primitive) in mesh.primitives().enumerate() {
+            if primitive.get(&Semantic::Normals).is_some() {
+                continue;
+            }
+
+            let positions_accessor = primitive.get(&Semantic::Positions).unwrap();
+            let vertex_count = positions_accessor.count();
+            // let index_count = primitive.indices()
+            //     .map(|index_accessor| index_accessor.count())
+            //     .unwrap_or(vertex_count);
+            normals[mesh_index][primitive_index] = Some(vec![GltfVertexNormal([0.0; 3]); vertex_count]);
+            let mut normals_data: Vec<GltfVertexNormal> = vec![GltfVertexNormal([0.0; 3]); vertex_count];
+            let mut normals_count: Vec<u8> = vec![0; vertex_count];
+
+            let mut index_iter: Box<Iterator<Item=usize>> = if let Some(index_accessor) = primitive.indices() {
+                match index_accessor.data_type() {
+                    DataType::U8 => Box::new(
+                        ByteBufferIterator::<u8>::from_accessor(buffer_data_array, &index_accessor)
+                            .map(|index| index as usize)
+                    ),
+                    DataType::U16 => Box::new(
+                        ByteBufferIterator::<u16>::from_accessor(buffer_data_array, &index_accessor)
+                            .map(|index| index as usize)
+                    ),
+                    DataType::U32 => Box::new(
+                        ByteBufferIterator::<u32>::from_accessor(buffer_data_array, &index_accessor)
+                            .map(|index| index as usize)
+                    ),
+                    _ => unreachable!(),
+                }
+            } else {
+                Box::new(0..vertex_count)
+            };
+
+            // Sum normals
+            while let (Some(index_a), Some(index_b), Some(index_c)) = (index_iter.next(), index_iter.next(), index_iter.next()) {
+                let a = Vec3(Model::index_byte_slice::<GltfVertexPosition>(buffer_data_array, &positions_accessor, index_a).0);
+                let b = Vec3(Model::index_byte_slice::<GltfVertexPosition>(buffer_data_array, &positions_accessor, index_b).0);
+                let c = Vec3(Model::index_byte_slice::<GltfVertexPosition>(buffer_data_array, &positions_accessor, index_c).0);
+                let u = b - &a;
+                let v = c - &a;
+                let normal = u.cross(&v);
+
+                for &index in [index_a, index_b, index_c].into_iter() {
+                    let normals_count: &mut u8 = &mut normals_count[index];
+                    let normal_sum = normal.clone() * (1f32 / (*normals_count + 1) as f32)
+                        + Vec3(normals_data[index].0) * (*normals_count as f32 / (*normals_count + 1) as f32);
+
+                    normals_data[index].0 = normal_sum.0;
+                    *normals_count += 1;
+                }
+            }
+
+            // Normalize normals
+            for normal in &mut normals_data {
+                let mut normal_vec = Vec3(normal.0);
+                normal_vec.normalize();
+                *normal = GltfVertexNormal(normal_vec.0);
+            }
+
+            let converted_byte_len = mem::size_of::<GltfVertexNormal>() * normals_data.len();
+            let (device_normal_buffer, normal_buffer_initialization) = unsafe {
+                ImmutableBuffer::<[u8]>::raw(
+                    device.clone(),
+                    converted_byte_len,
+                    BufferUsage {
+                        transfer_destination: true,
+                        vertex_buffer: true,
+                        ..BufferUsage::none()
+                    },
+                    queue_families.clone(),
+                )
+            }?;
+
+            // Copy data to a separate Vec to return
+            normals[mesh_index][primitive_index].as_mut().unwrap().copy_from_slice(&mut normals_data[..]);
+
+            initialization_tasks.push(InitializationTask::Buffer {
+                data: safe_transmute::guarded_transmute_to_bytes_pod_vec(normals_data),
+                initialization_buffer: Arc::new(normal_buffer_initialization),
+            });
+            normal_buffers[mesh_index][primitive_index] = Some(device_normal_buffer);
+        }
+    }
+
+    Ok((normal_buffers, normals))
+}
+
+pub fn precompute_missing_tangent_buffers<'a, I>(device: &Arc<Device>,
+                                                 queue_families: &I,
+                                                 document: &Document,
+                                                 buffer_data_array: &[gltf::buffer::Data],
+                                                 initialization_tasks: &mut Vec<InitializationTask>,
+                                                 normal_buffers: &[Vec<Option<Vec<GltfVertexNormal>>>])
         -> Result<Vec<Vec<Option<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>>>, Error>
         where I: IntoIterator<Item = QueueFamily<'a>> + Clone {
-    let primitive_count = document.meshes().map(|mesh| mesh.primitives().len()).sum();
-    let mut tangent_buffers: Vec<Vec<Option<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>>> = vec![Vec::new(); primitive_count];
+    let mut tangent_buffers: Vec<Vec<Option<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>>> = vec![Vec::new(); document.meshes().len()];
 
     for (mesh_index, mesh) in document.meshes().enumerate() {
         tangent_buffers[mesh_index] = vec![None; mesh.primitives().len()];
 
         for (primitive_index, primitive) in mesh.primitives().enumerate() {
-            // Compute tangents for the model if they are missing.
-            if primitive.get(&Semantic::Tangents).is_none() {
-                let vertex_count = primitive.get(&Semantic::Positions).unwrap().count();
-                let index_count = primitive.indices()
-                    .map(|index_accessor| index_accessor.count())
-                    .unwrap_or(vertex_count);
-
-                let converted_byte_len = mem::size_of::<GltfVertexTangent>() * vertex_count;
-                let (device_tangent_buffer, tangent_buffer_initialization) = unsafe {
-                    ImmutableBuffer::<[u8]>::raw(
-                        device.clone(),
-                        converted_byte_len,
-                        BufferUsage {
-                            transfer_destination: true,
-                            vertex_buffer: true,
-                            ..BufferUsage::none()
-                        },
-                        queue_families.clone(),
-                    )
-                }?;
-                let tangent_buffer_initialization: BufferSlice<[u8], _> = unsafe {
-                    BufferSlice::from_typed_buffer_access(tangent_buffer_initialization).reinterpret::<[u8]>()
-                };
-                let mut buffer_data: Vec<GltfVertexTangent> = vec![GltfVertexTangent([0.0; 4]); vertex_count];
-                let vertices_per_face = 3;
-                let face_count = index_count / vertices_per_face;
-
-                let get_semantic_index: Box<Fn(usize, usize) -> usize> = if let Some(index_accessor) = primitive.indices() {
-                    match index_accessor.data_type() {
-                        DataType::U8 => {
-                            Box::new(move |face_index, vertex_index| *Model::index_byte_slice::<u8>(
-                                &buffer_data_array[..],
-                                &index_accessor,
-                                face_index * vertices_per_face + vertex_index as usize,
-                            ) as usize)
-                        },
-                        DataType::U16 => {
-                            Box::new(move |face_index, vertex_index| *Model::index_byte_slice::<u16>(
-                                &buffer_data_array[..],
-                                &index_accessor,
-                                face_index * vertices_per_face + vertex_index as usize,
-                            ) as usize)
-                        },
-                        _ => unreachable!(),
-                    }
-                } else {
-                    Box::new(|face_index, vertex_index| { face_index * vertices_per_face + vertex_index })
-                };
-
-                let position_accessor = primitive.get(&Semantic::Positions).unwrap();
-                let normal_accessor = primitive.get(&Semantic::Normals).unwrap();
-                let tex_coord_accessor = primitive.get(&Semantic::TexCoords(0));
-                // let position_slice: &[GltfVertexPosition] = Model::get_semantic_byte_slice(&buffer_data_array[..], &position_accessor);
-                // let normal_slice: &[GltfVertexNormal] = Model::get_semantic_byte_slice(&buffer_data_array[..], &normal_accessor);
-                // let tex_coord_slice: Option<&[GltfVertexTexCoord]> = tex_coord_accessor.map(|tex_coord_accessor| Model::get_semantic_byte_slice(&buffer_data_array[..], &tex_coord_accessor));
-                let zero_tex_coord: [f32; 2] = Default::default();
-
-                mikktspace::generate_tangents(
-                    &|| { vertices_per_face }, // vertices_per_face: &'a Fn() -> usize, 
-                    &|| { face_count }, // face_count: &'a Fn() -> usize, 
-                    &|face_index, vertex_index| &Model::index_byte_slice::<GltfVertexPosition>(
-                        &buffer_data_array[..],
-                        &position_accessor,
-                        get_semantic_index(face_index, vertex_index),
-                    ).0, // position: &'a Fn(usize, usize) -> &'a [f32; 3],
-                    &|face_index, vertex_index| &Model::index_byte_slice::<GltfVertexNormal>(
-                        &buffer_data_array[..],
-                        &normal_accessor,
-                        get_semantic_index(face_index, vertex_index),
-                    ).0, // normal: &'a Fn(usize, usize) -> &'a [f32; 3],
-                    &|face_index, vertex_index| {
-                        if let &Some(ref tex_coord_accessor) = &tex_coord_accessor {
-                            &Model::index_byte_slice::<GltfVertexTexCoord>(
-                                &buffer_data_array[..],
-                                &tex_coord_accessor,
-                                get_semantic_index(face_index, vertex_index),
-                            ).0
-                        } else {
-                            &zero_tex_coord
-                        }
-                    }, // tex_coord: &'a Fn(usize, usize) -> &'a [f32; 2],
-                    &mut |face_index, vertex_index, mut tangent| {
-                        // The algorithm generates tangents in right-handed coordinate space,
-                        // but models with pre-generated tangents seem to be in left-handed
-                        // coordinate space.
-                        tangent[3] *= -1.0;
-                        buffer_data[get_semantic_index(face_index, vertex_index)] = GltfVertexTangent(tangent);
-                    }, // set_tangent: &'a mut FnMut(usize, usize, [f32; 4])
-                );
-
-                initialization_tasks.push(InitializationTask::Buffer {
-                    data: safe_transmute::guarded_transmute_to_bytes_pod_vec(buffer_data),
-                    initialization_buffer: Arc::new(tangent_buffer_initialization),
-                });
-                tangent_buffers[mesh_index][primitive_index] = Some(device_tangent_buffer);
+            if primitive.get(&Semantic::Tangents).is_some() {
+                continue;
             }
+
+            let vertex_count = primitive.get(&Semantic::Positions).unwrap().count();
+            let index_count = primitive.indices()
+                .map(|index_accessor| index_accessor.count())
+                .unwrap_or(vertex_count);
+
+            let converted_byte_len = mem::size_of::<GltfVertexTangent>() * vertex_count;
+            let (device_tangent_buffer, tangent_buffer_initialization) = unsafe {
+                ImmutableBuffer::<[u8]>::raw(
+                    device.clone(),
+                    converted_byte_len,
+                    BufferUsage {
+                        transfer_destination: true,
+                        vertex_buffer: true,
+                        ..BufferUsage::none()
+                    },
+                    queue_families.clone(),
+                )
+            }?;
+            let tangent_buffer_initialization: BufferSlice<[u8], _> = unsafe {
+                BufferSlice::from_typed_buffer_access(tangent_buffer_initialization).reinterpret::<[u8]>()
+            };
+            let mut buffer_data: Vec<GltfVertexTangent> = vec![GltfVertexTangent([0.0; 4]); vertex_count];
+            let vertices_per_face = 3;
+            let face_count = index_count / vertices_per_face;
+
+            let get_semantic_index: Box<Fn(usize, usize) -> usize> = if let Some(index_accessor) = primitive.indices() {
+                match index_accessor.data_type() {
+                    DataType::U8 => {
+                        Box::new(move |face_index, vertex_index| *Model::index_byte_slice::<u8>(
+                            &buffer_data_array[..],
+                            &index_accessor,
+                            face_index * vertices_per_face + vertex_index as usize,
+                        ) as usize)
+                    },
+                    DataType::U16 => {
+                        Box::new(move |face_index, vertex_index| *Model::index_byte_slice::<u16>(
+                            &buffer_data_array[..],
+                            &index_accessor,
+                            face_index * vertices_per_face + vertex_index as usize,
+                        ) as usize)
+                    },
+                    DataType::U32 => {
+                        Box::new(move |face_index, vertex_index| *Model::index_byte_slice::<u32>(
+                            &buffer_data_array[..],
+                            &index_accessor,
+                            face_index * vertices_per_face + vertex_index as usize,
+                        ) as usize)
+                    },
+                    _ => unreachable!(),
+                }
+            } else {
+                Box::new(|face_index, vertex_index| { face_index * vertices_per_face + vertex_index })
+            };
+
+            let position_accessor = primitive.get(&Semantic::Positions).unwrap();
+            let normal_accessor = primitive.get(&Semantic::Normals);
+            let precomputed_normals = if normal_accessor.is_none() {
+                Some(normal_buffers[mesh_index][primitive_index].as_ref().unwrap())
+            } else {
+                None
+            };
+            let tex_coord_accessor = primitive.get(&Semantic::TexCoords(0));
+            let zero_tex_coord: [f32; 2] = Default::default();
+
+            mikktspace::generate_tangents(
+                &|| { vertices_per_face }, // vertices_per_face: &'a Fn() -> usize, 
+                &|| { face_count }, // face_count: &'a Fn() -> usize, 
+                &|face_index, vertex_index| &Model::index_byte_slice::<GltfVertexPosition>(
+                    &buffer_data_array[..],
+                    &position_accessor,
+                    get_semantic_index(face_index, vertex_index),
+                ).0, // position: &'a Fn(usize, usize) -> &'a [f32; 3],
+                &|face_index, vertex_index| {
+                    let semantic_index = get_semantic_index(face_index, vertex_index);
+
+                    if let &Some(ref normal_accessor) = &normal_accessor {
+                        &Model::index_byte_slice::<GltfVertexNormal>(
+                            &buffer_data_array[..],
+                            normal_accessor,
+                            semantic_index,
+                        ).0
+                    } else {
+                        &precomputed_normals.unwrap()[semantic_index].0
+                    }
+                }, // normal: &'a Fn(usize, usize) -> &'a [f32; 3],
+                &|face_index, vertex_index| {
+                    if let &Some(ref tex_coord_accessor) = &tex_coord_accessor {
+                        &Model::index_byte_slice::<GltfVertexTexCoord>(
+                            &buffer_data_array[..],
+                            &tex_coord_accessor,
+                            get_semantic_index(face_index, vertex_index),
+                        ).0
+                    } else {
+                        &zero_tex_coord
+                    }
+                }, // tex_coord: &'a Fn(usize, usize) -> &'a [f32; 2],
+                &mut |face_index, vertex_index, mut tangent| {
+                    // The algorithm generates tangents in right-handed coordinate space,
+                    // but models with pre-generated tangents seem to be in left-handed
+                    // coordinate space.
+                    tangent[3] *= -1.0;
+                    buffer_data[get_semantic_index(face_index, vertex_index)] = GltfVertexTangent(tangent);
+                }, // set_tangent: &'a mut FnMut(usize, usize, [f32; 4])
+            );
+
+            initialization_tasks.push(InitializationTask::Buffer {
+                data: safe_transmute::guarded_transmute_to_bytes_pod_vec(buffer_data),
+                initialization_buffer: Arc::new(tangent_buffer_initialization),
+            });
+            tangent_buffers[mesh_index][primitive_index] = Some(device_tangent_buffer);
         }
     }
 
@@ -650,7 +773,8 @@ pub fn import_model<'a, I, S>(device: &Arc<Device>,
     );
 
     let converted_index_buffers_by_accessor_index = import_index_buffers_by_accessor_index(device, &queue_families, &document, &buffer_data_array[..], &mut initialization_tasks)?;
-    let tangent_buffers = import_tangent_buffers(device, &queue_families, &document, &buffer_data_array[..], &mut initialization_tasks)?;
+    let (normal_buffers, normals) = precompute_missing_normal_buffers(device, &queue_families, &document, &buffer_data_array[..], &mut initialization_tasks)?;
+    let tangent_buffers = precompute_missing_tangent_buffers(device, &queue_families, &document, &buffer_data_array[..], &mut initialization_tasks, &normals[..])?;
     let device_buffers = import_device_buffers(device, &queue_families, &document, buffer_data_array, &mut initialization_tasks)?;
     let device_images = import_device_images(device, &queue_families, helper_resources, &document, image_data_array, &mut initialization_tasks)?;
     let node_descriptor_sets = create_node_descriptor_sets(device, &pipeline, &document, &mut initialization_tasks)?;
@@ -661,6 +785,7 @@ pub fn import_model<'a, I, S>(device: &Arc<Device>,
         device_buffers,
         device_images,
         converted_index_buffers_by_accessor_index,
+        normal_buffers,
         tangent_buffers,
         node_descriptor_sets,
         material_descriptor_sets,

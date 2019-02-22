@@ -180,6 +180,11 @@ pub struct Model {
     /// In case indexes are specified as u8 values, convert and store them as u16 values in this
     /// field. This conversion is needed, because Vulkan doesn't support 8-bit indices.
     converted_index_buffers_by_accessor_index: Vec<Option<Arc<dyn TypedBufferAccess<Content=[u16]> + Send + Sync>>>,
+    /// Precomputed normal buffers, in case they were not specified in the glTF document
+    // FIXME: Should probably be of type `GltfVertexNormal` instead of `u8`
+    normal_buffers: Vec<Vec<Option<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>>>,
+    /// Precomputed tangent buffers, in case they were not specified in the glTF document
+    // FIXME: Should probably be of type `GltfVertexTangent` instead of `u8`
     tangent_buffers: Vec<Vec<Option<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>>>,
     // Note: Do not ever try to express the descriptor set explicitly.
     node_descriptor_sets: Vec<Arc<dyn DescriptorSet + Send + Sync>>,
@@ -372,7 +377,7 @@ impl Model {
         pipeline: &Arc<GraphicsPipelineAbstract + Send + Sync>,
     ) -> AutoCommandBufferBuilder where S: DescriptorSetsCollection + Clone {
         let positions_accessor = primitive.get(&Semantic::Positions).unwrap();
-        let normals_accessor = primitive.get(&Semantic::Normals).expect("Normals must be provided by the glTF model for now.");
+        let normals_accessor = primitive.get(&Semantic::Normals);
         let tangents_accessor = primitive.get(&Semantic::Tangents);
         // TODO: There may be multiple tex coord buffers per primitive
         let tex_coords_accessor = primitive.get(&Semantic::TexCoords(0));
@@ -382,8 +387,19 @@ impl Model {
 
         let position_slice: BufferSlice<[GltfVertexPosition], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>
             = self.get_semantic_buffer_view(&positions_accessor);
-        let normal_slice: BufferSlice<[GltfVertexNormal], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>
-            = self.get_semantic_buffer_view(&normals_accessor);
+
+        let normal_slice: BufferSlice<[GltfVertexNormal], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = {
+            let normal_slice: BufferSlice<[u8], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = normals_accessor.map(|normals_accessor| {
+                self.get_semantic_buffer_view(&normals_accessor)
+            }).unwrap_or_else(|| {
+                let buffer = self.normal_buffers[mesh.index()][primitive.index()].as_ref()
+                    .expect("No normals provided by the model and no normals were precomputed.");
+
+                BufferSlice::from_typed_buffer_access(buffer.clone())
+            });
+
+            unsafe { normal_slice.reinterpret::<[GltfVertexNormal]>() }
+        };
 
         let tangent_slice: BufferSlice<[GltfVertexTangent], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = {
             let tangent_slice: BufferSlice<[u8], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = tangents_accessor.map(|tangents_accessor| {

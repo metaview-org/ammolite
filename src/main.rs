@@ -1,5 +1,5 @@
 //! TODO:
-//! * 32-bit index buffers (EnvironmentTest and TextureTransformTest models)
+//! * Precompute most of what `Model::draw_primitive` does
 //! * Instancing
 //! * VR rendering
 //! * Animations

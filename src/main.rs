@@ -56,7 +56,8 @@ use vulkano::pipeline::viewport::Viewport;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::swapchain::{self, PresentMode, SurfaceTransform, Swapchain, AcquireError, SwapchainCreationError, Surface};
 use vulkano_win::VkSurfaceBuild;
-use winit::{ElementState, MouseButton, Event, WindowEvent, KeyboardInput, VirtualKeyCode, EventsLoop, WindowBuilder, Window};
+use winit::{ElementState, MouseButton, Event, DeviceEvent, WindowEvent, KeyboardInput, VirtualKeyCode, EventsLoop, WindowBuilder, Window};
+use winit::dpi::PhysicalSize;
 use crate::math::matrix::*;
 use crate::math::vector::*;
 use crate::model::Model;
@@ -85,14 +86,12 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
     let physical_device = PhysicalDevice::enumerate(instance).next().expect("No physical device available.");
 
     let events_loop = EventsLoop::new();
-    // let displays = 
-    // let display 
-    // let surface = Surface::from_display_mode(
+    let primary_monitor = events_loop.get_primary_monitor();
 
     // )
     let window = WindowBuilder::new()
         .with_title("ammolite")
-        .with_dimensions((1280, 720).into())
+        .with_dimensions(PhysicalSize::new(1280.0, 720.0).to_logical(primary_monitor.get_hidpi_factor()))
         .build_vk_surface(&events_loop, instance.clone()).unwrap();
 
     window.window().hide_cursor(true);
@@ -433,7 +432,7 @@ fn main() {
         .then_signal_fence_and_flush().unwrap());
     let init_instant = Instant::now();
     let mut previous_frame_instant = init_instant.clone();
-    let mut cursor_position: (f64, f64) = (dimensions[0] as f64, dimensions[1] as f64);
+    let mut mouse_delta: (f64, f64) = (0.0, 0.0);
     let mut camera = PitchYawCamera3::new();
     let mut pressed_keys: HashSet<VirtualKeyCode> = HashSet::new();
     let mut pressed_mouse_buttons: HashSet<MouseButton> = HashSet::new();
@@ -443,16 +442,9 @@ fn main() {
         let now = Instant::now();
         let delta_time = now.duration_since(previous_frame_instant);
         previous_frame_instant = now;
-        let cursor_delta = if cursor_capture {
-            let (mut x, mut y) = cursor_position.into();
-            x -= dimensions[0] as f64 / 2.0;
-            y -= dimensions[1] as f64 / 2.0;
-            (x, y)
-        } else {
-            (0.0, 0.0)
-        };
 
-        camera.update(&delta_time, &cursor_delta, &pressed_keys, &pressed_mouse_buttons);
+        camera.update(&delta_time, &mouse_delta, &pressed_keys, &pressed_mouse_buttons);
+        mouse_delta = (0.0, 0.0);
 
         // It is important to call this function from time to time, otherwise resources will keep
         // accumulating and you will eventually reach an out of memory error.
@@ -464,7 +456,9 @@ fn main() {
             // println!("Recreating the swapchain.");
 
             dimensions = {
-                let (width, height) = window.window().get_inner_size().unwrap().into();
+                let dpi = window.window().get_hidpi_factor();
+                let (width, height) = window.window().get_inner_size().unwrap().to_physical(dpi)
+                    .into();
                 [width, height]
             };
 
@@ -697,19 +691,25 @@ fn main() {
                     ..
                 } => cursor_capture ^= true,
 
-                Event::WindowEvent {
-                    // FIXME: "it should not be used to implement non-cursor-like interactions such as 3D camera control."
-                    event: WindowEvent::CursorMoved {
-                        position,
-                        ..
-                    },
+                Event::DeviceEvent {
+                    event: DeviceEvent::Motion { axis, value },
                     ..
                 } if cursor_capture => {
-                    cursor_position = position.into();
+                    match axis {
+                        0 => mouse_delta.0 += value,
+                        1 => mouse_delta.1 += value,
+                        _ => (),
+                    }
+                },
+
+                Event::DeviceEvent {
+                    event: DeviceEvent::MouseMotion { .. },
+                    ..
+                } if cursor_capture => {
                     window.window().set_cursor_position(
                         (dimensions[0] as f64 / 2.0, dimensions[1] as f64 / 2.0).into()
                     ).expect("Could not center the cursor position.");
-                },
+                }
 
                 Event::WindowEvent {
                     event: WindowEvent::KeyboardInput {

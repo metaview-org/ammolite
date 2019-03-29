@@ -6,7 +6,6 @@
 //! * Morph primitives
 
 #![feature(core_intrinsics)]
-#![feature(duration_float)]
 
 #[macro_use]
 extern crate vulkano;
@@ -37,6 +36,7 @@ pub mod sampler;
 pub mod pipeline;
 pub mod camera;
 pub mod model;
+pub mod buffer;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -58,6 +58,7 @@ use vulkano::swapchain::{self, PresentMode, SurfaceTransform, Swapchain, Acquire
 use vulkano_win::VkSurfaceBuild;
 use winit::{ElementState, MouseButton, Event, DeviceEvent, WindowEvent, KeyboardInput, VirtualKeyCode, EventsLoop, WindowBuilder, Window};
 use winit::dpi::PhysicalSize;
+use crate::buffer::StagedBuffer;
 use crate::math::matrix::*;
 use crate::math::vector::*;
 use crate::model::Model;
@@ -69,6 +70,19 @@ use crate::camera::*;
 use crate::pipeline::GraphicsPipelineSetCache;
 
 pub use crate::shaders::gltf_opaque_frag::ty::*;
+
+impl Default for SceneUBO {
+    fn default() -> Self {
+        Self::new(
+            0.0,
+            [0.0, 0.0].into(),
+            [0.0, 0.0, 0.0].into(),
+            Mat4::identity(),
+            Mat4::identity(),
+            Mat4::identity(),
+        )
+    }
+}
 
 fn swapchain_format_priority(format: &Format) -> u32 {
     match *format {
@@ -187,30 +201,6 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
 //     unimplemented!()
 // }
 
-fn create_staging_buffers_data<T>(device: &Arc<Device>, queue_family: QueueFamily, usage: BufferUsage, data: T)
-    -> (Arc<CpuAccessibleBuffer<T>>, Arc<DeviceLocalBuffer<T>>)
-    where T: Sized + 'static {
-    let staging_buffer = CpuAccessibleBuffer::<T>::from_data(
-        device.clone(),
-        BufferUsage {
-            transfer_destination: true,
-            transfer_source: true,
-            .. usage.clone()
-        },
-        data,
-    ).unwrap();
-    let device_buffer = DeviceLocalBuffer::<T>::new(
-        device.clone(),
-        BufferUsage {
-            transfer_destination: true,
-            .. usage.clone()
-        },
-        [queue_family].into_iter().cloned(), // TODO: Figure out a way not to use a Vec
-    ).unwrap();
-
-    (staging_buffer, device_buffer)
-}
-
 fn construct_model_matrix(scale: f32, translation: &Vec3, rotation: &Vec3) -> Mat4 {
     Mat4::translation(translation)
         * Mat4::rotation_roll(rotation[2])
@@ -274,169 +264,433 @@ fn construct_perspective_projection_matrix(near_plane: f32, far_plane: f32, aspe
                          0.0, 0.0,                1.0,                       0.0])
 }
 
-fn main() {
-    /*
-     * Initialization
-     */
+pub struct Ammolite {
+    vulkan_instance: Arc<Instance>,
+    device: Arc<Device>,
+    queue: Arc<Queue>,
+    window: Arc<Surface<Window>>,
+    window_events_loop: EventsLoop,
+    window_dimensions: [u32; 2],
+    window_swapchain: Arc<Swapchain<Window>>,
+    window_swapchain_images: Vec<Arc<SwapchainImage<Window>>>,
+    recreate_swapchain: bool,
+    synchronization: Box<dyn GpuFuture>,
+    init_instant: Instant,
+    previous_frame_instant: Instant,
+}
 
-    // TODO: Explore method arguments
-    let win_extensions = vulkano_win::required_extensions();
-    let raw_extensions = [/*CString::new("VK_EXT_debug_marker").unwrap()*/];
-    let extensions = RawInstanceExtensions::new(raw_extensions.into_iter().cloned())
-        .union(&(&win_extensions).into());
-    let instance = Instance::new(None, extensions, None)
-        .expect("Failed to create a Vulkan instance.");
+impl Ammolite {
+    pub fn new() -> Self {
+        // Instance
+        let win_extensions = vulkano_win::required_extensions();
+        let raw_extensions = [/*CString::new("VK_EXT_debug_marker").unwrap()*/];
+        let extensions = RawInstanceExtensions::new(raw_extensions.into_iter().cloned())
+            .union(&(&win_extensions).into());
+        let instance = Instance::new(None, extensions, None)
+            .expect("Failed to create a Vulkan instance.");
 
-    let (mut events_loop, window, mut dimensions, device, queue_family, queue, mut swapchain, mut images) = vulkan_initialize(&instance);
+        // (EventsLoop, Arc<Surface<Window>>, [u32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Arc<Swapchain<Window>>, Vec<Arc<SwapchainImage<Window>>>)
+        let (events_loop, window, dimensions, device, queue_family, queue, swapchain, images) = vulkan_initialize(&instance);
 
-    // let screen_vertices = [
-    //     ScreenVertex { position: [-1.0, -1.0,  0.0] },
-    //     ScreenVertex { position: [-1.0,  1.0,  0.0] },
-    //     ScreenVertex { position: [ 1.0,  1.0,  0.0] },
-    //     ScreenVertex { position: [ 1.0, -1.0,  0.0] },
-    // ];
+        // SceneUBO
+        let mut scene_ubo = SceneUBO::default();
+        let scene_ubo_buffer = StagedBuffer::from_data(
+            &device,
+            queue_family,
+            BufferUsage::uniform_buffer(),
+            scene_ubo.clone(),
+        );
 
-    // let screen_indices = [
-    //     0, 1, 2u16,
-    //     // 2, 3, 0u16,
-    // ];
+        let pipeline_cache = Arc::new(GraphicsPipelineSetCache::create(&device, &swapchain));
+        let main_descriptor_set_gltf_opaque = Arc::new(
+            // FIXME: Use a layout instead
+            PersistentDescriptorSet::start(pipeline_cache.get_default_pipeline().unwrap().opaque.clone(), 0)
+                .add_buffer(scene_ubo_buffer.device_buffer().clone()).unwrap()
+                .build().unwrap()
+        );
 
-    // let (
-    //     (screen_vertex_staging_buffer, screen_vertex_device_buffer),
-    //     (screen_index_staging_buffer, screen_index_device_buffer),
-    // ) = create_vertex_index_buffers(
-    //     &device,
-    //     queue_family,
-    //     screen_vertices.into_iter().cloned(),
-    //     screen_indices.into_iter().cloned(),
-    // );
+        let mut main_framebuffers: Option<Vec<Arc<Framebuffer<_, _>>>> = None;
+        let mut descriptor_set_gltf_blend: Option<Arc<DescriptorSet + Send + Sync>> = None;
 
-    let pipeline_cache = Arc::new(GraphicsPipelineSetCache::create(&device, &swapchain));
-
-    let mut main_ubo = SceneUBO::new(
-        0.0,
-        [dimensions[0] as f32, dimensions[1] as f32].into(),
-        [0.0, 0.0, 0.0].into(),
-        Mat4::identity(),
-        Mat4::identity(),
-        Mat4::identity(),
-    );
-    let (main_ubo_staging_buffer, main_ubo_device_buffer) = create_staging_buffers_data(
-        &device,
-        queue_family,
-        BufferUsage::uniform_buffer(),
-        main_ubo.clone(),
-    );
-
-    // let screen_image = AttachmentImage::with_usage(
-    //     device.clone(),
-    //     SCREEN_DIMENSIONS.clone(),
-    //     swapchain.format(),
-    //     ImageUsage {
-    //         sampled: true,
-    //         .. ImageUsage::none()
-    //     }
-    // ).unwrap();
-    // let border_color = match swapchain.format().ty() {
-    //     FormatTy::Uint | FormatTy::Sint => BorderColor::IntTransparentBlack,
-    //                                   _ => BorderColor::FloatTransparentBlack,
-    // };
-    // let screen_sampler = Sampler::new(
-    //     device.clone(),
-    //     Filter::Nearest,  // magnifying filter
-    //     Filter::Linear,  // minifying filter
-    //     MipmapMode::Nearest,
-    //     SamplerAddressMode::ClampToBorder(border_color),
-    //     SamplerAddressMode::ClampToBorder(border_color),
-    //     SamplerAddressMode::ClampToBorder(border_color),
-    //     0.0,  // mip_lod_bias
-    //     // TODO: Turn anisotropic filtering on for better screen readability
-    //     1.0,  // anisotropic filtering (1.0 = off, anything higher = on)
-    //     1.0,  // min_lod
-    //     1.0,  // max_lod
-    // ).unwrap();
-    let main_descriptor_set_gltf_opaque = Arc::new(
-        // FIXME: Use a layout instead
-        PersistentDescriptorSet::start(pipeline_cache.get_default_pipeline().unwrap().opaque.clone(), 0)
-            .add_buffer(main_ubo_device_buffer.clone()).unwrap()
-            .build().unwrap()
-    );
-    // let main_descriptor_set_gltf_mask = Arc::new(
-    //     PersistentDescriptorSet::start(pipeline_gltf_mask.clone(), 0)
-    //         .add_buffer(main_ubo_device_buffer.clone()).unwrap()
-    //         .build().unwrap()
-    // );
-
-    // let screen_framebuffers: Vec<Arc<Framebuffer<_, _>>> = images.iter().map(|_| {
-    //     Arc::new(
-    //         Framebuffer::start(screen_pipeline.render_pass().clone())
-    //         .add(screen_image.clone()).unwrap()
-    //         .build().unwrap()
-    //     )
-    // }).collect();
-    let mut main_framebuffers: Option<Vec<Arc<Framebuffer<_, _>>>> = None;
-    let mut descriptor_set_gltf_blend: Option<Arc<DescriptorSet + Send + Sync>> = None;
-
-    // We need to keep track of whether the swapchain is invalid for the current window,
-    // for example when the window is resized.
-    let mut recreate_swapchain = false;
-
-    // In the loop below we are going to submit commands to the GPU. Submitting a command produces
-    // an object that implements the `GpuFuture` trait, which holds the resources for as long as
-    // they are in use by the GPU.
-    //
-    // Destroying the `GpuFuture` blocks until the GPU is finished executing it. In order to avoid
-    // that, we store the submission of the previous frame here.
-    let mut previous_frame_end: Box<dyn GpuFuture> = Box::new(vulkano::sync::now(device.clone()));
-
-    let init_command_buffer_builder = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap();
-    let (init_command_buffer_builder, helper_resources) = HelperResources::new(
-        &device,
-        [queue_family].into_iter().cloned(),
-        // FIXME: Replace with a pipeline layout
-        pipeline_cache.get_default_pipeline().unwrap().opaque.clone(),
-    ).unwrap().initialize_resource(
-        &device,
-        queue_family.clone(),
-        init_command_buffer_builder,
-    ).unwrap();
-    let (init_command_buffer_builder, model) = {
-        let model_path = std::env::args().nth(1).unwrap_or_else(|| {
-            eprintln!("No model path provided.");
-            std::process::exit(1);
-        });
-        Model::import(
+        let init_command_buffer_builder = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap();
+        let (init_command_buffer_builder, helper_resources) = HelperResources::new(
             &device,
             [queue_family].into_iter().cloned(),
             // FIXME: Replace with a pipeline layout
             pipeline_cache.get_default_pipeline().unwrap().opaque.clone(),
-            &helper_resources,
-            model_path,
         ).unwrap().initialize_resource(
             &device,
             queue_family.clone(),
-            init_command_buffer_builder
-        ).unwrap()
-    };
-    let init_command_buffer = init_command_buffer_builder.build().unwrap();
-    // let standard_command_pool = Device::standard_command_pool(&device, queue_family);
-    // let init_unsafe_command_buffer = UnsafeCommandBufferBuilder::new(&standard_command_pool,
-    //                                                                  Kind::primary(),
-    //                                                                  Flags::OneTimeSubmit).unwrap()
-    //     .build().unwrap();
+            init_command_buffer_builder,
+        ).unwrap();
+        let (init_command_buffer_builder, model) = {
+            let model_path = std::env::args().nth(1).unwrap_or_else(|| {
+                eprintln!("No model path provided.");
+                std::process::exit(1);
+            });
+            Model::import(
+                &device,
+                [queue_family].into_iter().cloned(),
+                // FIXME: Replace with a pipeline layout
+                pipeline_cache.get_default_pipeline().unwrap().opaque.clone(),
+                &helper_resources,
+                model_path,
+            ).unwrap().initialize_resource(
+                &device,
+                queue_family.clone(),
+                init_command_buffer_builder
+            ).unwrap()
+        };
+        let init_command_buffer = init_command_buffer_builder.build().unwrap();
 
-    previous_frame_end = Box::new(previous_frame_end
-        .then_execute(queue.clone(), init_command_buffer).unwrap()
-        // .then_signal_fence()
-        // .then_execute_same_queue(init_unsafe_command_buffer).unwrap()
-        .then_signal_fence_and_flush().unwrap());
-    let init_instant = Instant::now();
-    let mut previous_frame_instant = init_instant.clone();
+        // Destroying the `GpuFuture` blocks until the GPU is finished executing it. In order to avoid
+        // that, we store the submission of the previous frame here.
+        let mut synchronization: Box<dyn GpuFuture> = Box::new(vulkano::sync::now(device.clone())
+            .then_execute(queue.clone(), init_command_buffer).unwrap()
+            // .then_signal_fence()
+            // .then_execute_same_queue(init_unsafe_command_buffer).unwrap()
+            .then_signal_fence_and_flush().unwrap());
+
+        Self {
+            vulkan_instance: instance,
+            device,
+            queue,
+            window,
+            window_events_loop: events_loop,
+            window_dimensions: dimensions,
+            window_swapchain: swapchain,
+            window_swapchain_images: images,
+            recreate_swapchain: false,
+            synchronization,
+            init_instant,
+            previous_frame_instant,
+        }
+    }
+
+    pub fn render(&mut self) {
+        // It is important to call this function from time to time, otherwise resources will keep
+        // accumulating and you will eventually reach an out of memory error.
+        // Calling this function polls various fences in order to determine what the GPU has
+        // already processed, and frees the resources that are no longer needed.
+        previous_frame_end.cleanup_finished();
+
+        if recreate_swapchain {
+            // println!("Recreating the swapchain.");
+
+            dimensions = {
+                let dpi = window.window().get_hidpi_factor();
+                let (width, height) = window.window().get_inner_size().unwrap().to_physical(dpi)
+                    .into();
+                [width, height]
+            };
+
+            main_ubo.dimensions = [dimensions[0] as f32, dimensions[1] as f32];
+
+            let (new_swapchain, new_images) = match swapchain.recreate_with_dimension(dimensions) {
+                Ok(r) => r,
+                // This error tends to happen when the user is manually resizing the window.
+                // Simply restarting the loop is the easiest way to fix this issue.
+                Err(SwapchainCreationError::UnsupportedDimensions) => {
+                    continue;
+                },
+                Err(err) => panic!("{:?}", err)
+            };
+
+            swapchain = new_swapchain;
+            images = new_images;
+            main_framebuffers = None;
+            recreate_swapchain = false;
+        }
+
+        // Because framebuffers contains an Arc on the old swapchain, we need to
+        // recreate framebuffers as well.
+        if main_framebuffers.is_none() {
+            let depth_image = Some(AttachmentImage::with_usage(
+                device.clone(),
+                dimensions.clone(),
+                Format::D32Sfloat,
+                ImageUsage {
+                    depth_stencil_attachment: true,
+                    .. ImageUsage::none()
+                }
+            ).unwrap());
+            let blend_accumulation_image = Some(AttachmentImage::with_usage(
+                device.clone(),
+                dimensions.clone(),
+                Format::R32G32B32A32Sfloat,
+                ImageUsage {
+                    color_attachment: true,
+                    input_attachment: true,
+                    transient_attachment: true,
+                    .. ImageUsage::none()
+                }
+            ).unwrap());
+            let blend_revealage_image = Some(AttachmentImage::with_usage(
+                device.clone(),
+                dimensions.clone(),
+                Format::R32G32B32A32Sfloat, //FIXME
+                ImageUsage {
+                    color_attachment: true,
+                    input_attachment: true,
+                    transient_attachment: true,
+                    .. ImageUsage::none()
+                }
+            ).unwrap());
+            descriptor_set_gltf_blend = Some(Arc::new(
+                // FIXME: Use a layout instead
+                PersistentDescriptorSet::start(pipeline_cache.get_default_pipeline().unwrap().blend_finalize.clone(), 3)
+                    .add_image(blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
+                    .add_image(blend_revealage_image.as_ref().unwrap().clone()).unwrap()
+                    .build().unwrap()
+            ));
+            main_framebuffers = Some(images.iter().map(|image| {
+                Arc::new(Framebuffer::start(pipeline_cache.render_pass.clone())
+                         .add(image.clone()).unwrap()
+                         .add(depth_image.as_ref().unwrap().clone()).unwrap()
+                         .add(blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
+                         .add(blend_revealage_image.as_ref().unwrap().clone()).unwrap()
+                         .build().unwrap())
+            }).collect::<Vec<_>>());
+        }
+
+        // Before we can draw on the output, we have to *acquire* an image from the swapchain. If
+        // no image is available (which happens if you submit draw commands too quickly), then the
+        // function will block.
+        // This operation returns the index of the image that we are allowed to draw upon.
+        //
+        // This function can block if no image is available. The parameter is an optional timeout
+        // after which the function call will return an error.
+        let (image_num, acquire_future) = match swapchain::acquire_next_image(swapchain.clone(),
+                                                                              None) {
+            Ok((image_num, acquire_future)) => {
+                (image_num, acquire_future)
+            },
+            Err(AcquireError::OutOfDate) => {
+                recreate_swapchain = true;
+                continue;
+            },
+            Err(err) => panic!("{:?}", err)
+        };
+
+        let time_elapsed = init_instant.elapsed();
+        let time_elapsed = (time_elapsed.as_secs() as f64) + (time_elapsed.as_nanos() as f64) / (1_000_000_000f64);
+        let time_elapsed = time_elapsed as f32;
+
+        // println!("Camera position: {:?}", camera.get_position());
+        // println!("Camera direction: {:?}", camera.get_direction());
+        main_ubo = SceneUBO::new(
+            time_elapsed,
+            Vec2([dimensions[0] as f32, dimensions[1] as f32]),
+            camera.get_position(),
+            construct_model_matrix(1.0,
+                                   &[1.0, 0.0, 2.0].into(),
+                                   &[time_elapsed.sin() * 0.0 * 1.0, time_elapsed.cos() * 0.0 * 3.0 / 2.0, 0.0].into()),
+            camera.get_view_matrix(),
+            // construct_view_matrix(&[(seconds_elapsed as f32 * 0.5).cos(), 0.0, 0.0].into(),
+            //                       &[0.0, 0.0, 0.0].into()),
+            construct_perspective_projection_matrix(0.001, 1000.0, dimensions[0] as f32 / dimensions[1] as f32, std::f32::consts::FRAC_PI_2),
+            // construct_orthographic_projection_matrix(0.1, 1000.0, [dimensions[0] as f32 / dimensions[1] as f32, 1.0].into()),
+        );
+
+//         let screen_command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
+//             .copy_buffer(screen_vertex_staging_buffer.clone(), screen_vertex_device_buffer.clone()).unwrap()
+//             .copy_buffer(screen_index_staging_buffer.clone(), screen_index_device_buffer.clone()).unwrap()
+//             .begin_render_pass(screen_framebuffers[image_num].clone(),
+//                                false,
+//                                vec![[0.0, 1.0, 0.0, 1.0].into()]).unwrap()
+//             .draw_indexed(screen_pipeline.clone(),
+//                   &DynamicState::none(),
+//                   screen_vertex_device_buffer.clone(),
+//                   screen_index_device_buffer.clone(),
+//                   (), ()).unwrap()
+//             .end_render_pass().unwrap()
+//             .build().unwrap();
+
+        let buffer_updates = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
+           .update_buffer(main_ubo_staging_buffer.clone(), main_ubo.clone()).unwrap()
+           .copy_buffer(main_ubo_staging_buffer.clone(), main_ubo_device_buffer.clone()).unwrap()
+           .build().unwrap();
+
+        let current_framebuffer: Arc<Framebuffer<_, _>> = main_framebuffers.as_ref().unwrap()[image_num].clone();
+        let clear_values = vec![
+            [0.0, 0.0, 0.0, 1.0].into(),
+            1.0.into(),
+            // ClearValue::None,
+            // ClearValue::None,
+            [0.0, 0.0, 0.0, 0.0].into(),
+            [1.0, 1.0, 1.0, 1.0].into(),
+        ];
+        // TODO: Recreate only when screen dimensions change
+        let dynamic_state = DynamicState {
+            line_width: None,
+            viewports: Some(vec![Viewport {
+                origin: [0.0, 0.0],
+                dimensions: [dimensions[0] as f32, dimensions[1] as f32],
+                depth_range: 0.0 .. 1.0,
+            }]),
+            scissors: None,
+        };
+        let command_buffer = model.draw_scene(
+            InitializationDrawContext {
+                draw_context: DrawContext {
+                    device: device.clone(),
+                    queue_family,
+                    pipeline_cache: pipeline_cache.clone(),
+                    dynamic: &dynamic_state,
+                    main_descriptor_set: main_descriptor_set_gltf_opaque.clone(),
+                    descriptor_set_blend: descriptor_set_gltf_blend.as_ref().unwrap().clone(),
+                    helper_resources: helper_resources.clone(),
+                },
+                framebuffer: current_framebuffer,
+                clear_values,
+            },
+            0,
+        ).unwrap();
+
+        let result = previous_frame_end.join(acquire_future)
+            .then_execute(queue.clone(), buffer_updates).unwrap()
+            .then_signal_semaphore()
+            .then_execute_same_queue(command_buffer).unwrap()
+            .then_signal_fence()
+
+            // The color output is now expected to contain our triangle. But in order to show it on
+            // the screen, we have to *present* the image by calling `present`.
+            //
+            // This function does not actually present the image immediately. Instead it submits a
+            // present command at the end of the queue. This means that it will only be presented once
+            // the GPU has finished executing the command buffer that draws the triangle.
+            .then_swapchain_present(queue.clone(), swapchain.clone(), image_num)
+            .then_signal_fence_and_flush();
+
+        previous_frame_end = match result {
+            Ok(future) => Box::new(future) as Box<GpuFuture>,
+            Err(FlushError::OutOfDate) => {
+                recreate_swapchain = true;
+                Box::new(vulkano::sync::now(device.clone())) as Box<GpuFuture>
+            },
+            Err(err) => panic!("{:?}", err),
+        };
+
+        if recreate_swapchain {
+            continue;
+        }
+
+        // Note that in more complex programs it is likely that one of `acquire_next_image`,
+        // `command_buffer::submit`, or `present` will block for some time. This happens when the
+        // GPU's queue is full and the driver has to wait until the GPU finished some work.
+        //
+        // Unfortunately the Vulkan API doesn't provide any way to not wait or to detect when a
+        // wait would happen. Blocking may be the desired behavior, but if you don't want to
+        // block you should spawn a separate thread dedicated to submissions.
+
+        // Handling the window events in order to close the program when the user wants to close
+        // it.
+        let mut done = false;
+        events_loop.poll_events(|ev| {
+            match ev {
+                Event::WindowEvent {
+                    event: WindowEvent::KeyboardInput {
+                        input: KeyboardInput {
+                            virtual_keycode: Some(VirtualKeyCode::Escape),
+                            ..
+                        },
+                        ..
+                    },
+                    ..
+                } |
+                Event::WindowEvent {
+                    event: WindowEvent::CloseRequested,
+                    ..
+                } => done = true,
+
+                Event::WindowEvent {
+                    event: WindowEvent::KeyboardInput {
+                        input: KeyboardInput {
+                            state: ElementState::Released,
+                            virtual_keycode: Some(VirtualKeyCode::LAlt),
+                            ..
+                        },
+                        ..
+                    },
+                    ..
+                } => cursor_capture ^= true,
+
+                Event::DeviceEvent {
+                    event: DeviceEvent::Motion { axis, value },
+                    ..
+                } if cursor_capture => {
+                    match axis {
+                        0 => mouse_delta.0 += value,
+                        1 => mouse_delta.1 += value,
+                        _ => (),
+                    }
+                },
+
+                Event::DeviceEvent {
+                    event: DeviceEvent::MouseMotion { .. },
+                    ..
+                } if cursor_capture => {
+                    window.window().set_cursor_position(
+                        (dimensions[0] as f64 / 2.0, dimensions[1] as f64 / 2.0).into()
+                    ).expect("Could not center the cursor position.");
+                }
+
+                Event::WindowEvent {
+                    event: WindowEvent::KeyboardInput {
+                        input: KeyboardInput {
+                            state,
+                            virtual_keycode: Some(virtual_code),
+                            ..
+                        },
+                        ..
+                    },
+                    ..
+                } => {
+                    match state {
+                        ElementState::Pressed => { pressed_keys.insert(virtual_code); }
+                        ElementState::Released => { pressed_keys.remove(&virtual_code); }
+                    }
+                },
+
+                Event::WindowEvent {
+                    event: WindowEvent::MouseInput {
+                        state,
+                        button,
+                        ..
+                    },
+                    ..
+                } => {
+                    match state {
+                        ElementState::Pressed => { pressed_mouse_buttons.insert(button); }
+                        ElementState::Released => { pressed_mouse_buttons.remove(&button); }
+                    }
+                }
+
+                Event::WindowEvent {
+                    event: WindowEvent::Resized(_),
+                    ..
+                } => recreate_swapchain = true,
+
+                _ => ()
+            }
+        });
+
+        if done { return; }
+
+    }
+}
+
+fn main() {
+    let ammolite = Ammolite::new();
+    // Timing and camera controls are not handled by the renderer
     let mut mouse_delta: (f64, f64) = (0.0, 0.0);
     let mut camera = PitchYawCamera3::new();
     let mut pressed_keys: HashSet<VirtualKeyCode> = HashSet::new();
     let mut pressed_mouse_buttons: HashSet<MouseButton> = HashSet::new();
     let mut cursor_capture = true;
+
+    let init_instant = Instant::now();
+    let mut previous_frame_instant = init_instant.clone();
 
     loop {
         let now = Instant::now();
@@ -550,7 +804,9 @@ fn main() {
             Err(err) => panic!("{:?}", err)
         };
 
-        let time_elapsed = init_instant.elapsed().as_float_secs() as f32;
+        let time_elapsed = init_instant.elapsed();
+        let time_elapsed = (time_elapsed.as_secs() as f64) + (time_elapsed.as_nanos() as f64) / (1_000_000_000f64);
+        let time_elapsed = time_elapsed as f32;
 
         // println!("Camera position: {:?}", camera.get_position());
         // println!("Camera direction: {:?}", camera.get_direction());

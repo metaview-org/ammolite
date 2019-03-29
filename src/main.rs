@@ -51,7 +51,7 @@ use vulkano::sync::{FlushError, GpuFuture};
 use vulkano::format::Format;
 use vulkano::image::{AttachmentImage, ImageUsage};
 use vulkano::image::swapchain::SwapchainImage;
-use vulkano::framebuffer::{Framebuffer};
+use vulkano::framebuffer::{Framebuffer, FramebufferAbstract};
 use vulkano::pipeline::viewport::Viewport;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::swapchain::{self, PresentMode, SurfaceTransform, Swapchain, AcquireError, SwapchainCreationError, Surface};
@@ -268,15 +268,23 @@ pub struct Ammolite {
     vulkan_instance: Arc<Instance>,
     device: Arc<Device>,
     queue: Arc<Queue>,
+    pipeline_cache: Arc<GraphicsPipelineSetCache>,
+    helper_resources: HelperResources,
+    scene_ubo_buffer: StagedBuffer<SceneUBO>,
+    // FIXME: Descriptor sets are pipeline-specific
+    descriptor_set_scene: Arc<DescriptorSet + Send + Sync>,
+    descriptor_set_gltf_blend: Option<Arc<DescriptorSet + Send + Sync>>,
     window: Arc<Surface<Window>>,
     window_events_loop: EventsLoop,
     window_dimensions: [u32; 2],
     window_swapchain: Arc<Swapchain<Window>>,
     window_swapchain_images: Vec<Arc<SwapchainImage<Window>>>,
+    window_swapchain_framebuffers: Option<Vec<Arc<dyn FramebufferAbstract>>>,
     recreate_swapchain: bool,
     synchronization: Box<dyn GpuFuture>,
-    init_instant: Instant,
-    previous_frame_instant: Instant,
+    pub camera_position: Vec3,
+    pub camera_view_matrix: Mat4,
+    pub camera_projection_matrix: Mat4,
 }
 
 impl Ammolite {
@@ -302,7 +310,7 @@ impl Ammolite {
         );
 
         let pipeline_cache = Arc::new(GraphicsPipelineSetCache::create(&device, &swapchain));
-        let main_descriptor_set_gltf_opaque = Arc::new(
+        let descriptor_set_scene = Arc::new(
             // FIXME: Use a layout instead
             PersistentDescriptorSet::start(pipeline_cache.get_default_pipeline().unwrap().opaque.clone(), 0)
                 .add_buffer(scene_ubo_buffer.device_buffer().clone()).unwrap()
@@ -355,59 +363,64 @@ impl Ammolite {
             vulkan_instance: instance,
             device,
             queue,
+            pipeline_cache,
+            helper_resources,
+            scene_ubo_buffer,
+            descriptor_set_scene,
+            descriptor_set_gltf_blend: None,
             window,
             window_events_loop: events_loop,
             window_dimensions: dimensions,
             window_swapchain: swapchain,
             window_swapchain_images: images,
+            window_swapchain_framebuffers: None,
             recreate_swapchain: false,
             synchronization,
-            init_instant,
-            previous_frame_instant,
+            camera_position: Vec3::zero(),
+            camera_view_matrix: Mat4::identity(),
+            camera_projection_matrix: Mat4::identity(),
         }
     }
 
-    pub fn render(&mut self) {
+    pub fn render(&mut self, init_instant: &Instant, model: &Model) {
         // It is important to call this function from time to time, otherwise resources will keep
         // accumulating and you will eventually reach an out of memory error.
         // Calling this function polls various fences in order to determine what the GPU has
         // already processed, and frees the resources that are no longer needed.
-        previous_frame_end.cleanup_finished();
+        self.synchronization.cleanup_finished();
 
-        if recreate_swapchain {
-            // println!("Recreating the swapchain.");
-
-            dimensions = {
-                let dpi = window.window().get_hidpi_factor();
-                let (width, height) = window.window().get_inner_size().unwrap().to_physical(dpi)
+        if self.recreate_swapchain {
+            self.window_dimensions = {
+                let dpi = self.window.window().get_hidpi_factor();
+                let (width, height) = self.window.window().get_inner_size().unwrap().to_physical(dpi)
                     .into();
                 [width, height]
             };
 
-            main_ubo.dimensions = [dimensions[0] as f32, dimensions[1] as f32];
-
-            let (new_swapchain, new_images) = match swapchain.recreate_with_dimension(dimensions) {
+            let (new_swapchain, new_images) = match self.window_swapchain.recreate_with_dimension(self.window_dimensions) {
                 Ok(r) => r,
                 // This error tends to happen when the user is manually resizing the window.
                 // Simply restarting the loop is the easiest way to fix this issue.
                 Err(SwapchainCreationError::UnsupportedDimensions) => {
-                    continue;
+                    // continue;
+                    self.render(init_instant, model);
+                    return;
                 },
                 Err(err) => panic!("{:?}", err)
             };
 
-            swapchain = new_swapchain;
-            images = new_images;
-            main_framebuffers = None;
-            recreate_swapchain = false;
+            self.window_swapchain = new_swapchain;
+            self.window_swapchain_images = new_images;
+            self.window_swapchain_framebuffers = None;
+            self.recreate_swapchain = false;
         }
 
         // Because framebuffers contains an Arc on the old swapchain, we need to
         // recreate framebuffers as well.
-        if main_framebuffers.is_none() {
+        if self.window_swapchain_framebuffers.is_none() {
             let depth_image = Some(AttachmentImage::with_usage(
-                device.clone(),
-                dimensions.clone(),
+                self.device.clone(),
+                self.window_dimensions.clone(),
                 Format::D32Sfloat,
                 ImageUsage {
                     depth_stencil_attachment: true,
@@ -415,8 +428,8 @@ impl Ammolite {
                 }
             ).unwrap());
             let blend_accumulation_image = Some(AttachmentImage::with_usage(
-                device.clone(),
-                dimensions.clone(),
+                self.device.clone(),
+                self.window_dimensions.clone(),
                 Format::R32G32B32A32Sfloat,
                 ImageUsage {
                     color_attachment: true,
@@ -426,8 +439,8 @@ impl Ammolite {
                 }
             ).unwrap());
             let blend_revealage_image = Some(AttachmentImage::with_usage(
-                device.clone(),
-                dimensions.clone(),
+                self.device.clone(),
+                self.window_dimensions.clone(),
                 Format::R32G32B32A32Sfloat, //FIXME
                 ImageUsage {
                     color_attachment: true,
@@ -436,20 +449,20 @@ impl Ammolite {
                     .. ImageUsage::none()
                 }
             ).unwrap());
-            descriptor_set_gltf_blend = Some(Arc::new(
+            self.descriptor_set_gltf_blend = Some(Arc::new(
                 // FIXME: Use a layout instead
-                PersistentDescriptorSet::start(pipeline_cache.get_default_pipeline().unwrap().blend_finalize.clone(), 3)
+                PersistentDescriptorSet::start(self.pipeline_cache.get_default_pipeline().unwrap().blend_finalize.clone(), 3)
                     .add_image(blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
                     .add_image(blend_revealage_image.as_ref().unwrap().clone()).unwrap()
                     .build().unwrap()
             ));
-            main_framebuffers = Some(images.iter().map(|image| {
-                Arc::new(Framebuffer::start(pipeline_cache.render_pass.clone())
+            self.window_swapchain_framebuffers = Some(self.window_swapchain_images.iter().map(|image| {
+                Arc::new(Framebuffer::start(self.pipeline_cache.render_pass.clone())
                          .add(image.clone()).unwrap()
                          .add(depth_image.as_ref().unwrap().clone()).unwrap()
                          .add(blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
                          .add(blend_revealage_image.as_ref().unwrap().clone()).unwrap()
-                         .build().unwrap())
+                         .build().unwrap()) as Arc<dyn FramebufferAbstract>
             }).collect::<Vec<_>>());
         }
 
@@ -460,14 +473,16 @@ impl Ammolite {
         //
         // This function can block if no image is available. The parameter is an optional timeout
         // after which the function call will return an error.
-        let (image_num, acquire_future) = match swapchain::acquire_next_image(swapchain.clone(),
+        let (image_num, acquire_future) = match swapchain::acquire_next_image(self.window_swapchain.clone(),
                                                                               None) {
             Ok((image_num, acquire_future)) => {
                 (image_num, acquire_future)
             },
             Err(AcquireError::OutOfDate) => {
-                recreate_swapchain = true;
-                continue;
+                self.recreate_swapchain = true;
+                // continue;
+                self.render(init_instant, model);
+                return;
             },
             Err(err) => panic!("{:?}", err)
         };
@@ -476,42 +491,31 @@ impl Ammolite {
         let time_elapsed = (time_elapsed.as_secs() as f64) + (time_elapsed.as_nanos() as f64) / (1_000_000_000f64);
         let time_elapsed = time_elapsed as f32;
 
-        // println!("Camera position: {:?}", camera.get_position());
-        // println!("Camera direction: {:?}", camera.get_direction());
-        main_ubo = SceneUBO::new(
+        let scene_ubo = SceneUBO::new(
             time_elapsed,
-            Vec2([dimensions[0] as f32, dimensions[1] as f32]),
-            camera.get_position(),
+            Vec2([self.window_dimensions[0] as f32, self.window_dimensions[1] as f32]),
+            self.camera_position,
             construct_model_matrix(1.0,
                                    &[1.0, 0.0, 2.0].into(),
                                    &[time_elapsed.sin() * 0.0 * 1.0, time_elapsed.cos() * 0.0 * 3.0 / 2.0, 0.0].into()),
-            camera.get_view_matrix(),
+            self.camera_view_matrix,
+            self.camera_projection_matrix,
             // construct_view_matrix(&[(seconds_elapsed as f32 * 0.5).cos(), 0.0, 0.0].into(),
             //                       &[0.0, 0.0, 0.0].into()),
-            construct_perspective_projection_matrix(0.001, 1000.0, dimensions[0] as f32 / dimensions[1] as f32, std::f32::consts::FRAC_PI_2),
+            // construct_perspective_projection_matrix(0.001, 1000.0, self.window_dimensions[0] as f32 / self.window_dimensions[1] as f32, std::f32::consts::FRAC_PI_2),
             // construct_orthographic_projection_matrix(0.1, 1000.0, [dimensions[0] as f32 / dimensions[1] as f32, 1.0].into()),
         );
 
-//         let screen_command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
-//             .copy_buffer(screen_vertex_staging_buffer.clone(), screen_vertex_device_buffer.clone()).unwrap()
-//             .copy_buffer(screen_index_staging_buffer.clone(), screen_index_device_buffer.clone()).unwrap()
-//             .begin_render_pass(screen_framebuffers[image_num].clone(),
-//                                false,
-//                                vec![[0.0, 1.0, 0.0, 1.0].into()]).unwrap()
-//             .draw_indexed(screen_pipeline.clone(),
-//                   &DynamicState::none(),
-//                   screen_vertex_device_buffer.clone(),
-//                   screen_index_device_buffer.clone(),
-//                   (), ()).unwrap()
-//             .end_render_pass().unwrap()
-//             .build().unwrap();
-
-        let buffer_updates = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
-           .update_buffer(main_ubo_staging_buffer.clone(), main_ubo.clone()).unwrap()
-           .copy_buffer(main_ubo_staging_buffer.clone(), main_ubo_device_buffer.clone()).unwrap()
+        let buffer_updates = AutoCommandBufferBuilder::primary_one_time_submit(
+            self.device.clone(),
+            self.queue.family(),
+        ).unwrap()
+           .update_buffer(self.scene_ubo_buffer.staging_buffer().clone(), scene_ubo.clone()).unwrap()
+           .copy_buffer(self.scene_ubo_buffer.staging_buffer().clone(), self.scene_ubo_buffer.device_buffer().clone()).unwrap()
            .build().unwrap();
 
-        let current_framebuffer: Arc<Framebuffer<_, _>> = main_framebuffers.as_ref().unwrap()[image_num].clone();
+        let current_framebuffer: Arc<dyn FramebufferAbstract> = self.window_swapchain_framebuffers
+            .as_ref().unwrap()[image_num].clone();
         let clear_values = vec![
             [0.0, 0.0, 0.0, 1.0].into(),
             1.0.into(),
@@ -525,7 +529,7 @@ impl Ammolite {
             line_width: None,
             viewports: Some(vec![Viewport {
                 origin: [0.0, 0.0],
-                dimensions: [dimensions[0] as f32, dimensions[1] as f32],
+                dimensions: [self.window_dimensions[0] as f32, self.window_dimensions[1] as f32],
                 depth_range: 0.0 .. 1.0,
             }]),
             scissors: None,
@@ -533,13 +537,13 @@ impl Ammolite {
         let command_buffer = model.draw_scene(
             InitializationDrawContext {
                 draw_context: DrawContext {
-                    device: device.clone(),
-                    queue_family,
-                    pipeline_cache: pipeline_cache.clone(),
+                    device: self.device.clone(),
+                    queue_family: self.queue.family(),
+                    pipeline_cache: self.pipeline_cache.clone(),
                     dynamic: &dynamic_state,
-                    main_descriptor_set: main_descriptor_set_gltf_opaque.clone(),
-                    descriptor_set_blend: descriptor_set_gltf_blend.as_ref().unwrap().clone(),
-                    helper_resources: helper_resources.clone(),
+                    main_descriptor_set: self.descriptor_set_scene.clone(),
+                    descriptor_set_blend: self.descriptor_set_gltf_blend.as_ref().unwrap().clone(),
+                    helper_resources: self.helper_resources.clone(),
                 },
                 framebuffer: current_framebuffer,
                 clear_values,
@@ -547,8 +551,8 @@ impl Ammolite {
             0,
         ).unwrap();
 
-        let result = previous_frame_end.join(acquire_future)
-            .then_execute(queue.clone(), buffer_updates).unwrap()
+        let result = self.synchronization.join(acquire_future)
+            .then_execute(self.queue.clone(), buffer_updates).unwrap()
             .then_signal_semaphore()
             .then_execute_same_queue(command_buffer).unwrap()
             .then_signal_fence()
@@ -559,20 +563,22 @@ impl Ammolite {
             // This function does not actually present the image immediately. Instead it submits a
             // present command at the end of the queue. This means that it will only be presented once
             // the GPU has finished executing the command buffer that draws the triangle.
-            .then_swapchain_present(queue.clone(), swapchain.clone(), image_num)
+            .then_swapchain_present(self.queue.clone(), self.window_swapchain.clone(), image_num)
             .then_signal_fence_and_flush();
 
-        previous_frame_end = match result {
+        self.synchronization = match result {
             Ok(future) => Box::new(future) as Box<GpuFuture>,
             Err(FlushError::OutOfDate) => {
-                recreate_swapchain = true;
-                Box::new(vulkano::sync::now(device.clone())) as Box<GpuFuture>
+                self.recreate_swapchain = true;
+                Box::new(vulkano::sync::now(self.device.clone())) as Box<GpuFuture>
             },
             Err(err) => panic!("{:?}", err),
         };
 
-        if recreate_swapchain {
-            continue;
+        if self.recreate_swapchain {
+            // continue;
+            self.render(init_instant, model);
+            return;
         }
 
         // Note that in more complex programs it is likely that one of `acquire_next_image`,
@@ -631,7 +637,7 @@ impl Ammolite {
                     ..
                 } if cursor_capture => {
                     window.window().set_cursor_position(
-                        (dimensions[0] as f64 / 2.0, dimensions[1] as f64 / 2.0).into()
+                        (self.window_dimensions[0] as f64 / 2.0, self.window_dimensions[1] as f64 / 2.0).into()
                     ).expect("Could not center the cursor position.");
                 }
 

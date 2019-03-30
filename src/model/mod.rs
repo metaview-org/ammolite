@@ -44,13 +44,18 @@ use crate::pipeline::GraphicsPipelineSetCache;
 use self::error::*;
 use self::resource::*;
 
+// TODO: Figure out a better way to provide the clear values, as they shouldn't need to be
+// specified by the end user
+pub trait FramebufferWithClearValues<C>: FramebufferAbstract + RenderPassDescClearValues<C> + Send + Sync + 'static {}
+
+impl<C, F> FramebufferWithClearValues<C> for F where F: FramebufferAbstract + RenderPassDescClearValues<C> + Send + Sync + 'static {}
+
 // TODO: Remove generics
 #[derive(Clone)]
-pub struct InitializationDrawContext<'a, F, C>
-        where F: FramebufferAbstract + RenderPassDescClearValues<C> + Send + Sync + 'static {
+pub struct InitializationDrawContext<'a> {
     pub draw_context: DrawContext<'a>,
-    pub framebuffer: Arc<F>,
-    pub clear_values: C,
+    pub framebuffer: Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>,
+    pub clear_values: Vec<ClearValue>,
 }
 
 #[derive(Clone)]
@@ -230,12 +235,11 @@ impl Model {
         import::import_model(device, queue_families, pipeline, helper_resources, path)
     }
 
-    pub fn draw_scene<F, C>(
+    pub fn draw_scene(
         &self,
-        context: InitializationDrawContext<F, C>,
+        context: InitializationDrawContext,
         scene_index: usize,
-    ) -> Result<AutoCommandBuffer, Error>
-            where F: FramebufferAbstract + RenderPassDescClearValues<C> + Send + Sync + 'static {
+    ) -> Result<AutoCommandBuffer, Error> {
         if scene_index >= self.document.scenes().len() {
             return Err(ModelDrawError::InvalidSceneIndex { index: scene_index }.into());
         }
@@ -279,11 +283,10 @@ impl Model {
         Ok(command_buffer.build().unwrap())
     }
 
-    pub fn draw_main_scene<F, C>(
+    pub fn draw_main_scene(
         &self,
-        context: InitializationDrawContext<F, C>,
-    ) -> Result<AutoCommandBuffer, Error>
-            where F: FramebufferAbstract + RenderPassDescClearValues<C> + Send + Sync + 'static {
+        context: InitializationDrawContext,
+    ) -> Result<AutoCommandBuffer, Error> {
         if let Some(main_scene_index) = self.document.default_scene().map(|default_scene| default_scene.index()) {
             self.draw_scene(context, main_scene_index)
         } else {

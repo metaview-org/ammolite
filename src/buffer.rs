@@ -37,11 +37,11 @@ impl<T: Send + Sync> StagedBuffer<T> {
         }
     }
 
-    pub fn staging_buffer(&self) -> &Arc<TypedBufferAccess<Content=T>> {
+    pub fn staging_buffer(&self) -> &Arc<TypedBufferAccess<Content=T> + Send + Sync> {
         &self.staging_buffer
     }
 
-    pub fn device_buffer(&self) -> &Arc<TypedBufferAccess<Content=T>> {
+    pub fn device_buffer(&self) -> &Arc<TypedBufferAccess<Content=T> + Send + Sync> {
         &self.device_buffer
     }
 }

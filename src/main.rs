@@ -38,9 +38,12 @@ pub mod camera;
 pub mod model;
 pub mod buffer;
 
+use std::path::Path;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, Duration};
+use std::rc::Rc;
+use std::cell::RefCell;
 use vulkano::descriptor::descriptor_set::DescriptorSet;
 use vulkano::instance::RawInstanceExtensions;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer};
@@ -48,7 +51,7 @@ use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
 use vulkano::device::{Device, RawDeviceExtensions, DeviceExtensions, Queue, Features};
 use vulkano::instance::{Instance, PhysicalDevice, QueueFamily};
 use vulkano::sync::{FlushError, GpuFuture};
-use vulkano::format::Format;
+use vulkano::format::{Format, ClearValue};
 use vulkano::image::{AttachmentImage, ImageUsage};
 use vulkano::image::swapchain::SwapchainImage;
 use vulkano::framebuffer::{Framebuffer, FramebufferAbstract};
@@ -61,6 +64,7 @@ use winit::dpi::PhysicalSize;
 use crate::buffer::StagedBuffer;
 use crate::math::matrix::*;
 use crate::math::vector::*;
+use crate::model::FramebufferWithClearValues;
 use crate::model::Model;
 use crate::model::DrawContext;
 use crate::model::InitializationDrawContext;
@@ -275,13 +279,13 @@ pub struct Ammolite {
     descriptor_set_scene: Arc<DescriptorSet + Send + Sync>,
     descriptor_set_gltf_blend: Option<Arc<DescriptorSet + Send + Sync>>,
     window: Arc<Surface<Window>>,
-    window_events_loop: EventsLoop,
+    window_events_loop: Rc<RefCell<EventsLoop>>,
     window_dimensions: [u32; 2],
     window_swapchain: Arc<Swapchain<Window>>,
     window_swapchain_images: Vec<Arc<SwapchainImage<Window>>>,
-    window_swapchain_framebuffers: Option<Vec<Arc<dyn FramebufferAbstract>>>,
-    recreate_swapchain: bool,
-    synchronization: Box<dyn GpuFuture>,
+    window_swapchain_framebuffers: Option<Vec<Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>>>,
+    window_swapchain_recreate: bool,
+    synchronization: Option<Box<dyn GpuFuture>>,
     pub camera_position: Vec3,
     pub camera_view_matrix: Mat4,
     pub camera_projection_matrix: Mat4,
@@ -317,7 +321,6 @@ impl Ammolite {
                 .build().unwrap()
         );
 
-        let mut main_framebuffers: Option<Vec<Arc<Framebuffer<_, _>>>> = None;
         let mut descriptor_set_gltf_blend: Option<Arc<DescriptorSet + Send + Sync>> = None;
 
         let init_command_buffer_builder = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap();
@@ -331,29 +334,11 @@ impl Ammolite {
             queue_family.clone(),
             init_command_buffer_builder,
         ).unwrap();
-        let (init_command_buffer_builder, model) = {
-            let model_path = std::env::args().nth(1).unwrap_or_else(|| {
-                eprintln!("No model path provided.");
-                std::process::exit(1);
-            });
-            Model::import(
-                &device,
-                [queue_family].into_iter().cloned(),
-                // FIXME: Replace with a pipeline layout
-                pipeline_cache.get_default_pipeline().unwrap().opaque.clone(),
-                &helper_resources,
-                model_path,
-            ).unwrap().initialize_resource(
-                &device,
-                queue_family.clone(),
-                init_command_buffer_builder
-            ).unwrap()
-        };
         let init_command_buffer = init_command_buffer_builder.build().unwrap();
 
         // Destroying the `GpuFuture` blocks until the GPU is finished executing it. In order to avoid
         // that, we store the submission of the previous frame here.
-        let mut synchronization: Box<dyn GpuFuture> = Box::new(vulkano::sync::now(device.clone())
+        let synchronization: Box<dyn GpuFuture> = Box::new(vulkano::sync::now(device.clone())
             .then_execute(queue.clone(), init_command_buffer).unwrap()
             // .then_signal_fence()
             // .then_execute_same_queue(init_unsafe_command_buffer).unwrap()
@@ -369,27 +354,54 @@ impl Ammolite {
             descriptor_set_scene,
             descriptor_set_gltf_blend: None,
             window,
-            window_events_loop: events_loop,
+            window_events_loop: Rc::new(RefCell::new(events_loop)),
             window_dimensions: dimensions,
             window_swapchain: swapchain,
             window_swapchain_images: images,
             window_swapchain_framebuffers: None,
-            recreate_swapchain: false,
-            synchronization,
+            window_swapchain_recreate: false,
+            synchronization: Some(synchronization),
             camera_position: Vec3::zero(),
             camera_view_matrix: Mat4::identity(),
             camera_projection_matrix: Mat4::identity(),
         }
     }
 
-    pub fn render(&mut self, init_instant: &Instant, model: &Model) {
+    pub fn load_model<S: AsRef<Path>>(&mut self, path: S) -> Model {
+        let init_command_buffer_builder = AutoCommandBufferBuilder::primary_one_time_submit(self.device.clone(), self.queue.family()).unwrap();
+        let (init_command_buffer_builder, model) = {
+            Model::import(
+                &self.device,
+                [self.queue.family()].into_iter().cloned(),
+                // FIXME: Replace with a pipeline layout
+                self.pipeline_cache.get_default_pipeline().unwrap().opaque.clone(),
+                &self.helper_resources,
+                path,
+            ).unwrap().initialize_resource(
+                &self.device,
+                self.queue.family().clone(),
+                init_command_buffer_builder
+            ).unwrap()
+        };
+        let init_command_buffer = init_command_buffer_builder.build().unwrap();
+
+        self.synchronization = Some(Box::new(self.synchronization.take().unwrap()
+            .then_execute(self.queue.clone(), init_command_buffer).unwrap()
+            // .then_signal_fence()
+            // .then_execute_same_queue(init_unsafe_command_buffer).unwrap()
+            .then_signal_fence_and_flush().unwrap()));
+
+        model
+    }
+
+    pub fn render(&mut self, elapsed: &Duration, model: &Model, model_matrix: &Mat4) {
         // It is important to call this function from time to time, otherwise resources will keep
         // accumulating and you will eventually reach an out of memory error.
         // Calling this function polls various fences in order to determine what the GPU has
         // already processed, and frees the resources that are no longer needed.
-        self.synchronization.cleanup_finished();
+        self.synchronization.as_mut().unwrap().cleanup_finished();
 
-        if self.recreate_swapchain {
+        if self.window_swapchain_recreate {
             self.window_dimensions = {
                 let dpi = self.window.window().get_hidpi_factor();
                 let (width, height) = self.window.window().get_inner_size().unwrap().to_physical(dpi)
@@ -403,7 +415,7 @@ impl Ammolite {
                 // Simply restarting the loop is the easiest way to fix this issue.
                 Err(SwapchainCreationError::UnsupportedDimensions) => {
                     // continue;
-                    self.render(init_instant, model);
+                    self.render(elapsed, model, model_matrix);
                     return;
                 },
                 Err(err) => panic!("{:?}", err)
@@ -412,7 +424,7 @@ impl Ammolite {
             self.window_swapchain = new_swapchain;
             self.window_swapchain_images = new_images;
             self.window_swapchain_framebuffers = None;
-            self.recreate_swapchain = false;
+            self.window_swapchain_recreate = false;
         }
 
         // Because framebuffers contains an Arc on the old swapchain, we need to
@@ -462,7 +474,7 @@ impl Ammolite {
                          .add(depth_image.as_ref().unwrap().clone()).unwrap()
                          .add(blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
                          .add(blend_revealage_image.as_ref().unwrap().clone()).unwrap()
-                         .build().unwrap()) as Arc<dyn FramebufferAbstract>
+                         .build().unwrap()) as Arc<dyn FramebufferWithClearValues<_>>
             }).collect::<Vec<_>>());
         }
 
@@ -479,27 +491,23 @@ impl Ammolite {
                 (image_num, acquire_future)
             },
             Err(AcquireError::OutOfDate) => {
-                self.recreate_swapchain = true;
+                self.window_swapchain_recreate = true;
                 // continue;
-                self.render(init_instant, model);
+                self.render(elapsed, model, model_matrix);
                 return;
             },
             Err(err) => panic!("{:?}", err)
         };
 
-        let time_elapsed = init_instant.elapsed();
-        let time_elapsed = (time_elapsed.as_secs() as f64) + (time_elapsed.as_nanos() as f64) / (1_000_000_000f64);
-        let time_elapsed = time_elapsed as f32;
+        let secs_elapsed = ((elapsed.as_secs() as f64) + (elapsed.as_nanos() as f64) / (1_000_000_000f64)) as f32;
 
         let scene_ubo = SceneUBO::new(
-            time_elapsed,
+            secs_elapsed,
             Vec2([self.window_dimensions[0] as f32, self.window_dimensions[1] as f32]),
-            self.camera_position,
-            construct_model_matrix(1.0,
-                                   &[1.0, 0.0, 2.0].into(),
-                                   &[time_elapsed.sin() * 0.0 * 1.0, time_elapsed.cos() * 0.0 * 3.0 / 2.0, 0.0].into()),
-            self.camera_view_matrix,
-            self.camera_projection_matrix,
+            self.camera_position.clone(),
+            model_matrix.clone(),
+            self.camera_view_matrix.clone(),
+            self.camera_projection_matrix.clone(),
             // construct_view_matrix(&[(seconds_elapsed as f32 * 0.5).cos(), 0.0, 0.0].into(),
             //                       &[0.0, 0.0, 0.0].into()),
             // construct_perspective_projection_matrix(0.001, 1000.0, self.window_dimensions[0] as f32 / self.window_dimensions[1] as f32, std::f32::consts::FRAC_PI_2),
@@ -514,7 +522,7 @@ impl Ammolite {
            .copy_buffer(self.scene_ubo_buffer.staging_buffer().clone(), self.scene_ubo_buffer.device_buffer().clone()).unwrap()
            .build().unwrap();
 
-        let current_framebuffer: Arc<dyn FramebufferAbstract> = self.window_swapchain_framebuffers
+        let current_framebuffer: Arc<dyn FramebufferWithClearValues<_>> = self.window_swapchain_framebuffers
             .as_ref().unwrap()[image_num].clone();
         let clear_values = vec![
             [0.0, 0.0, 0.0, 1.0].into(),
@@ -551,7 +559,7 @@ impl Ammolite {
             0,
         ).unwrap();
 
-        let result = self.synchronization.join(acquire_future)
+        let result = self.synchronization.take().unwrap().join(acquire_future)
             .then_execute(self.queue.clone(), buffer_updates).unwrap()
             .then_signal_semaphore()
             .then_execute_same_queue(command_buffer).unwrap()
@@ -566,18 +574,18 @@ impl Ammolite {
             .then_swapchain_present(self.queue.clone(), self.window_swapchain.clone(), image_num)
             .then_signal_fence_and_flush();
 
-        self.synchronization = match result {
+        self.synchronization = Some(match result {
             Ok(future) => Box::new(future) as Box<GpuFuture>,
             Err(FlushError::OutOfDate) => {
-                self.recreate_swapchain = true;
+                self.window_swapchain_recreate = true;
                 Box::new(vulkano::sync::now(self.device.clone())) as Box<GpuFuture>
             },
             Err(err) => panic!("{:?}", err),
-        };
+        });
 
-        if self.recreate_swapchain {
+        if self.window_swapchain_recreate {
             // continue;
-            self.render(init_instant, model);
+            self.render(elapsed, model, model_matrix);
             return;
         }
 
@@ -588,106 +596,19 @@ impl Ammolite {
         // Unfortunately the Vulkan API doesn't provide any way to not wait or to detect when a
         // wait would happen. Blocking may be the desired behavior, but if you don't want to
         // block you should spawn a separate thread dedicated to submissions.
-
-        // Handling the window events in order to close the program when the user wants to close
-        // it.
-        let mut done = false;
-        events_loop.poll_events(|ev| {
-            match ev {
-                Event::WindowEvent {
-                    event: WindowEvent::KeyboardInput {
-                        input: KeyboardInput {
-                            virtual_keycode: Some(VirtualKeyCode::Escape),
-                            ..
-                        },
-                        ..
-                    },
-                    ..
-                } |
-                Event::WindowEvent {
-                    event: WindowEvent::CloseRequested,
-                    ..
-                } => done = true,
-
-                Event::WindowEvent {
-                    event: WindowEvent::KeyboardInput {
-                        input: KeyboardInput {
-                            state: ElementState::Released,
-                            virtual_keycode: Some(VirtualKeyCode::LAlt),
-                            ..
-                        },
-                        ..
-                    },
-                    ..
-                } => cursor_capture ^= true,
-
-                Event::DeviceEvent {
-                    event: DeviceEvent::Motion { axis, value },
-                    ..
-                } if cursor_capture => {
-                    match axis {
-                        0 => mouse_delta.0 += value,
-                        1 => mouse_delta.1 += value,
-                        _ => (),
-                    }
-                },
-
-                Event::DeviceEvent {
-                    event: DeviceEvent::MouseMotion { .. },
-                    ..
-                } if cursor_capture => {
-                    window.window().set_cursor_position(
-                        (self.window_dimensions[0] as f64 / 2.0, self.window_dimensions[1] as f64 / 2.0).into()
-                    ).expect("Could not center the cursor position.");
-                }
-
-                Event::WindowEvent {
-                    event: WindowEvent::KeyboardInput {
-                        input: KeyboardInput {
-                            state,
-                            virtual_keycode: Some(virtual_code),
-                            ..
-                        },
-                        ..
-                    },
-                    ..
-                } => {
-                    match state {
-                        ElementState::Pressed => { pressed_keys.insert(virtual_code); }
-                        ElementState::Released => { pressed_keys.remove(&virtual_code); }
-                    }
-                },
-
-                Event::WindowEvent {
-                    event: WindowEvent::MouseInput {
-                        state,
-                        button,
-                        ..
-                    },
-                    ..
-                } => {
-                    match state {
-                        ElementState::Pressed => { pressed_mouse_buttons.insert(button); }
-                        ElementState::Released => { pressed_mouse_buttons.remove(&button); }
-                    }
-                }
-
-                Event::WindowEvent {
-                    event: WindowEvent::Resized(_),
-                    ..
-                } => recreate_swapchain = true,
-
-                _ => ()
-            }
-        });
-
-        if done { return; }
-
     }
 }
 
 fn main() {
-    let ammolite = Ammolite::new();
+    let mut ammolite = Ammolite::new();
+
+    let model_path = std::env::args().nth(1).unwrap_or_else(|| {
+        eprintln!("No model path provided.");
+        std::process::exit(1);
+    });
+
+    let model = ammolite.load_model(model_path);
+
     // Timing and camera controls are not handled by the renderer
     let mut mouse_delta: (f64, f64) = (0.0, 0.0);
     let mut camera = PitchYawCamera3::new();
@@ -697,234 +618,41 @@ fn main() {
 
     let init_instant = Instant::now();
     let mut previous_frame_instant = init_instant.clone();
+    let mut quit = false;
 
-    loop {
+    while !quit {
         let now = Instant::now();
+        let elapsed = now.duration_since(init_instant);
         let delta_time = now.duration_since(previous_frame_instant);
         previous_frame_instant = now;
 
         camera.update(&delta_time, &mouse_delta, &pressed_keys, &pressed_mouse_buttons);
         mouse_delta = (0.0, 0.0);
 
-        // It is important to call this function from time to time, otherwise resources will keep
-        // accumulating and you will eventually reach an out of memory error.
-        // Calling this function polls various fences in order to determine what the GPU has
-        // already processed, and frees the resources that are no longer needed.
-        previous_frame_end.cleanup_finished();
+        ammolite.camera_view_matrix = camera.get_view_matrix();
+        ammolite.camera_projection_matrix = construct_perspective_projection_matrix(
+            0.001,
+            1000.0,
+            ammolite.window_dimensions[0] as f32 / ammolite.window_dimensions[1] as f32,
+            std::f32::consts::FRAC_PI_2,
+        );
+        // construct_orthographic_projection_matrix(0.1, 1000.0, [ammolite.window_dimensions[0] as f32 / ammolite.window_dimensions[1] as f32, 1.0].into()),
 
-        if recreate_swapchain {
-            // println!("Recreating the swapchain.");
-
-            dimensions = {
-                let dpi = window.window().get_hidpi_factor();
-                let (width, height) = window.window().get_inner_size().unwrap().to_physical(dpi)
-                    .into();
-                [width, height]
-            };
-
-            main_ubo.dimensions = [dimensions[0] as f32, dimensions[1] as f32];
-
-            let (new_swapchain, new_images) = match swapchain.recreate_with_dimension(dimensions) {
-                Ok(r) => r,
-                // This error tends to happen when the user is manually resizing the window.
-                // Simply restarting the loop is the easiest way to fix this issue.
-                Err(SwapchainCreationError::UnsupportedDimensions) => {
-                    continue;
-                },
-                Err(err) => panic!("{:?}", err)
-            };
-
-            swapchain = new_swapchain;
-            images = new_images;
-            main_framebuffers = None;
-            recreate_swapchain = false;
-        }
-
-        // Because framebuffers contains an Arc on the old swapchain, we need to
-        // recreate framebuffers as well.
-        if main_framebuffers.is_none() {
-            let depth_image = Some(AttachmentImage::with_usage(
-                device.clone(),
-                dimensions.clone(),
-                Format::D32Sfloat,
-                ImageUsage {
-                    depth_stencil_attachment: true,
-                    .. ImageUsage::none()
-                }
-            ).unwrap());
-            let blend_accumulation_image = Some(AttachmentImage::with_usage(
-                device.clone(),
-                dimensions.clone(),
-                Format::R32G32B32A32Sfloat,
-                ImageUsage {
-                    color_attachment: true,
-                    input_attachment: true,
-                    transient_attachment: true,
-                    .. ImageUsage::none()
-                }
-            ).unwrap());
-            let blend_revealage_image = Some(AttachmentImage::with_usage(
-                device.clone(),
-                dimensions.clone(),
-                Format::R32G32B32A32Sfloat, //FIXME
-                ImageUsage {
-                    color_attachment: true,
-                    input_attachment: true,
-                    transient_attachment: true,
-                    .. ImageUsage::none()
-                }
-            ).unwrap());
-            descriptor_set_gltf_blend = Some(Arc::new(
-                // FIXME: Use a layout instead
-                PersistentDescriptorSet::start(pipeline_cache.get_default_pipeline().unwrap().blend_finalize.clone(), 3)
-                    .add_image(blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
-                    .add_image(blend_revealage_image.as_ref().unwrap().clone()).unwrap()
-                    .build().unwrap()
-            ));
-            main_framebuffers = Some(images.iter().map(|image| {
-                Arc::new(Framebuffer::start(pipeline_cache.render_pass.clone())
-                         .add(image.clone()).unwrap()
-                         .add(depth_image.as_ref().unwrap().clone()).unwrap()
-                         .add(blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
-                         .add(blend_revealage_image.as_ref().unwrap().clone()).unwrap()
-                         .build().unwrap())
-            }).collect::<Vec<_>>());
-        }
-
-        // Before we can draw on the output, we have to *acquire* an image from the swapchain. If
-        // no image is available (which happens if you submit draw commands too quickly), then the
-        // function will block.
-        // This operation returns the index of the image that we are allowed to draw upon.
-        //
-        // This function can block if no image is available. The parameter is an optional timeout
-        // after which the function call will return an error.
-        let (image_num, acquire_future) = match swapchain::acquire_next_image(swapchain.clone(),
-                                                                              None) {
-            Ok((image_num, acquire_future)) => {
-                (image_num, acquire_future)
-            },
-            Err(AcquireError::OutOfDate) => {
-                recreate_swapchain = true;
-                continue;
-            },
-            Err(err) => panic!("{:?}", err)
-        };
-
-        let time_elapsed = init_instant.elapsed();
-        let time_elapsed = (time_elapsed.as_secs() as f64) + (time_elapsed.as_nanos() as f64) / (1_000_000_000f64);
-        let time_elapsed = time_elapsed as f32;
-
-        // println!("Camera position: {:?}", camera.get_position());
-        // println!("Camera direction: {:?}", camera.get_direction());
-        main_ubo = SceneUBO::new(
-            time_elapsed,
-            Vec2([dimensions[0] as f32, dimensions[1] as f32]),
-            camera.get_position(),
+        let secs_elapsed = ((elapsed.as_secs() as f64) + (elapsed.as_nanos() as f64) / (1_000_000_000f64)) as f32;
+        let model_matrices = [
             construct_model_matrix(1.0,
                                    &[1.0, 0.0, 2.0].into(),
-                                   &[time_elapsed.sin() * 0.0 * 1.0, time_elapsed.cos() * 0.0 * 3.0 / 2.0, 0.0].into()),
-            camera.get_view_matrix(),
-            // construct_view_matrix(&[(seconds_elapsed as f32 * 0.5).cos(), 0.0, 0.0].into(),
-            //                       &[0.0, 0.0, 0.0].into()),
-            construct_perspective_projection_matrix(0.001, 1000.0, dimensions[0] as f32 / dimensions[1] as f32, std::f32::consts::FRAC_PI_2),
-            // construct_orthographic_projection_matrix(0.1, 1000.0, [dimensions[0] as f32 / dimensions[1] as f32, 1.0].into()),
-        );
-
-//         let screen_command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
-//             .copy_buffer(screen_vertex_staging_buffer.clone(), screen_vertex_device_buffer.clone()).unwrap()
-//             .copy_buffer(screen_index_staging_buffer.clone(), screen_index_device_buffer.clone()).unwrap()
-//             .begin_render_pass(screen_framebuffers[image_num].clone(),
-//                                false,
-//                                vec![[0.0, 1.0, 0.0, 1.0].into()]).unwrap()
-//             .draw_indexed(screen_pipeline.clone(),
-//                   &DynamicState::none(),
-//                   screen_vertex_device_buffer.clone(),
-//                   screen_index_device_buffer.clone(),
-//                   (), ()).unwrap()
-//             .end_render_pass().unwrap()
-//             .build().unwrap();
-
-        let buffer_updates = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
-           .update_buffer(main_ubo_staging_buffer.clone(), main_ubo.clone()).unwrap()
-           .copy_buffer(main_ubo_staging_buffer.clone(), main_ubo_device_buffer.clone()).unwrap()
-           .build().unwrap();
-
-        let current_framebuffer: Arc<Framebuffer<_, _>> = main_framebuffers.as_ref().unwrap()[image_num].clone();
-        let clear_values = vec![
-            [0.0, 0.0, 0.0, 1.0].into(),
-            1.0.into(),
-            // ClearValue::None,
-            // ClearValue::None,
-            [0.0, 0.0, 0.0, 0.0].into(),
-            [1.0, 1.0, 1.0, 1.0].into(),
+                                   &[secs_elapsed.sin() * 0.0 * 1.0, secs_elapsed.cos() * 0.0 * 3.0 / 2.0, 0.0].into()),
+            construct_model_matrix(1.0,
+                                   &[1.0, 1.0, 2.0].into(),
+                                   &[secs_elapsed.sin() * 0.0 * 1.0, secs_elapsed.cos() * 0.0 * 3.0 / 2.0, 0.0].into()),
         ];
-        // TODO: Recreate only when screen dimensions change
-        let dynamic_state = DynamicState {
-            line_width: None,
-            viewports: Some(vec![Viewport {
-                origin: [0.0, 0.0],
-                dimensions: [dimensions[0] as f32, dimensions[1] as f32],
-                depth_range: 0.0 .. 1.0,
-            }]),
-            scissors: None,
-        };
-        let command_buffer = model.draw_scene(
-            InitializationDrawContext {
-                draw_context: DrawContext {
-                    device: device.clone(),
-                    queue_family,
-                    pipeline_cache: pipeline_cache.clone(),
-                    dynamic: &dynamic_state,
-                    main_descriptor_set: main_descriptor_set_gltf_opaque.clone(),
-                    descriptor_set_blend: descriptor_set_gltf_blend.as_ref().unwrap().clone(),
-                    helper_resources: helper_resources.clone(),
-                },
-                framebuffer: current_framebuffer,
-                clear_values,
-            },
-            0,
-        ).unwrap();
 
-        let result = previous_frame_end.join(acquire_future)
-            .then_execute(queue.clone(), buffer_updates).unwrap()
-            .then_signal_semaphore()
-            .then_execute_same_queue(command_buffer).unwrap()
-            .then_signal_fence()
-
-            // The color output is now expected to contain our triangle. But in order to show it on
-            // the screen, we have to *present* the image by calling `present`.
-            //
-            // This function does not actually present the image immediately. Instead it submits a
-            // present command at the end of the queue. This means that it will only be presented once
-            // the GPU has finished executing the command buffer that draws the triangle.
-            .then_swapchain_present(queue.clone(), swapchain.clone(), image_num)
-            .then_signal_fence_and_flush();
-
-        previous_frame_end = match result {
-            Ok(future) => Box::new(future) as Box<GpuFuture>,
-            Err(FlushError::OutOfDate) => {
-                recreate_swapchain = true;
-                Box::new(vulkano::sync::now(device.clone())) as Box<GpuFuture>
-            },
-            Err(err) => panic!("{:?}", err),
-        };
-
-        if recreate_swapchain {
-            continue;
+        for model_matrix in &model_matrices {
+            ammolite.render(&elapsed, &model, model_matrix);
         }
 
-        // Note that in more complex programs it is likely that one of `acquire_next_image`,
-        // `command_buffer::submit`, or `present` will block for some time. This happens when the
-        // GPU's queue is full and the driver has to wait until the GPU finished some work.
-        //
-        // Unfortunately the Vulkan API doesn't provide any way to not wait or to detect when a
-        // wait would happen. Blocking may be the desired behavior, but if you don't want to
-        // block you should spawn a separate thread dedicated to submissions.
-
-        // Handling the window events in order to close the program when the user wants to close
-        // it.
-        let mut done = false;
-        events_loop.poll_events(|ev| {
+        ammolite.window_events_loop.clone().as_ref().borrow_mut().poll_events(|ev| {
             match ev {
                 Event::WindowEvent {
                     event: WindowEvent::KeyboardInput {
@@ -939,7 +667,7 @@ fn main() {
                 Event::WindowEvent {
                     event: WindowEvent::CloseRequested,
                     ..
-                } => done = true,
+                } => quit = true,
 
                 Event::WindowEvent {
                     event: WindowEvent::KeyboardInput {
@@ -968,8 +696,8 @@ fn main() {
                     event: DeviceEvent::MouseMotion { .. },
                     ..
                 } if cursor_capture => {
-                    window.window().set_cursor_position(
-                        (dimensions[0] as f64 / 2.0, dimensions[1] as f64 / 2.0).into()
+                    ammolite.window.window().set_cursor_position(
+                        (ammolite.window_dimensions[0] as f64 / 2.0, ammolite.window_dimensions[1] as f64 / 2.0).into()
                     ).expect("Could not center the cursor position.");
                 }
 
@@ -1007,12 +735,10 @@ fn main() {
                 Event::WindowEvent {
                     event: WindowEvent::Resized(_),
                     ..
-                } => recreate_swapchain = true,
+                } => ammolite.window_swapchain_recreate = true,
 
                 _ => ()
             }
         });
-
-        if done { return; }
     }
 }

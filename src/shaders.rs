@@ -39,12 +39,11 @@ use crate::math::vector::*;
 pub use crate::shaders::gltf_opaque_frag::ty::*;
 
 impl SceneUBO {
-    pub fn new(time_elapsed: f32, dimensions: Vec2, camera_position: Vec3, model: Mat4, view: Mat4, projection: Mat4) -> SceneUBO {
+    pub fn new(time_elapsed: f32, dimensions: Vec2, camera_position: Vec3, view: Mat4, projection: Mat4) -> SceneUBO {
         SceneUBO {
             time_elapsed,
             dimensions: dimensions.0,
             camera_position: camera_position.0,
-            model: model.0,
             view: view.0,
             projection: projection.0,
             _dummy0: Default::default(),
@@ -53,11 +52,47 @@ impl SceneUBO {
     }
 }
 
+impl Default for SceneUBO {
+    fn default() -> Self {
+        Self::new(
+            0.0,
+            [0.0, 0.0].into(),
+            [0.0, 0.0, 0.0].into(),
+            Mat4::identity(),
+            Mat4::identity(),
+        )
+    }
+}
+
+impl InstanceUBO {
+    pub fn new(model: Mat4) -> InstanceUBO {
+        InstanceUBO {
+            model: model.0,
+        }
+    }
+}
+
+impl Default for InstanceUBO {
+    fn default() -> Self {
+        Self::new(
+            Mat4::identity(),
+        )
+    }
+}
+
 impl NodeUBO {
     pub fn new(matrix: Mat4) -> NodeUBO {
         NodeUBO {
             matrix: matrix.0,
         }
+    }
+}
+
+impl Default for NodeUBO {
+    fn default() -> Self {
+        Self::new(
+            Mat4::identity(),
+        )
     }
 }
 

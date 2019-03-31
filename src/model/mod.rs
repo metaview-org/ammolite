@@ -37,7 +37,7 @@ use gltf::Node;
 use gltf::accessor::DataType;
 use failure::Error;
 use safe_transmute::PodTransmutable;
-use crate::shaders::{MaterialUBO, PushConstants};
+use crate::shaders::{InstanceUBO, MaterialUBO, PushConstants};
 use crate::vertex::*;
 use crate::pipeline::GraphicsPipelineProperties;
 use crate::pipeline::GraphicsPipelineSetCache;
@@ -54,19 +54,20 @@ impl<C, F> FramebufferWithClearValues<C> for F where F: FramebufferAbstract + Re
 #[derive(Clone)]
 pub struct InitializationDrawContext<'a> {
     pub draw_context: DrawContext<'a>,
-    pub framebuffer: Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>,
-    pub clear_values: Vec<ClearValue>,
+    pub framebuffer: &'a Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>,
+    pub clear_values: &'a Vec<ClearValue>,
 }
 
 #[derive(Clone)]
 pub struct DrawContext<'a> {
-    pub device: Arc<Device>,
-    pub queue_family: QueueFamily<'a>,
-    pub pipeline_cache: Arc<GraphicsPipelineSetCache>,
+    pub device: &'a Arc<Device>,
+    pub queue_family: &'a QueueFamily<'a>,
+    pub pipeline_cache: &'a Arc<GraphicsPipelineSetCache>,
     pub dynamic: &'a DynamicState,
-    pub main_descriptor_set: Arc<DescriptorSet + Send + Sync>,
-    pub descriptor_set_blend: Arc<DescriptorSet + Send + Sync>,
-    pub helper_resources: HelperResources,
+    pub descriptor_set_scene: &'a Arc<DescriptorSet + Send + Sync>,
+    pub descriptor_set_instance: &'a Arc<DescriptorSet + Send + Sync>,
+    pub descriptor_set_blend: &'a Arc<DescriptorSet + Send + Sync>,
+    pub helper_resources: &'a HelperResources,
 }
 
 #[derive(Clone)]
@@ -135,7 +136,7 @@ impl HelperResources {
             )
         }?;
         let default_material_descriptor_set: Arc<dyn DescriptorSet + Send + Sync> = Arc::new(
-            PersistentDescriptorSet::start(pipeline.clone(), 2)
+            PersistentDescriptorSet::start(pipeline.clone(), 3)
                 .add_buffer(device_default_material_ubo_buffer.clone()).unwrap()
                 .add_image(empty_device_image.clone()).unwrap()
                 .add_sampler(cheapest_sampler.clone()).unwrap()
@@ -237,9 +238,10 @@ impl Model {
 
     pub fn draw_scene(
         &self,
+        mut command_buffer: AutoCommandBufferBuilder,
         context: InitializationDrawContext,
         scene_index: usize,
-    ) -> Result<AutoCommandBuffer, Error> {
+    ) -> Result<AutoCommandBufferBuilder, Error> {
         if scene_index >= self.document.scenes().len() {
             return Err(ModelDrawError::InvalidSceneIndex { index: scene_index }.into());
         }
@@ -251,9 +253,8 @@ impl Model {
         } = context;
 
         let scene = self.document.scenes().nth(scene_index).unwrap();
-        let mut command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(draw_context.device.clone(), draw_context.queue_family.clone())
-            .unwrap()
-            .begin_render_pass(framebuffer.clone(), false, clear_values).unwrap();
+        command_buffer = command_buffer.begin_render_pass(framebuffer.clone(), false, clear_values.clone())
+            .unwrap();
 
         for node in scene.nodes() {
             command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Opaque, 0);
@@ -280,15 +281,16 @@ impl Model {
         command_buffer = command_buffer
             .end_render_pass().unwrap();
 
-        Ok(command_buffer.build().unwrap())
+        Ok(command_buffer)
     }
 
     pub fn draw_main_scene(
         &self,
+        command_buffer: AutoCommandBufferBuilder,
         context: InitializationDrawContext,
-    ) -> Result<AutoCommandBuffer, Error> {
+    ) -> Result<AutoCommandBufferBuilder, Error> {
         if let Some(main_scene_index) = self.document.default_scene().map(|default_scene| default_scene.index()) {
-            self.draw_scene(context, main_scene_index)
+            self.draw_scene(command_buffer, context, main_scene_index)
         } else {
             Err(ModelDrawError::NoDefaultScene.into())
         }
@@ -326,7 +328,8 @@ impl Model {
                     match (alpha_mode, subpass) {
                         (AlphaMode::Blend, 3) => {
                             let descriptor_sets = (
-                                context.main_descriptor_set.clone(),
+                                context.descriptor_set_scene.clone(),
+                                context.descriptor_set_instance.clone(),
                                 self.node_descriptor_sets[node.index()].clone(),
                                 material_descriptor_set,
                                 context.descriptor_set_blend.clone(),
@@ -344,7 +347,8 @@ impl Model {
                         },
                         _ => {
                             let descriptor_sets = (
-                                context.main_descriptor_set.clone(),
+                                context.descriptor_set_scene.clone(),
+                                context.descriptor_set_instance.clone(),
                                 self.node_descriptor_sets[node.index()].clone(),
                                 material_descriptor_set,
                             );

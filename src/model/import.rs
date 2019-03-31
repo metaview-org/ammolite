@@ -590,7 +590,7 @@ pub fn create_node_descriptor_sets(device: &Arc<Device>,
             )
         }?;
         let descriptor_set = Arc::new(
-            PersistentDescriptorSet::start(pipeline.clone(), 1)
+            PersistentDescriptorSet::start(pipeline.clone(), 2)
                 .add_buffer(device_buffer.clone()).unwrap()
                 .build().unwrap()
         );
@@ -734,7 +734,7 @@ pub fn create_material_descriptor_sets(device: &Arc<Device>,
         let emissive_sampler: Arc<Sampler> = emissive_sampler_option
             .unwrap_or_else(|| helper_resources.cheapest_sampler.clone());
         let descriptor_set: Arc<dyn DescriptorSet + Send + Sync> = Arc::new(
-            PersistentDescriptorSet::start(pipeline.clone(), 2)
+            PersistentDescriptorSet::start(pipeline.clone(), 3)
                 .add_buffer(device_material_ubo_buffer.clone()).unwrap()
                 .add_image(base_color_texture).unwrap()
                 .add_sampler(base_color_sampler).unwrap()

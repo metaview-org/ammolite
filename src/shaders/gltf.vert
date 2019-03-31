@@ -1,18 +1,6 @@
 #version 450
 #include "gltf_common.h"
-
-layout(set = 0, binding = 0) uniform SceneUBO {
-    float time_elapsed;
-    vec2 dimensions;
-    vec3 camera_position;
-    mat4 model;
-    mat4 view;
-    mat4 projection;
-};
-
-layout(set = 1, binding = 0) uniform NodeUBO {
-    mat4 matrix;
-};
+#include "gltf_common_uniforms.h"
 
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;

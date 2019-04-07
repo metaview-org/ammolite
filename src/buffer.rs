@@ -3,6 +3,7 @@ use vulkano::buffer::{TypedBufferAccess, BufferUsage, CpuAccessibleBuffer, Devic
 use vulkano::device::Device;
 use vulkano::instance::QueueFamily;
 
+#[derive(Clone)]
 pub struct StagedBuffer<T: Sized + Send + Sync + 'static> {
     staging_buffer: Arc<TypedBufferAccess<Content=T> + Send + Sync>,
     device_buffer: Arc<TypedBufferAccess<Content=T> + Send + Sync>,

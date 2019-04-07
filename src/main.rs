@@ -1,4 +1,6 @@
 //! TODO:
+//! * Move descriptor set creation/storage into `GraphicsPipelineSetCache`, store pipelines for
+//!     each `GraphicsPipelineAbstract`.
 //! * Precompute most of what `Model::draw_primitive` does
 //! * Instancing
 //! * VR rendering
@@ -45,8 +47,12 @@ use std::time::{Instant, Duration};
 use std::rc::Rc;
 use std::cell::RefCell;
 use vulkano::descriptor::descriptor_set::DescriptorSet;
+use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
+use vulkano::descriptor::descriptor_set::FixedSizeDescriptorSetsPool;
+use vulkano::descriptor::descriptor_set::FixedSizeDescriptorSet;
 use vulkano::instance::RawInstanceExtensions;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer};
+use vulkano::buffer::cpu_pool::CpuBufferPool;
 use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
 use vulkano::device::{Device, RawDeviceExtensions, DeviceExtensions, Queue, Features};
 use vulkano::instance::{Instance, PhysicalDevice, QueueFamily};
@@ -56,9 +62,9 @@ use vulkano::image::{AttachmentImage, ImageUsage};
 use vulkano::image::swapchain::SwapchainImage;
 use vulkano::framebuffer::{Framebuffer, FramebufferAbstract};
 use vulkano::pipeline::viewport::Viewport;
-use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::swapchain::{self, PresentMode, SurfaceTransform, Swapchain, AcquireError, SwapchainCreationError, Surface};
 use vulkano_win::VkSurfaceBuild;
+use gltf::material::AlphaMode;
 use winit::{ElementState, MouseButton, Event, DeviceEvent, WindowEvent, KeyboardInput, VirtualKeyCode, EventsLoop, WindowBuilder, Window};
 use winit::dpi::PhysicalSize;
 use crate::buffer::StagedBuffer;
@@ -266,12 +272,6 @@ pub struct Ammolite {
     queue: Arc<Queue>,
     pipeline_cache: Arc<GraphicsPipelineSetCache>,
     helper_resources: HelperResources,
-    scene_ubo_buffer: StagedBuffer<SceneUBO>,
-    instance_ubo_buffer: StagedBuffer<InstanceUBO>,
-    // FIXME: Descriptor sets are pipeline-specific
-    descriptor_set_scene: Arc<DescriptorSet + Send + Sync>,
-    descriptor_set_instance: Arc<DescriptorSet + Send + Sync>,
-    descriptor_set_gltf_blend: Option<Arc<DescriptorSet + Send + Sync>>,
     window: Arc<Surface<Window>>,
     window_events_loop: Rc<RefCell<EventsLoop>>,
     window_dimensions: [u32; 2],
@@ -280,6 +280,8 @@ pub struct Ammolite {
     window_swapchain_framebuffers: Option<Vec<Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>>>,
     window_swapchain_recreate: bool,
     synchronization: Option<Box<dyn GpuFuture>>,
+    // TODO Consider moving to SharedGltfGraphicsPipelineResources
+    buffer_pool_uniform_instance: CpuBufferPool<InstanceUBO>,
     pub camera_position: Vec3,
     pub camera_view_matrix: Mat4,
     pub camera_projection_matrix: Mat4,
@@ -297,36 +299,7 @@ impl Ammolite {
 
         // (EventsLoop, Arc<Surface<Window>>, [u32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Arc<Swapchain<Window>>, Vec<Arc<SwapchainImage<Window>>>)
         let (events_loop, window, dimensions, device, queue_family, queue, swapchain, images) = vulkan_initialize(&instance);
-        let pipeline_cache = Arc::new(GraphicsPipelineSetCache::create(&device, &swapchain));
-
-        // SceneUBO
-        let scene_ubo = SceneUBO::default();
-        let scene_ubo_buffer = StagedBuffer::from_data(
-            &device,
-            queue_family,
-            BufferUsage::uniform_buffer(),
-            scene_ubo.clone(),
-        );
-        let descriptor_set_scene = Arc::new(
-            // FIXME: Use a layout instead
-            PersistentDescriptorSet::start(pipeline_cache.get_default_pipeline().unwrap().opaque.clone(), 0)
-                .add_buffer(scene_ubo_buffer.device_buffer().clone()).unwrap()
-                .build().unwrap()
-        );
-
-        let instance_ubo = InstanceUBO::default();
-        let instance_ubo_buffer = StagedBuffer::from_data(
-            &device,
-            queue_family,
-            BufferUsage::uniform_buffer(),
-            instance_ubo.clone(),
-        );
-        let descriptor_set_instance = Arc::new(
-            // FIXME: Use a layout instead
-            PersistentDescriptorSet::start(pipeline_cache.get_default_pipeline().unwrap().opaque.clone(), 1)
-                .add_buffer(instance_ubo_buffer.device_buffer().clone()).unwrap()
-                .build().unwrap()
-        );
+        let pipeline_cache = Arc::new(GraphicsPipelineSetCache::create(&device, &swapchain, queue_family));
 
         let descriptor_set_gltf_blend: Option<Arc<DescriptorSet + Send + Sync>> = None;
 
@@ -334,11 +307,9 @@ impl Ammolite {
         let (init_command_buffer_builder, helper_resources) = HelperResources::new(
             &device,
             [queue_family].into_iter().cloned(),
-            // FIXME: Replace with a pipeline layout
-            pipeline_cache.get_default_pipeline().unwrap().opaque.clone(),
         ).unwrap().initialize_resource(
             &device,
-            queue_family.clone(),
+            queue_family,
             init_command_buffer_builder,
         ).unwrap();
         let init_command_buffer = init_command_buffer_builder.build().unwrap();
@@ -357,11 +328,6 @@ impl Ammolite {
             queue,
             pipeline_cache,
             helper_resources,
-            scene_ubo_buffer,
-            instance_ubo_buffer,
-            descriptor_set_scene,
-            descriptor_set_instance,
-            descriptor_set_gltf_blend: None,
             window,
             window_events_loop: Rc::new(RefCell::new(events_loop)),
             window_dimensions: dimensions,
@@ -370,6 +336,7 @@ impl Ammolite {
             window_swapchain_framebuffers: None,
             window_swapchain_recreate: false,
             synchronization: Some(synchronization),
+            buffer_pool_uniform_instance: CpuBufferPool::uniform_buffer(device.clone()),
             camera_position: Vec3::zero(),
             camera_view_matrix: Mat4::identity(),
             camera_projection_matrix: Mat4::identity(),
@@ -383,7 +350,7 @@ impl Ammolite {
                 &self.device,
                 [self.queue.family()].into_iter().cloned(),
                 // FIXME: Replace with a pipeline layout
-                self.pipeline_cache.get_default_pipeline().unwrap().opaque.clone(),
+                self.pipeline_cache.get_default_pipeline().unwrap().opaque.pipeline.clone(),
                 &self.helper_resources,
                 path,
             ).unwrap().initialize_resource(
@@ -448,52 +415,16 @@ impl Ammolite {
             println!("pre swapchain");
             if self.window_swapchain_framebuffers.is_none() {
                 println!("swapchain");
-                let depth_image = Some(AttachmentImage::with_usage(
-                    self.device.clone(),
-                    self.window_dimensions.clone(),
-                    Format::D32Sfloat,
-                    ImageUsage {
-                        depth_stencil_attachment: true,
-                        .. ImageUsage::none()
-                    }
-                ).unwrap());
-                let blend_accumulation_image = Some(AttachmentImage::with_usage(
-                    self.device.clone(),
-                    self.window_dimensions.clone(),
-                    Format::R32G32B32A32Sfloat,
-                    ImageUsage {
-                        color_attachment: true,
-                        input_attachment: true,
-                        transient_attachment: true,
-                        .. ImageUsage::none()
-                    }
-                ).unwrap());
-                let blend_revealage_image = Some(AttachmentImage::with_usage(
-                    self.device.clone(),
-                    self.window_dimensions.clone(),
-                    Format::R32G32B32A32Sfloat, //FIXME
-                    ImageUsage {
-                        color_attachment: true,
-                        input_attachment: true,
-                        transient_attachment: true,
-                        .. ImageUsage::none()
-                    }
-                ).unwrap());
-                self.descriptor_set_gltf_blend = Some(Arc::new(
-                    // FIXME: Use a layout instead
-                    PersistentDescriptorSet::start(self.pipeline_cache.get_default_pipeline().unwrap().blend_finalize.clone(), 4)
-                        .add_image(blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
-                        .add_image(blend_revealage_image.as_ref().unwrap().clone()).unwrap()
-                        .build().unwrap()
-                ));
-                self.window_swapchain_framebuffers = Some(self.window_swapchain_images.iter().map(|image| {
-                    Arc::new(Framebuffer::start(self.pipeline_cache.render_pass.clone())
-                             .add(image.clone()).unwrap()
-                             .add(depth_image.as_ref().unwrap().clone()).unwrap()
-                             .add(blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
-                             .add(blend_revealage_image.as_ref().unwrap().clone()).unwrap()
-                             .build().unwrap()) as Arc<dyn FramebufferWithClearValues<_>>
-                }).collect::<Vec<_>>());
+                self.pipeline_cache.shared_resources.reconstruct_dimensions_dependent_images(
+                    self.window_dimensions.clone()
+                );
+
+                self.window_swapchain_framebuffers = Some(
+                    self.pipeline_cache.shared_resources.construct_swapchain_framebuffers(
+                        self.pipeline_cache.render_pass.clone(),
+                        &self.window_swapchain_images,
+                    )
+                );
                 println!("swapchain done");
             }
 
@@ -530,8 +461,14 @@ impl Ammolite {
                 self.device.clone(),
                 self.queue.family(),
             ).unwrap()
-                .update_buffer(self.scene_ubo_buffer.staging_buffer().clone(), scene_ubo.clone()).unwrap()
-                .copy_buffer(self.scene_ubo_buffer.staging_buffer().clone(), self.scene_ubo_buffer.device_buffer().clone()).unwrap()
+                .update_buffer(
+                    self.pipeline_cache.shared_resources.scene_ubo_buffer.staging_buffer().clone(),
+                    scene_ubo.clone()
+                ).unwrap()
+                .copy_buffer(
+                    self.pipeline_cache.shared_resources.scene_ubo_buffer.staging_buffer().clone(),
+                    self.pipeline_cache.shared_resources.scene_ubo_buffer.device_buffer().clone()
+                ).unwrap()
                 .build().unwrap();
 
             let current_framebuffer: Arc<dyn FramebufferWithClearValues<_>> = self.window_swapchain_framebuffers
@@ -555,73 +492,29 @@ impl Ammolite {
                 scissors: None,
             };
 
-            let initialization_draw_context = InitializationDrawContext {
-                draw_context: DrawContext {
-                    device: &self.device,
-                    queue_family: &self.queue.family(),
-                    pipeline_cache: &self.pipeline_cache,
-                    dynamic: &dynamic_state,
-                    descriptor_set_scene: &self.descriptor_set_scene,
-                    descriptor_set_instance: &self.descriptor_set_instance,
-                    descriptor_set_blend: &self.descriptor_set_gltf_blend.as_ref().unwrap(),
-                    helper_resources: &self.helper_resources,
-                },
-                framebuffer: &current_framebuffer,
-                clear_values: &clear_values,
+            let draw_context = DrawContext {
+                device: &self.device,
+                queue_family: &self.queue.family(),
+                pipeline_cache: &self.pipeline_cache,
+                dynamic: &dynamic_state,
+                helper_resources: &self.helper_resources,
             };
 
             println!("x");
 
-            let mut result: Box<dyn GpuFuture> = Box::new(self.synchronization.take().unwrap()
+            // TODO don't Box the future, pass it as `impl GpuFuture` to render_instances,
+            // which should then return an `impl GpuFuture`
+            self.synchronization = Some(Box::new(self.synchronization.take().unwrap()
                 .then_execute(self.queue.clone(), buffer_updates).unwrap()
-                .join(acquire_future));
+                .join(acquire_future)));
 
             println!("y");
 
-            for (index, world_space_model) in world_space_models.into_iter().enumerate() {
-                let WorldSpaceModel {
-                    model,
-                    matrix,
-                } = world_space_model;
-
-                let instance_ubo = InstanceUBO::new(matrix.clone());
-
-                let instance_local_buffer_updates = AutoCommandBufferBuilder::primary_one_time_submit(
-                    self.device.clone(),
-                    self.queue.family().clone(),
-                ).unwrap()
-                    .update_buffer(self.instance_ubo_buffer.staging_buffer().clone(), instance_ubo.clone()).unwrap()
-                    .copy_buffer(self.instance_ubo_buffer.staging_buffer().clone(), self.instance_ubo_buffer.device_buffer().clone()).unwrap()
-                    .build().unwrap();
-
-                let mut command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(
-                    self.device.clone(),
-                    self.queue.family().clone(),
-                ).unwrap();
-
-                command_buffer = model.draw_scene(
-                    command_buffer,
-                    initialization_draw_context.clone(),
-                    0,
-                ).unwrap();
-
-                if index == 0 {
-                    result = Box::new(result
-                        .then_execute(self.queue.clone(), instance_local_buffer_updates).unwrap()
-                        .then_signal_semaphore()
-                        .then_execute_same_queue(command_buffer.build().unwrap()).unwrap());
-                } else {
-                    result = Box::new(result
-                        .then_signal_semaphore()
-                        .then_execute(self.queue.clone(), instance_local_buffer_updates).unwrap()
-                        .then_signal_semaphore()
-                        .then_execute_same_queue(command_buffer.build().unwrap()).unwrap());
-                }
-            }
+            self.render_instances(current_framebuffer, clear_values, &draw_context, world_space_models);
 
             println!("derp");
 
-            let result = result
+            let result = self.synchronization.take().unwrap()
                 .then_signal_fence()
                 // The color output is now expected to contain our triangle. But in order to show it on
                 // the screen, we have to *present* the image by calling `present`.
@@ -653,6 +546,70 @@ impl Ammolite {
             // block you should spawn a separate thread dedicated to submissions.
             break;
         }
+    }
+
+    fn render_instances<'a>(&mut self, current_framebuffer: Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>, clear_values: Vec<ClearValue>, context: &'a DrawContext<'a>, world_space_models: &'a [WorldSpaceModel<'a>]) {
+        let subpass_alpha_modes = [
+            AlphaMode::Opaque,
+            AlphaMode::Mask,
+            AlphaMode::Blend,
+            AlphaMode::Blend,
+        ];
+
+        let instances = world_space_models.iter()
+            .map(|WorldSpaceModel { model, matrix }| {
+                (
+                    model,
+                    self.buffer_pool_uniform_instance.next(InstanceUBO::new(matrix.clone())),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(
+            self.device.clone(),
+            self.queue.family(),
+        ).unwrap()
+            .begin_render_pass(
+                current_framebuffer,
+                false,
+                clear_values,
+            ).unwrap();
+
+        for (subpass_index, alpha_mode) in subpass_alpha_modes.into_iter().enumerate() {
+            for (index, world_space_model) in world_space_models.into_iter().enumerate() {
+                let WorldSpaceModel {
+                    model,
+                    matrix,
+                } = world_space_model;
+
+                let instance_ubo = InstanceUBO::new(matrix.clone());
+
+                let instance_local_buffer_updates = AutoCommandBufferBuilder::primary_one_time_submit(
+                    self.device.clone(),
+                    self.queue.family().clone(),
+                    ).unwrap()
+                    .update_buffer(self.instance_ubo_buffer.staging_buffer().clone(), instance_ubo.clone()).unwrap()
+                    .copy_buffer(self.instance_ubo_buffer.staging_buffer().clone(), self.instance_ubo_buffer.device_buffer().clone()).unwrap()
+                    .build().unwrap();
+
+                let mut command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(
+                    self.device.clone(),
+                    self.queue.family().clone(),
+                    ).unwrap();
+
+                command_buffer = model.draw_scene(
+                    command_buffer,
+                    context.clone(),
+                    *alpha_mode,
+                    subpass_index as u8,
+                    0,
+                ).unwrap();
+            }
+        }
+
+        self.synchronization = Some(Box::new(self.synchronization.take().unwrap()
+            .then_signal_semaphore()
+            .then_execute_same_queue(command_buffer.build().unwrap()).unwrap()));
     }
 }
 

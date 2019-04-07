@@ -50,12 +50,10 @@ pub trait FramebufferWithClearValues<C>: FramebufferAbstract + RenderPassDescCle
 
 impl<C, F> FramebufferWithClearValues<C> for F where F: FramebufferAbstract + RenderPassDescClearValues<C> + Send + Sync + 'static {}
 
-// TODO: Remove generics
 #[derive(Clone)]
-pub struct InitializationDrawContext<'a> {
-    pub draw_context: DrawContext<'a>,
-    pub framebuffer: &'a Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>,
-    pub clear_values: &'a Vec<ClearValue>,
+pub struct InstanceDrawContext<'a> {
+    pub draw_context: &'a DrawContext<'a>,
+    pub descriptor_set_instance: Arc<DescriptorSet + Send + Sync>,
 }
 
 #[derive(Clone)]
@@ -64,9 +62,6 @@ pub struct DrawContext<'a> {
     pub queue_family: &'a QueueFamily<'a>,
     pub pipeline_cache: &'a Arc<GraphicsPipelineSetCache>,
     pub dynamic: &'a DynamicState,
-    pub descriptor_set_scene: &'a Arc<DescriptorSet + Send + Sync>,
-    pub descriptor_set_instance: &'a Arc<DescriptorSet + Send + Sync>,
-    pub descriptor_set_blend: &'a Arc<DescriptorSet + Send + Sync>,
     pub helper_resources: &'a HelperResources,
 }
 
@@ -74,12 +69,11 @@ pub struct DrawContext<'a> {
 pub struct HelperResources {
     pub empty_image: Arc<dyn ImageViewAccess + Send + Sync>,
     pub zero_buffer: Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>,
-    pub default_material_descriptor_set: Arc<dyn DescriptorSet + Send + Sync>,
     pub cheapest_sampler: Arc<Sampler>,
 }
 
 impl HelperResources {
-    pub fn new<'a, I>(device: &Arc<Device>, queue_families: I, pipeline: Arc<GraphicsPipelineAbstract + Sync + Send>)
+    pub fn new<'a, I>(device: &Arc<Device>, queue_families: I)
             -> Result<SimpleUninitializedResource<HelperResources>, Error>
             where I: IntoIterator<Item = QueueFamily<'a>> + Clone {
         let (empty_device_image, empty_image_initialization) = ImmutableImage::uninitialized(
@@ -129,28 +123,6 @@ impl HelperResources {
             0.0,
         )?;
 
-        let (device_default_material_ubo_buffer, default_material_ubo_buffer_initialization) = unsafe {
-            ImmutableBuffer::<MaterialUBO>::uninitialized(
-                device.clone(),
-                BufferUsage::uniform_buffer_transfer_destination(),
-            )
-        }?;
-        let default_material_descriptor_set: Arc<dyn DescriptorSet + Send + Sync> = Arc::new(
-            PersistentDescriptorSet::start(pipeline.clone(), 3)
-                .add_buffer(device_default_material_ubo_buffer.clone()).unwrap()
-                .add_image(empty_device_image.clone()).unwrap()
-                .add_sampler(cheapest_sampler.clone()).unwrap()
-                .add_image(empty_device_image.clone()).unwrap()
-                .add_sampler(cheapest_sampler.clone()).unwrap()
-                .add_image(empty_device_image.clone()).unwrap()
-                .add_sampler(cheapest_sampler.clone()).unwrap()
-                .add_image(empty_device_image.clone()).unwrap()
-                .add_sampler(cheapest_sampler.clone()).unwrap()
-                .add_image(empty_device_image.clone()).unwrap()
-                .add_sampler(cheapest_sampler.clone()).unwrap()
-                .build().unwrap()
-        );
-
         let tasks = vec![
             InitializationTask::Image {
                 data: Arc::new(vec![0]),
@@ -161,16 +133,11 @@ impl HelperResources {
                 len: zero_buffer_len,
                 initialization_buffer: Arc::new(zero_buffer_initialization),
             },
-            InitializationTask::MaterialDescriptorSet {
-                data: MaterialUBO::default(),
-                initialization_buffer: Arc::new(default_material_ubo_buffer_initialization),
-            },
         ];
 
         let output = HelperResources {
             empty_image: empty_device_image,
             zero_buffer: zero_device_buffer,
-            default_material_descriptor_set,
             cheapest_sampler,
         };
 
@@ -229,8 +196,11 @@ impl Model {
         unsafe { slice.reinterpret::<[T]>() }
     }
 
-    pub fn import<'a, I, S>(device: &Arc<Device>, queue_families: I, pipeline: Arc<GraphicsPipelineAbstract + Sync + Send>, helper_resources: &HelperResources, path: S)
-            -> Result<SimpleUninitializedResource<Model>, Error>
+    pub fn import<'a, I, S>(device: &Arc<Device>,
+                            queue_families: I,
+                            pipeline: Arc<GraphicsPipelineAbstract + Sync + Send>,
+                            helper_resources: &HelperResources,
+                            path: S) -> Result<SimpleUninitializedResource<Model>, Error>
             where I: IntoIterator<Item = QueueFamily<'a>> + Clone,
                   S: AsRef<Path> {
         import::import_model(device, queue_families, pipeline, helper_resources, path)
@@ -239,58 +209,95 @@ impl Model {
     pub fn draw_scene(
         &self,
         mut command_buffer: AutoCommandBufferBuilder,
-        context: InitializationDrawContext,
+        instance_context: InstanceDrawContext,
+        alpha_mode: AlphaMode,
+        subpass: u8,
         scene_index: usize,
     ) -> Result<AutoCommandBufferBuilder, Error> {
         if scene_index >= self.document.scenes().len() {
             return Err(ModelDrawError::InvalidSceneIndex { index: scene_index }.into());
         }
 
-        let InitializationDrawContext {
-            draw_context,
-            framebuffer,
-            clear_values,
-        } = context;
-
         let scene = self.document.scenes().nth(scene_index).unwrap();
-        command_buffer = command_buffer.begin_render_pass(framebuffer.clone(), false, clear_values.clone())
-            .unwrap();
 
         for node in scene.nodes() {
-            command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Opaque, 0);
+            command_buffer = self.draw_node(node, command_buffer, &instance_context, alpha_mode, subpass);
         }
-
-        command_buffer = command_buffer.next_subpass(false).unwrap();
-
-        for node in scene.nodes() {
-            command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Mask, 1);
-        }
-
-        command_buffer = command_buffer.next_subpass(false).unwrap();
-
-        for node in scene.nodes() {
-            command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Blend, 2);
-        }
-
-        command_buffer = command_buffer.next_subpass(false).unwrap();
-
-        for node in scene.nodes() {
-            command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Blend, 3);
-        }
-
-        command_buffer = command_buffer
-            .end_render_pass().unwrap();
 
         Ok(command_buffer)
     }
 
+    // pub fn draw_scene_old(
+    //     &self,
+    //     mut command_buffer: AutoCommandBufferBuilder,
+    //     context: InitializationDrawContext,
+    //     alpha_mode: AlphaMode,
+    //     subpass: u8,
+    //     scene_index: usize,
+    // ) -> Result<AutoCommandBufferBuilder, Error> {
+    //     if scene_index >= self.document.scenes().len() {
+    //         return Err(ModelDrawError::InvalidSceneIndex { index: scene_index }.into());
+    //     }
+
+    //     let InitializationDrawContext {
+    //         draw_context,
+    //         framebuffer,
+    //         clear_values,
+    //     } = context;
+
+    //     let scene = self.document.scenes().nth(scene_index).unwrap();
+    //     command_buffer = command_buffer.begin_render_pass(framebuffer.clone(), false, clear_values.clone())
+    //         .unwrap();
+
+    //     for node in scene.nodes() {
+    //         command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Opaque, 0);
+    //     }
+
+    //     command_buffer = command_buffer.next_subpass(false).unwrap();
+
+    //     for node in scene.nodes() {
+    //         command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Mask, 1);
+    //     }
+
+    //     command_buffer = command_buffer.next_subpass(false).unwrap();
+
+    //     for node in scene.nodes() {
+    //         command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Blend, 2);
+    //     }
+
+    //     command_buffer = command_buffer.next_subpass(false).unwrap();
+
+    //     for node in scene.nodes() {
+    //         command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Blend, 3);
+    //     }
+
+    //     command_buffer = command_buffer
+    //         .end_render_pass().unwrap();
+
+    //     Ok(command_buffer)
+    // }
+
+    // pub fn draw_main_scene_old(
+    //     &self,
+    //     command_buffer: AutoCommandBufferBuilder,
+    //     context: InitializationDrawContext,
+    // ) -> Result<AutoCommandBufferBuilder, Error> {
+    //     if let Some(main_scene_index) = self.document.default_scene().map(|default_scene| default_scene.index()) {
+    //         self.draw_scene(command_buffer, context, main_scene_index)
+    //     } else {
+    //         Err(ModelDrawError::NoDefaultScene.into())
+    //     }
+    // }
+
     pub fn draw_main_scene(
         &self,
         command_buffer: AutoCommandBufferBuilder,
-        context: InitializationDrawContext,
+        instance_context: InstanceDrawContext,
+        alpha_mode: AlphaMode,
+        subpass: u8,
     ) -> Result<AutoCommandBufferBuilder, Error> {
         if let Some(main_scene_index) = self.document.default_scene().map(|default_scene| default_scene.index()) {
-            self.draw_scene(command_buffer, context, main_scene_index)
+            self.draw_scene(command_buffer, instance_context, alpha_mode, subpass, main_scene_index)
         } else {
             Err(ModelDrawError::NoDefaultScene.into())
         }
@@ -300,7 +307,7 @@ impl Model {
         &self,
         node: Node<'a>,
         mut command_buffer: AutoCommandBufferBuilder,
-        context: &DrawContext,
+        instance_context: &InstanceDrawContext,
         alpha_mode: AlphaMode,
         subpass: u8,
     ) -> AutoCommandBufferBuilder {
@@ -309,8 +316,12 @@ impl Model {
                 let material = primitive.material();
 
                 if material.alpha_mode() == alpha_mode {
+                    let &InstanceDrawContext {
+                        ref draw_context,
+                        ref descriptor_set_instance,
+                    } = instance_context;
                     let properties = GraphicsPipelineProperties::from(&primitive, &material);
-                    let pipeline_set = context.pipeline_cache.get_or_create_pipeline(&properties);
+                    let pipeline_set = draw_context.pipeline_cache.get_or_create_pipeline(&properties);
                     let pipeline = match (alpha_mode, subpass) {
                         (AlphaMode::Opaque, _) => &pipeline_set.opaque,
                         (AlphaMode::Mask, _) => &pipeline_set.mask,
@@ -322,33 +333,33 @@ impl Model {
                     let material_descriptor_set = material.index().map(|material_index| {
                         self.material_descriptor_sets[material_index].clone()
                     }).unwrap_or_else(|| {
-                        context.helper_resources.default_material_descriptor_set.clone()
+                        pipeline.default_material_descriptor_set.clone()
                     });
 
                     match (alpha_mode, subpass) {
                         (AlphaMode::Blend, 3) => {
                             let descriptor_sets = (
-                                context.descriptor_set_scene.clone(),
-                                context.descriptor_set_instance.clone(),
+                                pipeline.descriptor_set_scene.clone(),
+                                descriptor_set_instance.clone(),
                                 self.node_descriptor_sets[node.index()].clone(),
                                 material_descriptor_set,
-                                context.descriptor_set_blend.clone(),
+                                pipeline.descriptor_set_blend.clone(),
                             );
 
                             command_buffer = self.draw_primitive(
                                 &mesh,
                                 &primitive,
                                 command_buffer,
-                                context,
+                                draw_context,
                                 descriptor_sets.clone(),
-                                pipeline,
+                                &pipeline.pipeline,
                             );
 
                         },
                         _ => {
                             let descriptor_sets = (
-                                context.descriptor_set_scene.clone(),
-                                context.descriptor_set_instance.clone(),
+                                pipeline.descriptor_set_scene.clone(),
+                                descriptor_set_instance.clone(),
                                 self.node_descriptor_sets[node.index()].clone(),
                                 material_descriptor_set,
                             );
@@ -357,9 +368,9 @@ impl Model {
                                 &mesh,
                                 &primitive,
                                 command_buffer,
-                                context,
+                                draw_context,
                                 descriptor_sets.clone(),
-                                pipeline,
+                                &pipeline.pipeline,
                             );
                         },
                     }
@@ -368,7 +379,7 @@ impl Model {
         }
 
         for child in node.children() {
-            command_buffer = self.draw_node(child, command_buffer, context, alpha_mode, subpass);
+            command_buffer = self.draw_node(child, command_buffer, instance_context, alpha_mode, subpass);
         }
 
         command_buffer
@@ -379,7 +390,7 @@ impl Model {
         mesh: &Mesh<'a>,
         primitive: &Primitive<'a>,
         mut command_buffer: AutoCommandBufferBuilder,
-        context: &DrawContext,
+        draw_context: &DrawContext,
         sets: S,
         pipeline: &Arc<GraphicsPipelineAbstract + Send + Sync>,
     ) -> AutoCommandBufferBuilder where S: DescriptorSetsCollection + Clone {
@@ -425,7 +436,7 @@ impl Model {
             if let &Some(ref tex_coord_accessor) = &tex_coords_accessor {
                 self.get_semantic_buffer_view(tex_coord_accessor)
             } else {
-                let zero_buffer = context.helper_resources.zero_buffer.clone();
+                let zero_buffer = draw_context.helper_resources.zero_buffer.clone();
                 let zero_buffer_slice = BufferSlice::from_typed_buffer_access(zero_buffer);
 
                 unsafe { zero_buffer_slice.reinterpret::<[GltfVertexTexCoord]>() }
@@ -436,7 +447,7 @@ impl Model {
             if let &Some(ref vertex_color_accessor) = &vertex_color_accessor {
                 self.get_semantic_buffer_view(vertex_color_accessor)
             } else {
-                let zero_buffer = context.helper_resources.zero_buffer.clone();
+                let zero_buffer = draw_context.helper_resources.zero_buffer.clone();
                 let zero_buffer_slice = BufferSlice::from_typed_buffer_access(zero_buffer);
 
                 unsafe { zero_buffer_slice.reinterpret::<[GltfVertexColor]>() }
@@ -495,17 +506,17 @@ impl Model {
                         .clone();
                     command_buffer = command_buffer.draw_indexed(
                         pipeline.clone(),
-                        context.dynamic,
+                        draw_context.dynamic,
                         vertex_buffers.get_individual_buffers(),
                         index_buffer,
                         sets.clone(),
                         push_constants).unwrap();
                 },
                 DataType::U16 => {
-                    draw_indexed!(u16; command_buffer, context, vertex_buffers, indices_accessor, sets);
+                    draw_indexed!(u16; command_buffer, draw_context, vertex_buffers, indices_accessor, sets);
                 },
                 DataType::U32 => {
-                    draw_indexed!(u32; command_buffer, context, vertex_buffers, indices_accessor, sets);
+                    draw_indexed!(u32; command_buffer, draw_context, vertex_buffers, indices_accessor, sets);
                 },
                 _ => {
                     panic!("Index type not supported.");
@@ -514,7 +525,7 @@ impl Model {
         } else {
             command_buffer = command_buffer.draw(
                 pipeline.clone(),
-                context.dynamic,
+                draw_context.dynamic,
                 vertex_buffers.get_individual_buffers(),
                 sets.clone(),
                 push_constants).unwrap();

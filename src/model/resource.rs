@@ -1,6 +1,7 @@
 use std::iter;
 use std::sync::Arc;
 use std::fmt;
+use std::marker::PhantomData;
 use vulkano::command_buffer::AutoCommandBufferBuilder;
 use vulkano::device::Device;
 use vulkano::instance::QueueFamily;
@@ -186,6 +187,26 @@ pub trait UninitializedResource<T> {
         queue_family: QueueFamily,
         command_buffer_builder: AutoCommandBufferBuilder
     ) -> Result<(AutoCommandBufferBuilder, T), Error>;
+
+    fn join<U, URU>(self, other: URU) -> JoinUninitializedResource<T, U, Self, URU>
+            where Self: Sized,
+                  URU: UninitializedResource<U> {
+        JoinUninitializedResource {
+            first: self,
+            second: other,
+            _marker: PhantomData,
+        }
+    }
+
+    fn map<O, F>(self, map: F) -> MapUninitializedResource<T, O, Self, F>
+            where Self: Sized,
+                  F: FnOnce(T) -> O {
+        MapUninitializedResource {
+            input: self,
+            map,
+            _marker: PhantomData,
+        }
+    }
 }
 
 pub struct SimpleUninitializedResource<T> {
@@ -209,5 +230,41 @@ impl<T> UninitializedResource<T> for SimpleUninitializedResource<T> {
         }
 
         Ok((command_buffer_builder, self.output))
+    }
+}
+
+pub struct JoinUninitializedResource<T, U, URT, URU> where URT: UninitializedResource<T>,
+                                                           URU: UninitializedResource<U> {
+    first: URT,
+    second: URU,
+    _marker: PhantomData<(T, U)>,
+}
+
+impl<T, U, URT, URU> UninitializedResource<(T, U)> for JoinUninitializedResource<T, U, URT, URU>
+        where URT: UninitializedResource<T>,
+              URU: UninitializedResource<U> {
+    fn initialize_resource(self, device: &Arc<Device>, queue_family: QueueFamily, command_buffer_builder: AutoCommandBufferBuilder) -> Result<(AutoCommandBufferBuilder, (T, U)), Error> {
+        let (command_buffer_builder, first_result) = self.first.initialize_resource(device, queue_family, command_buffer_builder)?;
+        let (command_buffer_builder, second_result) = self.second.initialize_resource(device, queue_family, command_buffer_builder)?;
+
+        Ok((command_buffer_builder, (first_result, second_result)))
+    }
+}
+
+pub struct MapUninitializedResource<I, O, URI, F> where URI: UninitializedResource<I>,
+                                                        F: FnOnce(I) -> O {
+    input: URI,
+    map: F,
+    _marker: PhantomData<(I, O)>,
+}
+
+impl<I, O, URI, F> UninitializedResource<O> for MapUninitializedResource<I, O, URI, F>
+        where URI: UninitializedResource<I>,
+              F: FnOnce(I) -> O {
+    fn initialize_resource(self, device: &Arc<Device>, queue_family: QueueFamily, command_buffer_builder: AutoCommandBufferBuilder) -> Result<(AutoCommandBufferBuilder, O), Error> {
+        let (command_buffer_builder, result) = self.input.initialize_resource(device, queue_family, command_buffer_builder)?;
+        let mapped_result = (self.map)(result);
+
+        Ok((command_buffer_builder, mapped_result))
     }
 }

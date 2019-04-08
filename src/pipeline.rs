@@ -1,4 +1,5 @@
-use std::sync::{Arc, RwLock};
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, RwLock, Weak};
 use std::ops::{BitOr, BitOrAssign, Not};
 use std::collections::HashMap;
 use vulkano::format::*;
@@ -6,6 +7,7 @@ use vulkano::descriptor::descriptor_set::DescriptorSet;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::descriptor::descriptor_set::FixedSizeDescriptorSetsPool;
 use vulkano::descriptor::descriptor_set::FixedSizeDescriptorSet;
+use vulkano::descriptor::pipeline_layout::PipelineLayoutDesc;
 use vulkano::instance::QueueFamily;
 use vulkano::image::{AttachmentImage, ImageUsage};
 use vulkano::image::swapchain::SwapchainImage;
@@ -28,12 +30,13 @@ use vulkano::pipeline::depth_stencil::Compare;
 use vulkano::pipeline::depth_stencil::DepthBounds;
 use vulkano::swapchain::Swapchain;
 use winit::Window;
+use weak_table::WeakKeyHashMap;
 use gltf::material::Material;
 use gltf::mesh::Primitive;
 use failure::Error;
 use crate::vertex::{GltfVertexBufferDefinition, VertexAttributePropertiesSet};
 use crate::model::{FramebufferWithClearValues, HelperResources};
-use crate::model::resource::{InitializationTask, SimpleUninitializedResource};
+use crate::model::resource::{InitializationTask, UninitializedResource, SimpleUninitializedResource};
 use crate::buffer::StagedBuffer;
 use crate::shaders::*;
 
@@ -227,47 +230,51 @@ impl SharedGltfGraphicsPipelineResources {
 // }
 
 // FIXME: Cleanup comments
-#[derive(Clone)]
 pub struct GltfGraphicsPipeline/*<Layout>
         where Layout: PipelineLayoutAbstract + 'static + Clone + Send + Sync*/ {
     // layout: Layout,
     pub pipeline: Arc<dyn GraphicsPipelineAbstract + Send + Sync>,
+    pub layout_dependent_resources: Arc<GltfPipelineLayoutDependentResources>,
+}
+
+impl GltfGraphicsPipeline {
+    pub fn from(pipeline: Arc<dyn GraphicsPipelineAbstract + Send + Sync>,
+                layout_dependent_resources: Arc<GltfPipelineLayoutDependentResources>) -> Self {
+        Self {
+            pipeline,
+            layout_dependent_resources,
+        }
+    }
+}
+
+pub struct GltfPipelineLayoutDependentResources {
+    pub layout: Arc<dyn PipelineLayoutAbstract + Send + Sync>,
     pub descriptor_set_scene: Arc<dyn DescriptorSet + Send + Sync>,
-    pub descriptor_set_pool_instance: Arc<FixedSizeDescriptorSetsPool<Arc<dyn GraphicsPipelineAbstract + Send + Sync>>>,
+    pub descriptor_set_pool_instance: Arc<FixedSizeDescriptorSetsPool<Arc<dyn PipelineLayoutAbstract + Send + Sync>>>,
     pub descriptor_set_blend: Arc<dyn DescriptorSet + Send + Sync>,
     pub default_material_descriptor_set: Arc<dyn DescriptorSet + Send + Sync>,
 }
 
-impl/*<Layout>*/ GltfGraphicsPipeline/*<Layout>
-        where Layout: PipelineLayoutAbstract + 'static + Clone + Send + Sync*/ {
-    pub fn from/*<VertexDefinition, Layout, RenderP>*/(
-        // pipeline: GraphicsPipeline<VertexDefinition, Layout, RenderP>,
-        pipeline: Arc<dyn GraphicsPipelineAbstract + Send + Sync>,
-        shared_resources: &SharedGltfGraphicsPipelineResources) -> Self
-            // where Self: GraphicsPipelineAbstract,
-            //       Layout: 'static + Send + Sync,
-            //       VertexDefinition: 'static + VertexSource<Vec<Arc<dyn BufferAccess + Send + Sync>>> + Send + Sync,
-            //       RenderP: 'static + RenderPassAbstract + Send + Sync {
-                      {
-        // let layout: Layout = pipeline.layout().clone();
-        // let pipeline: Arc<dyn GraphicsPipelineAbstract + Send + Sync> = Arc::new(pipeline);
+impl GltfPipelineLayoutDependentResources {
+    pub fn from(layout: Arc<dyn PipelineLayoutAbstract + Send + Sync>,
+                shared_resources: &SharedGltfGraphicsPipelineResources) -> Self {
         let descriptor_set_scene = Arc::new(
-            PersistentDescriptorSet::start(pipeline.clone(), 0)
+            PersistentDescriptorSet::start(layout.clone(), 0)
                 .add_buffer(shared_resources.scene_ubo_buffer.device_buffer().clone()).unwrap()
                 .build().unwrap()
         );
         let descriptor_set_pool_instance = Arc::new(
-            FixedSizeDescriptorSetsPool::new(pipeline.clone(), 1)
+            FixedSizeDescriptorSetsPool::new(layout.clone(), 1)
         );
         let descriptor_set_blend = Arc::new(
             // FIXME: Use a layout instead
-            PersistentDescriptorSet::start(pipeline.clone(), 4)
+            PersistentDescriptorSet::start(layout.clone(), 4)
                 .add_image(shared_resources.blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
                 .add_image(shared_resources.blend_revealage_image.as_ref().unwrap().clone()).unwrap()
                 .build().unwrap()
         );
         let default_material_descriptor_set: Arc<dyn DescriptorSet + Send + Sync> = Arc::new(
-            PersistentDescriptorSet::start(pipeline.clone(), 3)
+            PersistentDescriptorSet::start(layout.clone(), 3)
                 .add_buffer(shared_resources.default_material_ubo_buffer.clone()).unwrap()
                 .add_image(shared_resources.helper_resources.empty_image.clone()).unwrap()
                 .add_sampler(shared_resources.helper_resources.cheapest_sampler.clone()).unwrap()
@@ -283,32 +290,24 @@ impl/*<Layout>*/ GltfGraphicsPipeline/*<Layout>
         );
 
         Self {
-            // layout,
-            pipeline,
+            layout,
             descriptor_set_scene,
             descriptor_set_pool_instance,
             descriptor_set_blend,
             default_material_descriptor_set,
         }
     }
-// }
-
-// impl/*<Layout>*/ GltfGraphicsPipelineAbstract for GltfGraphicsPipeline/*<Layout>
-//         where Layout: PipelineLayoutAbstract + 'static + Clone + Send + Sync*/ {
-    // fn pipeline(&self) -> &Arc<dyn GraphicsPipelineAbstract + Send + Sync> {
-    //     &self.pipeline
-    // }
 
     fn reconstruct_descriptor_sets(&mut self, shared_resources: &SharedGltfGraphicsPipelineResources) {
         self.descriptor_set_scene = Arc::new(
             // FIXME: Use a layout instead
-            PersistentDescriptorSet::start(self.pipeline.clone(), 0)
+            PersistentDescriptorSet::start(self.layout.clone(), 0)
                 .add_buffer(shared_resources.scene_ubo_buffer.device_buffer().clone()).unwrap()
                 .build().unwrap()
         );
         self.descriptor_set_blend = Arc::new(
                 // FIXME: Use a layout instead
-            PersistentDescriptorSet::start(self.pipeline.clone(), 4)
+            PersistentDescriptorSet::start(self.layout.clone(), 4)
                 .add_image(shared_resources.blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
                 .add_image(shared_resources.blend_revealage_image.as_ref().unwrap().clone()).unwrap()
                 .build().unwrap()
@@ -331,53 +330,84 @@ pub struct GraphicsPipelineSet {
     pub mask: Arc<GltfGraphicsPipeline>,
     pub blend_preprocess: Arc<GltfGraphicsPipeline>,
     pub blend_finalize: Arc<GltfGraphicsPipeline>,
-    // pub opaque: Arc<dyn GltfGraphicsPipelineAbstract>,
-    // pub mask: Arc<dyn GltfGraphicsPipelineAbstract>,
-    // pub blend_preprocess: Arc<dyn GltfGraphicsPipelineAbstract>,
-    // pub blend_finalize: Arc<dyn GltfGraphicsPipelineAbstract>,
 }
 
 // Consider improving the synchronization data type
 pub struct GraphicsPipelineSetCache {
-    pub map: Arc<RwLock<HashMap<GraphicsPipelineProperties, Arc<GraphicsPipelineSet>>>>,
+    pub pipeline_map: Arc<RwLock<HashMap<GraphicsPipelineProperties, Arc<GraphicsPipelineSet>>>>,
     pub shared_resources: SharedGltfGraphicsPipelineResources,
+    pub pipeline_layout_dependent_resources: Arc<RwLock<WeakKeyHashMap<
+                                                 Weak<dyn PipelineLayoutDesc + Send + Sync>,
+                                                 Arc<GltfPipelineLayoutDependentResources>
+                                             >>>,
     pub device: Arc<Device>,
     pub render_pass: Arc<RenderPassAbstract + Send + Sync>,
     pub vertex_shader: gltf_vert::Shader, // Stored here to avoid unnecessary reloading
 }
 
+macro_rules! cache_layout {
+    ($cache:expr, $builder:expr) => {{
+        let resources_map = $cache.pipeline_layout_dependent_resources
+            .as_ref().write().expect("Layout dependent resources poisoned.");
+        let layout_desc = $builder.construct_layout_desc(&[]).unwrap();
+        let (layout, resources) = if let Some(resources) = resources_map.get(&layout_desc) {
+            (resources.layout.clone(), resources.clone())
+        } else {
+            let layout: Arc<dyn PipelineLayoutAbstract + Send + Sync> = Arc::new(
+                layout_desc.clone().build($cache.device.clone()).unwrap()
+            );
+            let resources = Arc::new(GltfPipelineLayoutDependentResources::from(
+                layout.clone(),
+                &$cache.shared_resources
+            ));
+
+            resources_map.insert(layout_desc, resources.clone());
+
+            (layout, resources)
+        };
+
+        let pipeline = Arc::new($builder.with_pipeline_layout($cache.device.clone(), layout).unwrap());
+
+        Arc::new(GltfGraphicsPipeline::from(pipeline, resources))
+    }}
+}
+
 macro_rules! construct_pipeline_opaque {
     ($cache:expr, $graphics_pipeline_builder:expr, $shared_resources:expr) => {{
         let fs = gltf_opaque_frag::Shader::load($cache.device.clone()).expect("Failed to create shader module.");
-        let pipeline = $graphics_pipeline_builder.clone()
+        let builder = $graphics_pipeline_builder.clone()
             .depth_stencil(DepthStencil::simple_depth_test())
             .fragment_shader(fs.main_entry_point(), ())
-            .render_pass(Subpass::from($cache.render_pass.clone(), 0).unwrap())
-            .build($cache.device.clone())
-            .unwrap();
+            .render_pass(Subpass::from($cache.render_pass.clone(), 0).unwrap());
 
-        Arc::new(GltfGraphicsPipeline::from(Arc::new(pipeline), $shared_resources))
+        cache_layout!($cache, builder)
+            // .build($cache.device.clone())
+            // .unwrap();
+
+        // Arc::new(GltfGraphicsPipeline::from(Arc::new(pipeline), $shared_resources))
     }}
 }
 
 macro_rules! construct_pipeline_mask {
     ($cache:expr, $graphics_pipeline_builder:expr, $shared_resources:expr) => {{
         let fs = gltf_mask_frag::Shader::load($cache.device.clone()).expect("Failed to create shader module.");
-        let pipeline = $graphics_pipeline_builder.clone()
+        let builder = $graphics_pipeline_builder.clone()
             .depth_stencil(DepthStencil::simple_depth_test())
             .fragment_shader(fs.main_entry_point(), ())
-            .render_pass(Subpass::from($cache.render_pass.clone(), 1).unwrap())
-            .build($cache.device.clone())
-            .unwrap();
+            .render_pass(Subpass::from($cache.render_pass.clone(), 1).unwrap());
 
-        Arc::new(GltfGraphicsPipeline::from(Arc::new(pipeline), $shared_resources))
+        cache_layout!($cache, builder)
+            // .build($cache.device.clone())
+            // .unwrap();
+
+        // Arc::new(GltfGraphicsPipeline::from(Arc::new(pipeline), $shared_resources))
     }}
 }
 
 macro_rules! construct_pipeline_blend_preprocess {
     ($cache:expr, $graphics_pipeline_builder:expr, $shared_resources:expr) => {{
         let fs = gltf_blend_preprocess_frag::Shader::load($cache.device.clone()).expect("Failed to create shader module.");
-        let pipeline = $graphics_pipeline_builder.clone()
+        let builder = $graphics_pipeline_builder.clone()
             .depth_stencil(DepthStencil {
                 depth_compare: Compare::Less,
                 depth_write: false,
@@ -414,18 +444,20 @@ macro_rules! construct_pipeline_blend_preprocess {
                     mask_alpha: true,
                 },
             ].into_iter().cloned())
-            .render_pass(Subpass::from($cache.render_pass.clone(), 2).unwrap())
-            .build($cache.device.clone())
-            .unwrap();
+            .render_pass(Subpass::from($cache.render_pass.clone(), 2).unwrap());
 
-        Arc::new(GltfGraphicsPipeline::from(Arc::new(pipeline), $shared_resources))
+        cache_layout!($cache, builder)
+            // .build($cache.device.clone())
+            // .unwrap();
+
+        // Arc::new(GltfGraphicsPipeline::from(Arc::new(pipeline), $shared_resources))
     }}
 }
 
 macro_rules! construct_pipeline_blend_finalize {
     ($cache:expr, $graphics_pipeline_builder:expr, $shared_resources:expr) => {{
         let fs = gltf_blend_finalize_frag::Shader::load($cache.device.clone()).expect("Failed to create shader module.");
-        let pipeline = $graphics_pipeline_builder.clone()
+        let builder = $graphics_pipeline_builder.clone()
             .depth_stencil(DepthStencil {
                 depth_compare: Compare::Less,
                 depth_write: false,
@@ -449,30 +481,37 @@ macro_rules! construct_pipeline_blend_finalize {
                     mask_alpha: true,
                 },
             ].into_iter().cloned())
-            .render_pass(Subpass::from($cache.render_pass.clone(), 3).unwrap())
-            .build($cache.device.clone())
-            .unwrap();
+            .render_pass(Subpass::from($cache.render_pass.clone(), 3).unwrap());
 
-        Arc::new(GltfGraphicsPipeline::from(Arc::new(pipeline), $shared_resources))
+        cache_layout!($cache, builder)
+            // .build($cache.device.clone())
+            // .unwrap();
+
+        // Arc::new(GltfGraphicsPipeline::from(Arc::new(pipeline), $shared_resources))
     }}
 }
 
 impl GraphicsPipelineSetCache {
-    pub fn create(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>, helper_resources: HelperResources, queue_family: QueueFamily) -> Self {
-        let result = GraphicsPipelineSetCache {
-            map: Arc::new(RwLock::new(HashMap::new())),
-            shared_resources: SharedGltfGraphicsPipelineResources::new(device.clone(), helper_resources, queue_family),
-            device: device.clone(),
-            render_pass: Self::create_render_pass(device, swapchain),
-            vertex_shader: gltf_vert::Shader::load(device.clone())
-                .expect("Failed to create shader module."),
-        };
+    pub fn create(device: Arc<Device>, swapchain: Arc<Swapchain<Window>>, helper_resources: HelperResources, queue_family: QueueFamily) -> impl UninitializedResource<Self> {
+        SharedGltfGraphicsPipelineResources::new(device.clone(), helper_resources, queue_family)
+            .unwrap()
+            .map(move |shared_resources| {
+                let result = GraphicsPipelineSetCache {
+                    pipeline_map: Arc::new(RwLock::new(HashMap::new())),
+                    shared_resources,
+                    pipeline_layout_dependent_resources: Arc::new(RwLock::new(WeakKeyHashMap::new())),
+                    device: device.clone(),
+                    render_pass: Self::create_render_pass(&device, &swapchain),
+                    vertex_shader: gltf_vert::Shader::load(device.clone())
+                        .expect("Failed to create shader module."),
+                };
 
-        result.create_pipeline(&GraphicsPipelineProperties::default());
-            // FIXME: Add proper error handling (see `Self::get_default_pipeline`)
-            // .expect("Couldn't create a pipeline set for default properties.");
+                result.create_pipeline(&GraphicsPipelineProperties::default());
+                    // FIXME: Add proper error handling (see `Self::get_default_pipeline`)
+                    // .expect("Couldn't create a pipeline set for default properties.");
 
-        result
+                result
+            })
     }
 
     fn create_render_pass(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Arc<RenderPassAbstract + Send + Sync> {
@@ -539,7 +578,7 @@ impl GraphicsPipelineSetCache {
     }
 
     pub fn get_pipeline(&self, properties: &GraphicsPipelineProperties) -> Option<Arc<GraphicsPipelineSet>> {
-        self.map
+        self.pipeline_map
             .as_ref()
             .read()
             .expect("The Graphics Pipeline Cache became poisoned.")
@@ -575,7 +614,7 @@ impl GraphicsPipelineSetCache {
             builder = builder.cull_mode_back();
         }
 
-        let mut map = self.map
+        let mut pipeline_map = self.pipeline_map
             .as_ref()
             .write()
             .expect("The Graphics Pipeline Cache became poisoned.");
@@ -603,7 +642,7 @@ impl GraphicsPipelineSetCache {
             blend_finalize: construct_pipeline_blend_finalize!(self, builder, &self.shared_resources),
         });
 
-        map.insert(properties.clone(), pipeline_set.clone());
+        pipeline_map.insert(properties.clone(), pipeline_set.clone());
 
         pipeline_set
     }

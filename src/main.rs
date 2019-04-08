@@ -28,6 +28,7 @@ extern crate arrayvec;
 extern crate boolinator;
 extern crate mikktspace;
 extern crate safe_transmute;
+extern crate weak_table;
 
 #[macro_use]
 pub mod math;
@@ -299,7 +300,6 @@ impl Ammolite {
 
         // (EventsLoop, Arc<Surface<Window>>, [u32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Arc<Swapchain<Window>>, Vec<Arc<SwapchainImage<Window>>>)
         let (events_loop, window, dimensions, device, queue_family, queue, swapchain, images) = vulkan_initialize(&instance);
-        let pipeline_cache = Arc::new(GraphicsPipelineSetCache::create(&device, &swapchain, queue_family));
 
         let descriptor_set_gltf_blend: Option<Arc<DescriptorSet + Send + Sync>> = None;
 
@@ -307,11 +307,11 @@ impl Ammolite {
         let (init_command_buffer_builder, helper_resources) = HelperResources::new(
             &device,
             [queue_family].into_iter().cloned(),
-        ).unwrap().initialize_resource(
-            &device,
-            queue_family,
-            init_command_buffer_builder,
-        ).unwrap();
+        ).unwrap()
+            .initialize_resource(&device, queue_family, init_command_buffer_builder).unwrap();
+        let (init_command_buffer_builder, pipeline_cache) = GraphicsPipelineSetCache::create(device.clone(), swapchain.clone(), helper_resources, queue_family)
+            .map(|pipeline_cache| Arc::new(pipeline_cache))
+            .initialize_resource(&device, queue_family, init_command_buffer_builder).unwrap();
         let init_command_buffer = init_command_buffer_builder.build().unwrap();
 
         // Destroying the `GpuFuture` blocks until the GPU is finished executing it. In order to avoid

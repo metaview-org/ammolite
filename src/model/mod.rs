@@ -41,6 +41,8 @@ use crate::shaders::{InstanceUBO, MaterialUBO, PushConstants};
 use crate::vertex::*;
 use crate::pipeline::GraphicsPipelineProperties;
 use crate::pipeline::GraphicsPipelineSetCache;
+use crate::pipeline::GltfGraphicsPipeline;
+use crate::iter::ArrayIterator;
 use self::error::*;
 use self::resource::*;
 
@@ -204,6 +206,41 @@ impl Model {
             where I: IntoIterator<Item = QueueFamily<'a>> + Clone,
                   S: AsRef<Path> {
         import::import_model(device, queue_families, pipeline, helper_resources, path)
+    }
+
+    pub fn get_subpass_alpha_modes() -> impl Iterator<Item=AlphaMode> {
+        ArrayIterator::new([
+            AlphaMode::Opaque,
+            AlphaMode::Mask,
+            AlphaMode::Blend,
+            AlphaMode::Blend,
+        ])
+    }
+
+    fn get_used_pipelines(&self, pipeline_cache: &Arc<GraphicsPipelineSetCache>) -> Vec<GltfGraphicsPipeline> {
+        let mut pipelines = Vec::new();
+
+        for mesh in self.document.meshes() {
+            for primitive in mesh.primitives() {
+                let material = primitive.material();
+                let properties = GraphicsPipelineProperties::from(&primitive, &material);
+                let pipeline_set = pipeline_cache.get_or_create_pipeline(&properties);
+
+                for (subpass, alpha_mode) in Self::get_subpass_alpha_modes().enumerate() {
+                    if material.alpha_mode() == alpha_mode {
+                        let pipeline = match (alpha_mode, subpass) {
+                            (AlphaMode::Opaque, _) => &pipeline_set.opaque,
+                            (AlphaMode::Mask, _) => &pipeline_set.mask,
+                            (AlphaMode::Blend, 2) => &pipeline_set.blend_preprocess,
+                            (AlphaMode::Blend, 3) => &pipeline_set.blend_finalize,
+                            _ => panic!("Invalid alpha_mode/subpass combination."),
+                        };
+                    }
+                }
+            }
+        }
+
+        pipelines
     }
 
     pub fn draw_scene(

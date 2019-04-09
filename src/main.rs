@@ -549,13 +549,6 @@ impl Ammolite {
     }
 
     fn render_instances<'a>(&mut self, current_framebuffer: Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>, clear_values: Vec<ClearValue>, context: &'a DrawContext<'a>, world_space_models: &'a [WorldSpaceModel<'a>]) {
-        let subpass_alpha_modes = [
-            AlphaMode::Opaque,
-            AlphaMode::Mask,
-            AlphaMode::Blend,
-            AlphaMode::Blend,
-        ];
-
         let instances = world_space_models.iter()
             .map(|WorldSpaceModel { model, matrix }| {
                 (
@@ -575,7 +568,7 @@ impl Ammolite {
                 clear_values,
             ).unwrap();
 
-        for (subpass_index, alpha_mode) in subpass_alpha_modes.into_iter().enumerate() {
+        for (subpass_index, alpha_mode) in Model::get_subpass_alpha_modes().enumerate() {
             for (index, world_space_model) in world_space_models.into_iter().enumerate() {
                 let WorldSpaceModel {
                     model,

@@ -37,6 +37,9 @@ use crate::iter::ForcedExactSizeIterator;
 use crate::iter::ByteBufferIterator;
 use crate::vertex::{GltfVertexPosition, GltfVertexNormal, GltfVertexTangent, GltfVertexTexCoord};
 use crate::sampler::IntoVulkanEquivalent;
+use crate::pipeline::DescriptorSetMap;
+use crate::pipeline::GltfGraphicsPipeline;
+use crate::pipeline::GraphicsPipelineSetCache;
 use crate::math::*;
 use crate::model::{Model, HelperResources};
 use crate::model::resource::*;
@@ -573,12 +576,13 @@ fn get_node_matrices(document: &Document) -> Vec<Mat4> {
     results.into_iter().map(|option| option.unwrap_or_else(Mat4::identity)).collect()
 }
 
-pub fn create_node_descriptor_sets(device: &Arc<Device>,
-                                   pipeline: &Arc<GraphicsPipelineAbstract + Sync + Send>,
-                                   document: &Document,
-                                   initialization_tasks: &mut Vec<InitializationTask>)
-        -> Result<Vec<Arc<dyn DescriptorSet + Send + Sync>>, Error> {
-    let mut node_descriptor_sets: Vec<Arc<dyn DescriptorSet + Send + Sync>> = Vec::with_capacity(document.nodes().len());
+pub fn create_node_descriptor_sets<'a>(device: &Arc<Device>,
+                                       pipelines: impl IntoIterator<Item=&'a Arc<GltfGraphicsPipeline>>,
+                                       document: &Document,
+                                       initialization_tasks: &mut Vec<InitializationTask>)
+        -> Result<Vec<DescriptorSetMap>, Error> {
+    let pipelines: Vec<_> = pipelines.into_iter().map(Clone::clone).collect();
+    let mut node_descriptor_set_maps: Vec<DescriptorSetMap> = Vec::with_capacity(document.nodes().len());
     let transform_matrices = get_node_matrices(&document);
 
     for node in document.nodes() {
@@ -589,20 +593,22 @@ pub fn create_node_descriptor_sets(device: &Arc<Device>,
                 BufferUsage::uniform_buffer_transfer_destination(),
             )
         }?;
-        let descriptor_set = Arc::new(
-            PersistentDescriptorSet::start(pipeline.clone(), 2)
-                .add_buffer(device_buffer.clone()).unwrap()
-                .build().unwrap()
+        let descriptor_set_map = DescriptorSetMap::custom(&pipelines[..], |pipeline|
+            Arc::new(
+                PersistentDescriptorSet::start(pipeline.layout.clone(), 2)
+                    .add_buffer(device_buffer.clone()).unwrap()
+                    .build().unwrap()
+            )
         );
 
         initialization_tasks.push(InitializationTask::NodeDescriptorSet {
             data: node_ubo,
             initialization_buffer: Arc::new(buffer_initialization),
         });
-        node_descriptor_sets.push(descriptor_set);
+        node_descriptor_set_maps.push(descriptor_set_map);
     }
 
-    Ok(node_descriptor_sets)
+    Ok(node_descriptor_set_maps)
 }
 
 pub fn create_samplers(device: &Arc<Device>, document: &Document) -> Result<Vec<Arc<Sampler>>, Error> {
@@ -632,15 +638,16 @@ pub fn create_samplers(device: &Arc<Device>, document: &Document) -> Result<Vec<
     Ok(device_samplers)
 }
 
-pub fn create_material_descriptor_sets(device: &Arc<Device>,
-                                       pipeline: &Arc<GraphicsPipelineAbstract + Sync + Send>,
-                                       helper_resources: &HelperResources,
-                                       document: &Document,
-                                       device_images: &[Arc<dyn ImageViewAccess + Send + Sync>],
-                                       initialization_tasks: &mut Vec<InitializationTask>)
-        -> Result<Vec<Arc<dyn DescriptorSet + Send + Sync>>, Error> {
+pub fn create_material_descriptor_sets<'a>(device: &Arc<Device>,
+                                           pipelines: impl IntoIterator<Item=&'a Arc<GltfGraphicsPipeline>>,
+                                           helper_resources: &HelperResources,
+                                           document: &Document,
+                                           device_images: &[Arc<dyn ImageViewAccess + Send + Sync>],
+                                           initialization_tasks: &mut Vec<InitializationTask>)
+        -> Result<Vec<DescriptorSetMap>, Error> {
     let device_samplers = create_samplers(device, &document)?;
-    let mut material_descriptor_sets: Vec<Arc<dyn DescriptorSet + Send + Sync>> = Vec::with_capacity(document.materials().len());
+    let pipelines: Vec<_> = pipelines.into_iter().map(Clone::clone).collect();
+    let mut material_descriptor_set_maps: Vec<DescriptorSetMap> = Vec::with_capacity(document.materials().len());
 
     for material in document.materials() {
         let pbr = material.pbr_metallic_roughness();
@@ -733,35 +740,37 @@ pub fn create_material_descriptor_sets(device: &Arc<Device>,
             .unwrap_or_else(|| helper_resources.empty_image.clone());
         let emissive_sampler: Arc<Sampler> = emissive_sampler_option
             .unwrap_or_else(|| helper_resources.cheapest_sampler.clone());
-        let descriptor_set: Arc<dyn DescriptorSet + Send + Sync> = Arc::new(
-            PersistentDescriptorSet::start(pipeline.clone(), 3)
-                .add_buffer(device_material_ubo_buffer.clone()).unwrap()
-                .add_image(base_color_texture).unwrap()
-                .add_sampler(base_color_sampler).unwrap()
-                .add_image(metallic_roughness_texture).unwrap()
-                .add_sampler(metallic_roughness_sampler).unwrap()
-                .add_image(normal_texture).unwrap()
-                .add_sampler(normal_sampler).unwrap()
-                .add_image(occlusion_texture).unwrap()
-                .add_sampler(occlusion_sampler).unwrap()
-                .add_image(emissive_texture).unwrap()
-                .add_sampler(emissive_sampler).unwrap()
-                .build().unwrap()
+        let descriptor_set_map: DescriptorSetMap = DescriptorSetMap::custom(&pipelines[..], |pipeline|
+            Arc::new(
+                PersistentDescriptorSet::start(pipeline.layout.clone(), 3)
+                    .add_buffer(device_material_ubo_buffer.clone()).unwrap()
+                    .add_image(base_color_texture.clone()).unwrap()
+                    .add_sampler(base_color_sampler.clone()).unwrap()
+                    .add_image(metallic_roughness_texture.clone()).unwrap()
+                    .add_sampler(metallic_roughness_sampler.clone()).unwrap()
+                    .add_image(normal_texture.clone()).unwrap()
+                    .add_sampler(normal_sampler.clone()).unwrap()
+                    .add_image(occlusion_texture.clone()).unwrap()
+                    .add_sampler(occlusion_sampler.clone()).unwrap()
+                    .add_image(emissive_texture.clone()).unwrap()
+                    .add_sampler(emissive_sampler.clone()).unwrap()
+                    .build().unwrap()
+            )
         );
 
         initialization_tasks.push(InitializationTask::MaterialDescriptorSet {
             data: material_ubo,
             initialization_buffer: Arc::new(material_ubo_buffer_initialization),
         });
-        material_descriptor_sets.push(descriptor_set);
+        material_descriptor_set_maps.push(descriptor_set_map);
     }
 
-    Ok(material_descriptor_sets)
+    Ok(material_descriptor_set_maps)
 }
 
 pub fn import_model<'a, I, S>(device: &Arc<Device>,
                               queue_families: I,
-                              pipeline: Arc<GraphicsPipelineAbstract + Sync + Send>,
+                              pipeline_cache: &GraphicsPipelineSetCache,
                               helper_resources: &HelperResources,
                               path: S)
         -> Result<SimpleUninitializedResource<Model>, Error>
@@ -771,14 +780,15 @@ pub fn import_model<'a, I, S>(device: &Arc<Device>,
     let mut initialization_tasks: Vec<InitializationTask> = Vec::with_capacity(
         buffer_data_array.len() + image_data_array.len() + document.accessors().len() + document.nodes().len() + document.materials().len()
     );
+    let pipelines = Model::get_pipelines_layouts(&document, pipeline_cache);
 
     let converted_index_buffers_by_accessor_index = import_index_buffers_by_accessor_index(device, &queue_families, &document, &buffer_data_array[..], &mut initialization_tasks)?;
     let (normal_buffers, normals) = precompute_missing_normal_buffers(device, &queue_families, &document, &buffer_data_array[..], &mut initialization_tasks)?;
     let tangent_buffers = precompute_missing_tangent_buffers(device, &queue_families, &document, &buffer_data_array[..], &mut initialization_tasks, &normals[..])?;
     let device_buffers = import_device_buffers(device, &queue_families, &document, buffer_data_array, &mut initialization_tasks)?;
     let device_images = import_device_images(device, &queue_families, helper_resources, &document, image_data_array, &mut initialization_tasks)?;
-    let node_descriptor_sets = create_node_descriptor_sets(device, &pipeline, &document, &mut initialization_tasks)?;
-    let material_descriptor_sets = create_material_descriptor_sets(device, &pipeline, helper_resources, &document, &device_images[..], &mut initialization_tasks)?;
+    let node_descriptor_sets = create_node_descriptor_sets(device, &pipelines[..], &document, &mut initialization_tasks)?;
+    let material_descriptor_sets = create_material_descriptor_sets(device, &pipelines[..], helper_resources, &document, &device_images[..], &mut initialization_tasks)?;
 
     Ok(SimpleUninitializedResource::new(Model {
         document,

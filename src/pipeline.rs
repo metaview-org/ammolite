@@ -1,12 +1,15 @@
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, RwLock, Weak};
+use std::collections::hash_map::Entry;
+use std::sync::{Arc, RwLock, Weak, Mutex};
 use std::ops::{BitOr, BitOrAssign, Not};
 use std::collections::HashMap;
 use vulkano::format::*;
+use vulkano::image::traits::ImageViewAccess;
 use vulkano::descriptor::descriptor_set::DescriptorSet;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::descriptor::descriptor_set::FixedSizeDescriptorSetsPool;
 use vulkano::descriptor::descriptor_set::FixedSizeDescriptorSet;
+use vulkano::descriptor::descriptor_set::FixedSizeDescriptorSetBuilder;
 use vulkano::descriptor::pipeline_layout::PipelineLayoutDesc;
 use vulkano::instance::QueueFamily;
 use vulkano::image::{AttachmentImage, ImageUsage};
@@ -34,6 +37,7 @@ use weak_table::WeakKeyHashMap;
 use gltf::material::Material;
 use gltf::mesh::Primitive;
 use failure::Error;
+use fnv::FnvBuildHasher;
 use crate::vertex::{GltfVertexBufferDefinition, VertexAttributePropertiesSet};
 use crate::model::{FramebufferWithClearValues, HelperResources};
 use crate::model::resource::{InitializationTask, UninitializedResource, SimpleUninitializedResource};
@@ -171,8 +175,9 @@ impl SharedGltfGraphicsPipelineResources {
                                             render_pass: Arc<RenderPassAbstract + Send + Sync>,
                                             swapchain_images: &[Arc<SwapchainImage<Window>>])
             -> Vec<Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>> {
+        let render_pass = &render_pass;
         swapchain_images.iter().map(|image| {
-            Arc::new(Framebuffer::start(render_pass)
+            Arc::new(Framebuffer::start(render_pass.clone())
                      .add(image.clone()).unwrap()
                      .add(self.depth_image.as_ref().unwrap().clone()).unwrap()
                      .add(self.blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
@@ -230,28 +235,95 @@ impl SharedGltfGraphicsPipelineResources {
 // }
 
 // FIXME: Cleanup comments
+#[derive(Clone)]
 pub struct GltfGraphicsPipeline/*<Layout>
         where Layout: PipelineLayoutAbstract + 'static + Clone + Send + Sync*/ {
-    // layout: Layout,
+    pub layout: Arc<dyn PipelineLayoutAbstract + Send + Sync>,
     pub pipeline: Arc<dyn GraphicsPipelineAbstract + Send + Sync>,
     pub layout_dependent_resources: Arc<GltfPipelineLayoutDependentResources>,
 }
 
 impl GltfGraphicsPipeline {
-    pub fn from(pipeline: Arc<dyn GraphicsPipelineAbstract + Send + Sync>,
+    pub fn from(layout: Arc<dyn PipelineLayoutAbstract + Send + Sync>,
+                pipeline: Arc<dyn GraphicsPipelineAbstract + Send + Sync>,
                 layout_dependent_resources: Arc<GltfPipelineLayoutDependentResources>) -> Self {
         Self {
+            layout,
             pipeline,
             layout_dependent_resources,
         }
     }
 }
 
+pub struct DescriptorSetMap {
+    // Consider implementing a lightweight "map" that stores values linearly in a `Vec` until a
+    // certain size is reached.
+    pub map: HashMap<
+        Arc<dyn PipelineLayoutAbstract + Send + Sync>,
+        Arc<dyn DescriptorSet + Send + Sync>,
+        FnvBuildHasher,
+    >,
+}
+
+impl DescriptorSetMap {
+    pub fn custom<'a>(pipelines: impl IntoIterator<Item=&'a Arc<GltfGraphicsPipeline>>,
+                      set_provider: impl Fn(&'a Arc<GltfGraphicsPipeline>)
+                      -> Arc<dyn DescriptorSet + Send + Sync>) -> Self {
+        let mut map = HashMap::<
+            Arc<dyn PipelineLayoutAbstract + Send + Sync>,
+            Arc<dyn DescriptorSet + Send + Sync>,
+            FnvBuildHasher,
+        >::default();
+
+        for pipeline in pipelines {
+            match map.entry(pipeline.layout.clone()) {
+                Entry::Occupied(_) => (),
+                Entry::Vacant(entry) => {
+                    let set = (set_provider)(pipeline);
+
+                    entry.insert(set);
+                }
+            }
+        }
+
+        Self { map }
+    }
+
+    pub fn new<'a, L>(pipelines: impl IntoIterator<Item=&'a Arc<GltfGraphicsPipeline>>,
+                      pool_provider: impl Fn(Arc<GltfPipelineLayoutDependentResources>)
+                                          -> Arc<Mutex<FixedSizeDescriptorSetsPool<L>>>,
+                      set_builder_fn: impl Fn(FixedSizeDescriptorSetBuilder<L, ()>)
+                                           -> Arc<dyn DescriptorSet + Send + Sync>) -> Self
+            where L: PipelineLayoutAbstract + Clone {
+        let mut map = HashMap::<
+            Arc<dyn PipelineLayoutAbstract + Send + Sync>,
+            Arc<dyn DescriptorSet + Send + Sync>,
+            FnvBuildHasher,
+        >::default();
+
+        for pipeline in pipelines {
+            match map.entry(pipeline.layout.clone()) {
+                Entry::Occupied(_) => (),
+                Entry::Vacant(entry) => {
+                    let pool = pool_provider(pipeline.layout_dependent_resources.clone());
+                    let mut pool = pool.lock().unwrap();
+                    let set_builder = pool.next();
+                    let set = (set_builder_fn)(set_builder);
+
+                    entry.insert(set);
+                }
+            }
+        }
+
+        Self { map }
+    }
+}
+
 pub struct GltfPipelineLayoutDependentResources {
     pub layout: Arc<dyn PipelineLayoutAbstract + Send + Sync>,
     pub descriptor_set_scene: Arc<dyn DescriptorSet + Send + Sync>,
-    pub descriptor_set_pool_instance: Arc<FixedSizeDescriptorSetsPool<Arc<dyn PipelineLayoutAbstract + Send + Sync>>>,
-    pub descriptor_set_blend: Arc<dyn DescriptorSet + Send + Sync>,
+    pub descriptor_set_pool_instance: Arc<Mutex<FixedSizeDescriptorSetsPool<Arc<dyn PipelineLayoutAbstract + Send + Sync>>>>,
+    pub descriptor_set_blend: Option<Arc<dyn DescriptorSet + Send + Sync>>,
     pub default_material_descriptor_set: Arc<dyn DescriptorSet + Send + Sync>,
 }
 
@@ -263,16 +335,22 @@ impl GltfPipelineLayoutDependentResources {
                 .add_buffer(shared_resources.scene_ubo_buffer.device_buffer().clone()).unwrap()
                 .build().unwrap()
         );
-        let descriptor_set_pool_instance = Arc::new(
+        let descriptor_set_pool_instance = Arc::new(Mutex::new(
             FixedSizeDescriptorSetsPool::new(layout.clone(), 1)
-        );
-        let descriptor_set_blend = Arc::new(
-            // FIXME: Use a layout instead
-            PersistentDescriptorSet::start(layout.clone(), 4)
-                .add_image(shared_resources.blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
-                .add_image(shared_resources.blend_revealage_image.as_ref().unwrap().clone()).unwrap()
-                .build().unwrap()
-        );
+        ));
+        let descriptor_set_blend = layout.descriptor_set_layout(4).map(|_|
+            Arc::new(PersistentDescriptorSet::start(layout.clone(), 4)
+                .add_image(shared_resources.blend_accumulation_image.as_ref()
+                    .map(|image| image.clone() as Arc<dyn ImageViewAccess + Send + Sync>)
+                    .unwrap_or_else(|| {
+                        shared_resources.helper_resources.empty_image.clone()
+                    })).unwrap()
+                .add_image(shared_resources.blend_revealage_image.as_ref()
+                    .map(|image| image.clone() as Arc<dyn ImageViewAccess + Send + Sync>)
+                    .unwrap_or_else(|| {
+                        shared_resources.helper_resources.empty_image.clone()
+                    })).unwrap()
+                .build().unwrap()) as Arc<dyn DescriptorSet + Send + Sync>);
         let default_material_descriptor_set: Arc<dyn DescriptorSet + Send + Sync> = Arc::new(
             PersistentDescriptorSet::start(layout.clone(), 3)
                 .add_buffer(shared_resources.default_material_ubo_buffer.clone()).unwrap()
@@ -300,27 +378,15 @@ impl GltfPipelineLayoutDependentResources {
 
     fn reconstruct_descriptor_sets(&mut self, shared_resources: &SharedGltfGraphicsPipelineResources) {
         self.descriptor_set_scene = Arc::new(
-            // FIXME: Use a layout instead
             PersistentDescriptorSet::start(self.layout.clone(), 0)
                 .add_buffer(shared_resources.scene_ubo_buffer.device_buffer().clone()).unwrap()
                 .build().unwrap()
         );
-        self.descriptor_set_blend = Arc::new(
-                // FIXME: Use a layout instead
-            PersistentDescriptorSet::start(self.layout.clone(), 4)
+        self.descriptor_set_blend = self.descriptor_set_blend.as_ref().map(|_|
+            Arc::new(PersistentDescriptorSet::start(self.layout.clone(), 4)
                 .add_image(shared_resources.blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
                 .add_image(shared_resources.blend_revealage_image.as_ref().unwrap().clone()).unwrap()
-                .build().unwrap()
-        );
-    }
-
-    fn next_instance_descriptor_set(
-        &mut self,
-        buffer: Arc<TypedBufferAccess<Content=InstanceUBO> + Send + Sync>)
-            -> Arc<dyn DescriptorSet + Send + Sync> {
-        Arc::new(self.descriptor_set_pool_instance.next()
-                 .add_buffer(buffer).unwrap()
-                 .build().unwrap())
+                .build().unwrap()) as Arc<dyn DescriptorSet + Send + Sync>);
     }
 }
 
@@ -347,7 +413,7 @@ pub struct GraphicsPipelineSetCache {
 
 macro_rules! cache_layout {
     ($cache:expr, $builder:expr) => {{
-        let resources_map = $cache.pipeline_layout_dependent_resources
+        let mut resources_map = $cache.pipeline_layout_dependent_resources
             .as_ref().write().expect("Layout dependent resources poisoned.");
         let layout_desc = $builder.construct_layout_desc(&[]).unwrap();
         let (layout, resources) = if let Some(resources) = resources_map.get(&layout_desc) {
@@ -366,9 +432,12 @@ macro_rules! cache_layout {
             (layout, resources)
         };
 
-        let pipeline = Arc::new($builder.with_pipeline_layout($cache.device.clone(), layout).unwrap());
+        let pipeline = Arc::new(
+            $builder.with_pipeline_layout($cache.device.clone(), layout.clone())
+                    .unwrap()
+        );
 
-        Arc::new(GltfGraphicsPipeline::from(pipeline, resources))
+        Arc::new(GltfGraphicsPipeline::from(layout, pipeline, resources))
     }}
 }
 
@@ -506,7 +575,7 @@ impl GraphicsPipelineSetCache {
                         .expect("Failed to create shader module."),
                 };
 
-                result.create_pipeline(&GraphicsPipelineProperties::default());
+                // result.create_pipeline(&GraphicsPipelineProperties::default());
                     // FIXME: Add proper error handling (see `Self::get_default_pipeline`)
                     // .expect("Couldn't create a pipeline set for default properties.");
 
@@ -587,9 +656,9 @@ impl GraphicsPipelineSetCache {
     }
 
     // FIXME: There shouldn't be a need for this function, use the pipeline layout instead.
-    pub fn get_default_pipeline(&self) -> Option<Arc<GraphicsPipelineSet>> {
-        self.get_pipeline(&GraphicsPipelineProperties::default())
-    }
+    // pub fn get_default_pipeline(&self) -> Option<Arc<GraphicsPipelineSet>> {
+    //     self.get_pipeline(&GraphicsPipelineProperties::default())
+    // }
 
     pub fn get_or_create_pipeline(&self, properties: &GraphicsPipelineProperties) -> Arc<GraphicsPipelineSet> {
         if let Some(pipeline) = self.get_pipeline(properties) {

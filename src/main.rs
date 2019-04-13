@@ -1,6 +1,5 @@
 //! TODO:
-//! * Move descriptor set creation/storage into `GraphicsPipelineSetCache`, store pipelines for
-//!     each `GraphicsPipelineAbstract`.
+//! * Update uniform buffers correctly (scene - camera)
 //! * Precompute most of what `Model::draw_primitive` does
 //! * Instancing
 //! * VR rendering
@@ -10,25 +9,26 @@
 #![feature(core_intrinsics)]
 
 #[macro_use]
-extern crate vulkano;
-extern crate vulkano_shaders;
+extern crate det;
 #[macro_use]
 extern crate failure;
 #[macro_use]
-extern crate det;
-extern crate vulkano_win;
-extern crate winit;
-extern crate image;
-extern crate typenum;
-extern crate gltf;
-extern crate byteorder;
-extern crate rayon;
-extern crate generic_array;
+extern crate vulkano;
 extern crate arrayvec;
 extern crate boolinator;
+extern crate byteorder;
+extern crate fnv;
+extern crate generic_array;
+extern crate gltf;
+extern crate image;
 extern crate mikktspace;
+extern crate rayon;
 extern crate safe_transmute;
+extern crate typenum;
+extern crate vulkano_shaders;
+extern crate vulkano_win;
 extern crate weak_table;
+extern crate winit;
 
 #[macro_use]
 pub mod math;
@@ -52,7 +52,7 @@ use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::descriptor::descriptor_set::FixedSizeDescriptorSetsPool;
 use vulkano::descriptor::descriptor_set::FixedSizeDescriptorSet;
 use vulkano::instance::RawInstanceExtensions;
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer};
+use vulkano::buffer::{TypedBufferAccess, BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer};
 use vulkano::buffer::cpu_pool::CpuBufferPool;
 use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
 use vulkano::device::{Device, RawDeviceExtensions, DeviceExtensions, Queue, Features};
@@ -74,11 +74,12 @@ use crate::math::vector::*;
 use crate::model::FramebufferWithClearValues;
 use crate::model::Model;
 use crate::model::DrawContext;
-use crate::model::InitializationDrawContext;
+use crate::model::InstanceDrawContext;
 use crate::model::HelperResources;
 use crate::model::resource::UninitializedResource;
 use crate::camera::*;
 use crate::pipeline::GraphicsPipelineSetCache;
+use crate::pipeline::DescriptorSetMap;
 
 pub use crate::shaders::gltf_opaque_frag::ty::*;
 
@@ -271,7 +272,7 @@ pub struct Ammolite {
     vulkan_instance: Arc<Instance>,
     device: Arc<Device>,
     queue: Arc<Queue>,
-    pipeline_cache: Arc<GraphicsPipelineSetCache>,
+    pipeline_cache: GraphicsPipelineSetCache,
     helper_resources: HelperResources,
     window: Arc<Surface<Window>>,
     window_events_loop: Rc<RefCell<EventsLoop>>,
@@ -309,8 +310,7 @@ impl Ammolite {
             [queue_family].into_iter().cloned(),
         ).unwrap()
             .initialize_resource(&device, queue_family, init_command_buffer_builder).unwrap();
-        let (init_command_buffer_builder, pipeline_cache) = GraphicsPipelineSetCache::create(device.clone(), swapchain.clone(), helper_resources, queue_family)
-            .map(|pipeline_cache| Arc::new(pipeline_cache))
+        let (init_command_buffer_builder, pipeline_cache) = GraphicsPipelineSetCache::create(device.clone(), swapchain.clone(), helper_resources.clone(), queue_family)
             .initialize_resource(&device, queue_family, init_command_buffer_builder).unwrap();
         let init_command_buffer = init_command_buffer_builder.build().unwrap();
 
@@ -324,7 +324,7 @@ impl Ammolite {
 
         Self {
             vulkan_instance: instance,
-            device,
+            device: device.clone(),
             queue,
             pipeline_cache,
             helper_resources,
@@ -336,7 +336,7 @@ impl Ammolite {
             window_swapchain_framebuffers: None,
             window_swapchain_recreate: false,
             synchronization: Some(synchronization),
-            buffer_pool_uniform_instance: CpuBufferPool::uniform_buffer(device.clone()),
+            buffer_pool_uniform_instance: CpuBufferPool::uniform_buffer(device),
             camera_position: Vec3::zero(),
             camera_view_matrix: Mat4::identity(),
             camera_projection_matrix: Mat4::identity(),
@@ -349,8 +349,7 @@ impl Ammolite {
             Model::import(
                 &self.device,
                 [self.queue.family()].into_iter().cloned(),
-                // FIXME: Replace with a pipeline layout
-                self.pipeline_cache.get_default_pipeline().unwrap().opaque.pipeline.clone(),
+                &self.pipeline_cache,
                 &self.helper_resources,
                 path,
             ).unwrap().initialize_resource(
@@ -471,35 +470,6 @@ impl Ammolite {
                 ).unwrap()
                 .build().unwrap();
 
-            let current_framebuffer: Arc<dyn FramebufferWithClearValues<_>> = self.window_swapchain_framebuffers
-                .as_ref().unwrap()[image_num].clone();
-            let clear_values = vec![
-                [0.0, 0.0, 0.0, 1.0].into(),
-                1.0.into(),
-                // ClearValue::None,
-                // ClearValue::None,
-                [0.0, 0.0, 0.0, 0.0].into(),
-                [1.0, 1.0, 1.0, 1.0].into(),
-            ];
-            // TODO: Recreate only when screen dimensions change
-            let dynamic_state = DynamicState {
-                line_width: None,
-                viewports: Some(vec![Viewport {
-                    origin: [0.0, 0.0],
-                    dimensions: [self.window_dimensions[0] as f32, self.window_dimensions[1] as f32],
-                    depth_range: 0.0 .. 1.0,
-                }]),
-                scissors: None,
-            };
-
-            let draw_context = DrawContext {
-                device: &self.device,
-                queue_family: &self.queue.family(),
-                pipeline_cache: &self.pipeline_cache,
-                dynamic: &dynamic_state,
-                helper_resources: &self.helper_resources,
-            };
-
             println!("x");
 
             // TODO don't Box the future, pass it as `impl GpuFuture` to render_instances,
@@ -510,7 +480,10 @@ impl Ammolite {
 
             println!("y");
 
-            self.render_instances(current_framebuffer, clear_values, &draw_context, world_space_models);
+            let current_framebuffer: Arc<dyn FramebufferWithClearValues<_>> = self.window_swapchain_framebuffers
+                .as_ref().unwrap()[image_num].clone();
+
+            self.render_instances(current_framebuffer, world_space_models);
 
             println!("derp");
 
@@ -548,17 +521,66 @@ impl Ammolite {
         }
     }
 
-    fn render_instances<'a>(&mut self, current_framebuffer: Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>, clear_values: Vec<ClearValue>, context: &'a DrawContext<'a>, world_space_models: &'a [WorldSpaceModel<'a>]) {
+    fn render_instances<'a>(&mut self,
+                            current_framebuffer: Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>,
+                            // clear_values: Vec<ClearValue>,
+                            // context: &'a DrawContext<'a>,
+                            world_space_models: &'a [WorldSpaceModel<'a>]) {
+        let clear_values = vec![
+            [0.0, 0.0, 0.0, 1.0].into(),
+            1.0.into(),
+            // ClearValue::None,
+            // ClearValue::None,
+            [0.0, 0.0, 0.0, 0.0].into(),
+            [1.0, 1.0, 1.0, 1.0].into(),
+        ];
+        // TODO: Recreate only when screen dimensions change
+        let dynamic_state = DynamicState {
+            line_width: None,
+            viewports: Some(vec![Viewport {
+                origin: [0.0, 0.0],
+                dimensions: [self.window_dimensions[0] as f32, self.window_dimensions[1] as f32],
+                depth_range: 0.0 .. 1.0,
+            }]),
+            scissors: None,
+        };
+
+        let draw_context = DrawContext {
+            device: &self.device.clone(),
+            queue_family: &self.queue.family(),
+            pipeline_cache: &self.pipeline_cache,
+            dynamic: &dynamic_state,
+            helper_resources: &self.helper_resources,
+        };
+
         let instances = world_space_models.iter()
             .map(|WorldSpaceModel { model, matrix }| {
+                let instance_ubo = InstanceUBO::new(matrix.clone());
+                let instance_buffer: Arc<dyn TypedBufferAccess<Content=InstanceUBO> + Send + Sync>
+                    = Arc::new(self.buffer_pool_uniform_instance.next(instance_ubo).unwrap());
+                let used_layouts = model.get_used_pipelines_layouts(&self.pipeline_cache);
+                let descriptor_set_map = DescriptorSetMap::new(
+                    &used_layouts[..],
+                    |layout_dependent_resources| {
+                        layout_dependent_resources.descriptor_set_pool_instance.clone()
+                    },
+                    {
+                        let instance_buffer_ref = &instance_buffer;
+                        move |set_builder| {
+                            Arc::new(set_builder.add_buffer(instance_buffer_ref.clone()).unwrap()
+                                     .build().unwrap())
+                        }
+                    },
+                );
+
                 (
                     model,
-                    self.buffer_pool_uniform_instance.next(InstanceUBO::new(matrix.clone())),
+                    descriptor_set_map,
                 )
             })
             .collect::<Vec<_>>();
 
-        let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(
+        let mut command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(
             self.device.clone(),
             self.queue.family(),
         ).unwrap()
@@ -569,36 +591,28 @@ impl Ammolite {
             ).unwrap();
 
         for (subpass_index, alpha_mode) in Model::get_subpass_alpha_modes().enumerate() {
-            for (index, world_space_model) in world_space_models.into_iter().enumerate() {
-                let WorldSpaceModel {
-                    model,
-                    matrix,
-                } = world_space_model;
+            if subpass_index > 0 {
+                command_buffer = command_buffer.next_subpass(false).unwrap();
+            }
 
-                let instance_ubo = InstanceUBO::new(matrix.clone());
-
-                let instance_local_buffer_updates = AutoCommandBufferBuilder::primary_one_time_submit(
-                    self.device.clone(),
-                    self.queue.family().clone(),
-                    ).unwrap()
-                    .update_buffer(self.instance_ubo_buffer.staging_buffer().clone(), instance_ubo.clone()).unwrap()
-                    .copy_buffer(self.instance_ubo_buffer.staging_buffer().clone(), self.instance_ubo_buffer.device_buffer().clone()).unwrap()
-                    .build().unwrap();
-
-                let mut command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(
-                    self.device.clone(),
-                    self.queue.family().clone(),
-                    ).unwrap();
+            for (index, world_space_model) in instances.iter().enumerate() {
+                let &(ref model, ref descriptor_set_map_instance) = world_space_model;
+                let instance_context = InstanceDrawContext {
+                    draw_context: &draw_context,
+                    descriptor_set_map_instance: &descriptor_set_map_instance,
+                };
 
                 command_buffer = model.draw_scene(
                     command_buffer,
-                    context.clone(),
-                    *alpha_mode,
+                    instance_context,
+                    alpha_mode,
                     subpass_index as u8,
                     0,
                 ).unwrap();
             }
         }
+
+        let command_buffer = command_buffer.end_render_pass().unwrap();
 
         self.synchronization = Some(Box::new(self.synchronization.take().unwrap()
             .then_signal_semaphore()

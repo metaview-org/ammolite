@@ -5,30 +5,32 @@ pub mod import;
 use std::sync::Arc;
 use std::path::Path;
 use std::mem;
-use vulkano::sampler::SamplerAddressMode;
-use vulkano::sampler::Filter;
-use vulkano::sampler::MipmapMode;
+use std::collections::HashMap;
+use vulkano::buffer::BufferSlice;
+use vulkano::buffer::BufferUsage;
+use vulkano::buffer::TypedBufferAccess;
+use vulkano::buffer::immutable::ImmutableBuffer;
 use vulkano::command_buffer::{DynamicState, AutoCommandBuffer, AutoCommandBufferBuilder};
+use vulkano::descriptor::descriptor_set::DescriptorSet;
+use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
+use vulkano::descriptor::descriptor_set::collection::DescriptorSetsCollection;
+use vulkano::descriptor::pipeline_layout::PipelineLayoutAbstract;
 use vulkano::device::Device;
-use vulkano::instance::QueueFamily;
 use vulkano::format::*;
 use vulkano::framebuffer::FramebufferAbstract;
 use vulkano::framebuffer::RenderPassDescClearValues;
-use vulkano::buffer::TypedBufferAccess;
-use vulkano::buffer::BufferSlice;
-use vulkano::buffer::BufferUsage;
-use vulkano::pipeline::GraphicsPipelineAbstract;
-use vulkano::descriptor::descriptor_set::collection::DescriptorSetsCollection;
-use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
-use vulkano::buffer::immutable::ImmutableBuffer;
-use vulkano::descriptor::descriptor_set::DescriptorSet;
-use vulkano::sampler::Sampler;
-use vulkano::image::immutable::ImmutableImage;
 use vulkano::image::Dimensions;
-use vulkano::image::ImageUsage;
 use vulkano::image::ImageLayout;
+use vulkano::image::ImageUsage;
 use vulkano::image::MipmapsCount;
+use vulkano::image::immutable::ImmutableImage;
 use vulkano::image::traits::ImageViewAccess;
+use vulkano::instance::QueueFamily;
+use vulkano::pipeline::GraphicsPipelineAbstract;
+use vulkano::sampler::Filter;
+use vulkano::sampler::MipmapMode;
+use vulkano::sampler::Sampler;
+use vulkano::sampler::SamplerAddressMode;
 use gltf::accessor::Accessor;
 use gltf::{self, Document};
 use gltf::material::AlphaMode;
@@ -42,6 +44,7 @@ use crate::vertex::*;
 use crate::pipeline::GraphicsPipelineProperties;
 use crate::pipeline::GraphicsPipelineSetCache;
 use crate::pipeline::GltfGraphicsPipeline;
+use crate::pipeline::DescriptorSetMap;
 use crate::iter::ArrayIterator;
 use self::error::*;
 use self::resource::*;
@@ -55,14 +58,14 @@ impl<C, F> FramebufferWithClearValues<C> for F where F: FramebufferAbstract + Re
 #[derive(Clone)]
 pub struct InstanceDrawContext<'a> {
     pub draw_context: &'a DrawContext<'a>,
-    pub descriptor_set_instance: Arc<DescriptorSet + Send + Sync>,
+    pub descriptor_set_map_instance: &'a DescriptorSetMap,
 }
 
 #[derive(Clone)]
 pub struct DrawContext<'a> {
     pub device: &'a Arc<Device>,
     pub queue_family: &'a QueueFamily<'a>,
-    pub pipeline_cache: &'a Arc<GraphicsPipelineSetCache>,
+    pub pipeline_cache: &'a GraphicsPipelineSetCache,
     pub dynamic: &'a DynamicState,
     pub helper_resources: &'a HelperResources,
 }
@@ -86,7 +89,9 @@ impl HelperResources {
             },
             R8Uint,
             MipmapsCount::One,
+            // ImageUsage::all(),
             ImageUsage {
+                input_attachment: true,
                 transfer_destination: true,
                 sampled: true,
                 ..ImageUsage::none()
@@ -162,8 +167,8 @@ pub struct Model {
     // FIXME: Should probably be of type `GltfVertexTangent` instead of `u8`
     tangent_buffers: Vec<Vec<Option<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>>>,
     // Note: Do not ever try to express the descriptor set explicitly.
-    node_descriptor_sets: Vec<Arc<dyn DescriptorSet + Send + Sync>>,
-    material_descriptor_sets: Vec<Arc<dyn DescriptorSet + Send + Sync>>,
+    node_descriptor_sets: Vec<DescriptorSetMap>,
+    material_descriptor_sets: Vec<DescriptorSetMap>,
 }
 
 impl Model {
@@ -200,12 +205,12 @@ impl Model {
 
     pub fn import<'a, I, S>(device: &Arc<Device>,
                             queue_families: I,
-                            pipeline: Arc<GraphicsPipelineAbstract + Sync + Send>,
+                            pipeline_cache: &GraphicsPipelineSetCache,
                             helper_resources: &HelperResources,
                             path: S) -> Result<SimpleUninitializedResource<Model>, Error>
             where I: IntoIterator<Item = QueueFamily<'a>> + Clone,
                   S: AsRef<Path> {
-        import::import_model(device, queue_families, pipeline, helper_resources, path)
+        import::import_model(device, queue_families, pipeline_cache, helper_resources, path)
     }
 
     pub fn get_subpass_alpha_modes() -> impl Iterator<Item=AlphaMode> {
@@ -217,10 +222,15 @@ impl Model {
         ])
     }
 
-    fn get_used_pipelines(&self, pipeline_cache: &Arc<GraphicsPipelineSetCache>) -> Vec<GltfGraphicsPipeline> {
-        let mut pipelines = Vec::new();
+    pub fn get_used_pipelines_layouts(&self, pipeline_cache: &GraphicsPipelineSetCache) -> Vec<Arc<GltfGraphicsPipeline>> {
+        Self::get_pipelines_layouts(&self.document, pipeline_cache)
+    }
 
-        for mesh in self.document.meshes() {
+    // TODO: Cache result
+    pub fn get_pipelines_layouts(document: &Document, pipeline_cache: &GraphicsPipelineSetCache) -> Vec<Arc<GltfGraphicsPipeline>> {
+        let mut pipelines = HashMap::new();
+
+        for mesh in document.meshes() {
             for primitive in mesh.primitives() {
                 let material = primitive.material();
                 let properties = GraphicsPipelineProperties::from(&primitive, &material);
@@ -235,12 +245,18 @@ impl Model {
                             (AlphaMode::Blend, 3) => &pipeline_set.blend_finalize,
                             _ => panic!("Invalid alpha_mode/subpass combination."),
                         };
+
+                        if !pipelines.contains_key(&pipeline.layout) {
+                            pipelines.insert(pipeline.layout.clone(), pipeline.clone());
+                        }
                     }
                 }
             }
         }
 
-        pipelines
+        pipelines.into_iter()
+            .map(|(_, v)| v)
+            .collect()
     }
 
     pub fn draw_scene(
@@ -355,7 +371,7 @@ impl Model {
                 if material.alpha_mode() == alpha_mode {
                     let &InstanceDrawContext {
                         ref draw_context,
-                        ref descriptor_set_instance,
+                        ref descriptor_set_map_instance,
                     } = instance_context;
                     let properties = GraphicsPipelineProperties::from(&primitive, &material);
                     let pipeline_set = draw_context.pipeline_cache.get_or_create_pipeline(&properties);
@@ -368,19 +384,26 @@ impl Model {
                     };
 
                     let material_descriptor_set = material.index().map(|material_index| {
-                        self.material_descriptor_sets[material_index].clone()
+                        self.material_descriptor_sets[material_index].map[&pipeline.layout].clone()
                     }).unwrap_or_else(|| {
-                        pipeline.default_material_descriptor_set.clone()
+                        pipeline.layout_dependent_resources.default_material_descriptor_set.clone()
                     });
+
+                    let descriptor_set_instance = descriptor_set_map_instance.map
+                        .get(&pipeline.layout)
+                        .as_ref()
+                        .expect("A descriptor set has not been generated for one of the required pipelines.")
+                        .clone();
 
                     match (alpha_mode, subpass) {
                         (AlphaMode::Blend, 3) => {
                             let descriptor_sets = (
-                                pipeline.descriptor_set_scene.clone(),
+                                pipeline.layout_dependent_resources.descriptor_set_scene.clone(),
                                 descriptor_set_instance.clone(),
-                                self.node_descriptor_sets[node.index()].clone(),
+                                self.node_descriptor_sets[node.index()].map[&pipeline.layout].clone(),
                                 material_descriptor_set,
-                                pipeline.descriptor_set_blend.clone(),
+                                pipeline.layout_dependent_resources.descriptor_set_blend.as_ref()
+                                    .unwrap().clone(),
                             );
 
                             command_buffer = self.draw_primitive(
@@ -395,9 +418,9 @@ impl Model {
                         },
                         _ => {
                             let descriptor_sets = (
-                                pipeline.descriptor_set_scene.clone(),
+                                pipeline.layout_dependent_resources.descriptor_set_scene.clone(),
                                 descriptor_set_instance.clone(),
-                                self.node_descriptor_sets[node.index()].clone(),
+                                self.node_descriptor_sets[node.index()].map[&pipeline.layout].clone(),
                                 material_descriptor_set,
                             );
 

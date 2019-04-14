@@ -1,13 +1,15 @@
 //! TODO:
-//! * Update uniform buffers correctly (scene - camera)
-//! * Precompute most of what `Model::draw_primitive` does
-//! * Instancing
+//! * Use secondary command buffers to parallelize their creation
+//! * Mip Mapping
 //! * VR rendering
+//! * Instancing
 //! * Animations
 //! * Morph primitives
 
 #![feature(core_intrinsics)]
 
+#[macro_use]
+extern crate arr_macro;
 #[macro_use]
 extern crate det;
 #[macro_use]
@@ -371,20 +373,16 @@ impl Ammolite {
 
     pub fn render<'a>(&mut self, elapsed: &Duration, model_provider: impl FnOnce() -> &'a [WorldSpaceModel<'a>]) {
         let world_space_models = model_provider();
-        println!("stuck");
         // It is important to call this function from time to time, otherwise resources will keep
         // accumulating and you will eventually reach an out of memory error.
         // Calling this function polls various fences in order to determine what the GPU has
         // already processed, and frees the resources that are no longer needed.
         self.synchronization.as_mut().unwrap().cleanup_finished();
-        println!("cleaned up");
 
         // A loop is used as a way to reset the rendering using `continue` if something goes wrong,
         // there is a `break` statement at the end.
         loop {
-            println!("pre recreating");
             if self.window_swapchain_recreate {
-                println!("recreating");
                 self.window_dimensions = {
                     let dpi = self.window.window().get_hidpi_factor();
                     let (width, height) = self.window.window().get_inner_size().unwrap().to_physical(dpi)
@@ -406,14 +404,11 @@ impl Ammolite {
                 self.window_swapchain_images = new_images;
                 self.window_swapchain_framebuffers = None;
                 self.window_swapchain_recreate = false;
-                println!("recreated");
             }
 
             // Because framebuffers contains an Arc on the old swapchain, we need to
             // recreate framebuffers as well.
-            println!("pre swapchain");
             if self.window_swapchain_framebuffers.is_none() {
-                println!("swapchain");
                 self.pipeline_cache.shared_resources.reconstruct_dimensions_dependent_images(
                     self.window_dimensions.clone()
                 );
@@ -424,7 +419,6 @@ impl Ammolite {
                         &self.window_swapchain_images,
                     )
                 );
-                println!("swapchain done");
             }
 
             // Before we can draw on the output, we have to *acquire* an image from the swapchain. If
@@ -470,7 +464,6 @@ impl Ammolite {
                 ).unwrap()
                 .build().unwrap();
 
-            println!("x");
 
             // TODO don't Box the future, pass it as `impl GpuFuture` to render_instances,
             // which should then return an `impl GpuFuture`
@@ -478,14 +471,12 @@ impl Ammolite {
                 .then_execute(self.queue.clone(), buffer_updates).unwrap()
                 .join(acquire_future)));
 
-            println!("y");
 
             let current_framebuffer: Arc<dyn FramebufferWithClearValues<_>> = self.window_swapchain_framebuffers
                 .as_ref().unwrap()[image_num].clone();
 
             self.render_instances(current_framebuffer, world_space_models);
 
-            println!("derp");
 
             let result = self.synchronization.take().unwrap()
                 .then_signal_fence()
@@ -650,6 +641,7 @@ fn main() {
         camera.update(&delta_time, &mouse_delta, &pressed_keys, &pressed_mouse_buttons);
         mouse_delta = (0.0, 0.0);
 
+        ammolite.camera_position = camera.get_position();
         ammolite.camera_view_matrix = camera.get_view_matrix();
         ammolite.camera_projection_matrix = construct_perspective_projection_matrix(
             0.001,

@@ -2,15 +2,18 @@ pub mod error;
 pub mod resource;
 pub mod import;
 
-use std::sync::Arc;
+use std::marker::PhantomData;
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::path::Path;
 use std::mem;
+use std::ops::Deref;
 use std::collections::HashMap;
+use vulkano::buffer::BufferAccess;
 use vulkano::buffer::BufferSlice;
 use vulkano::buffer::BufferUsage;
 use vulkano::buffer::TypedBufferAccess;
 use vulkano::buffer::immutable::ImmutableBuffer;
-use vulkano::command_buffer::{DynamicState, AutoCommandBuffer, AutoCommandBufferBuilder};
+use vulkano::command_buffer::{DynamicState, AutoCommandBuffer, AutoCommandBufferBuilder, DrawIndirectCommand, DrawIndexedIndirectCommand};
 use vulkano::descriptor::descriptor_set::DescriptorSet;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::descriptor::descriptor_set::collection::DescriptorSetsCollection;
@@ -27,6 +30,8 @@ use vulkano::image::immutable::ImmutableImage;
 use vulkano::image::traits::ImageViewAccess;
 use vulkano::instance::QueueFamily;
 use vulkano::pipeline::GraphicsPipelineAbstract;
+use vulkano::pipeline::vertex::VertexSource;
+use vulkano::pipeline::input_assembly::Index;
 use vulkano::sampler::Filter;
 use vulkano::sampler::MipmapMode;
 use vulkano::sampler::Sampler;
@@ -152,6 +157,289 @@ impl HelperResources {
     }
 }
 
+#[derive(Clone)]
+pub enum DynamicIndexBuffer {
+    U16(Arc<TypedBufferAccess<Content = [u16]> + Send + Sync + 'static>),
+    U32(Arc<TypedBufferAccess<Content = [u32]> + Send + Sync + 'static>),
+}
+
+type DynamicIndirectBuffer = Arc<TypedBufferAccess<Content = [DrawIndirectCommand]> + Send + Sync + 'static>;
+type DynamicIndexedIndirectBuffer = Arc<TypedBufferAccess<Content = [DrawIndexedIndirectCommand]> + Send + Sync + 'static>;
+
+#[derive(Clone)]
+pub enum ContextLessDrawCallBuffers {
+    Simple,
+    Indexed {
+        index_buffer: DynamicIndexBuffer,
+    },
+    Indirect {
+        indirect_buffer: DynamicIndirectBuffer,
+    },
+    IndexedIndirect {
+        index_buffer: DynamicIndexBuffer,
+        indexed_indirect_buffer: DynamicIndexedIndirectBuffer,
+    },
+}
+
+#[derive(Clone)]
+pub struct ContextLessDrawCall<Gp, Gpl, V, Cd>
+    where Gp: GraphicsPipelineAbstract + VertexSource<V> + Send + Sync + 'static + Clone,
+          Gpl: PipelineLayoutAbstract + Send + Sync + Clone,
+          V: Clone,
+          Cd: Clone,
+{
+    pipeline: Gp,
+    pipeline_layout: Gpl,
+    vertex_source: V,
+    buffers: ContextLessDrawCallBuffers,
+    /// Data to provide additional draw call information, eg. to compute resulting descriptor sets
+    /// and push constants
+    custom_data: Cd,
+}
+
+// FIXME: Error handling
+/// Takes a `ContextLessDrawCall` and constructs a final draw call from it
+pub trait DrawCallIssuer<Gpl>
+        where Gpl: PipelineLayoutAbstract + Send + Sync + Clone, {
+    type Context;
+    type CustomData: Clone;
+
+    fn issue_draw_call<Gp, V>(
+        command_buffer_builder: AutoCommandBufferBuilder,
+        dynamic: &DynamicState,
+        context_less: ContextLessDrawCall<Gp, Gpl, V, Self::CustomData>,
+        context: &Self::Context,
+    ) -> AutoCommandBufferBuilder
+        where Gp: GraphicsPipelineAbstract + VertexSource<V> + Send + Sync + 'static + Clone,
+              V: Clone;
+}
+
+#[derive(Clone)]
+pub struct GltfContextLessDescriptorSets {
+    descriptor_set_scene: Arc<dyn DescriptorSet + Send + Sync>,
+    /// The instance descriptor set is left out to be filled in by the `DrawCallIssuer`.
+    descriptor_set_instance: (),
+    descriptor_set_node: Arc<dyn DescriptorSet + Send + Sync>,
+    descriptor_set_material: Arc<dyn DescriptorSet + Send + Sync>,
+    /// The blend descriptor set is only specified in the last subpass
+    descriptor_set_blend: Option<Arc<dyn DescriptorSet + Send + Sync>>,
+}
+
+#[derive(Clone)]
+pub struct GltfContextLessDrawCallCustomData {
+    incomplete_descriptor_sets: GltfContextLessDescriptorSets,
+    push_constants: PushConstants,
+}
+
+pub type GltfContextLessDrawCall = ContextLessDrawCall<
+    Arc<dyn GraphicsPipelineAbstract + Send + Sync>,
+    Arc<dyn PipelineLayoutAbstract + Send + Sync>,
+    Vec<Arc<(dyn BufferAccess + Send + Sync + 'static)>>,
+    GltfContextLessDrawCallCustomData,
+>;
+
+pub struct GltfDrawCallContext<'a> {
+    pub descriptor_set_map_instance: &'a DescriptorSetMap,
+}
+
+pub struct GltfDrawCallIssuer<'a> {
+    _marker: PhantomData<&'a ()>,
+}
+
+// FIXME: Should be more generic
+impl<'a> DrawCallIssuer<Arc<dyn PipelineLayoutAbstract + Send + Sync>> for GltfDrawCallIssuer<'a> {
+    type Context = GltfDrawCallContext<'a>;
+    type CustomData = GltfContextLessDrawCallCustomData;
+
+    fn issue_draw_call<Gp, V>(
+        command_buffer_builder: AutoCommandBufferBuilder,
+        dynamic: &DynamicState,
+        context_less: ContextLessDrawCall<Gp, Arc<dyn PipelineLayoutAbstract + Send + Sync>, V, Self::CustomData>,
+        context: &Self::Context,
+    ) -> AutoCommandBufferBuilder
+            where Gp: GraphicsPipelineAbstract + VertexSource<V> + Send + Sync + 'static + Clone,
+                  V: Clone {
+        let ContextLessDrawCall {
+            pipeline, pipeline_layout, vertex_source, buffers, custom_data
+        } = context_less;
+        let GltfContextLessDrawCallCustomData {
+            incomplete_descriptor_sets,
+            push_constants: constants,
+        } = custom_data;
+        let GltfContextLessDescriptorSets {
+            descriptor_set_scene,
+            descriptor_set_node,
+            descriptor_set_material,
+            descriptor_set_blend,
+            ..
+        } = incomplete_descriptor_sets;
+        let descriptor_set_instance = context.descriptor_set_map_instance.map
+            .get(&pipeline_layout)
+            .expect("A descriptor set has not been generated for one of the required pipelines.")
+            .clone();
+
+        if let Some(descriptor_set_blend) = descriptor_set_blend {
+            let sets = (
+                descriptor_set_scene,
+                descriptor_set_instance,
+                descriptor_set_node,
+                descriptor_set_material,
+                descriptor_set_blend,
+            );
+
+            // TODO: remove code duplication
+            use ContextLessDrawCallBuffers::*;
+
+            match buffers {
+                Simple => command_buffer_builder.draw(
+                    pipeline,
+                    dynamic,
+                    vertex_source,
+                    sets,
+                    constants,
+                ).unwrap(),
+
+                Indexed {
+                    index_buffer: DynamicIndexBuffer::U16(index_buffer),
+                } => command_buffer_builder.draw_indexed(
+                    pipeline,
+                    dynamic,
+                    vertex_source,
+                    index_buffer,
+                    sets,
+                    constants,
+                ).unwrap(),
+
+                Indexed {
+                    index_buffer: DynamicIndexBuffer::U32(index_buffer),
+                } => command_buffer_builder.draw_indexed(
+                    pipeline,
+                    dynamic,
+                    vertex_source,
+                    index_buffer,
+                    sets,
+                    constants,
+                ).unwrap(),
+
+                Indirect {
+                    indirect_buffer,
+                } => command_buffer_builder.draw_indirect(
+                    pipeline,
+                    dynamic,
+                    vertex_source,
+                    indirect_buffer,
+                    sets,
+                    constants,
+                ).unwrap(),
+
+                IndexedIndirect {
+                    index_buffer: DynamicIndexBuffer::U16(index_buffer),
+                    indexed_indirect_buffer,
+                } => command_buffer_builder.draw_indexed_indirect(
+                    pipeline,
+                    dynamic,
+                    vertex_source,
+                    index_buffer,
+                    indexed_indirect_buffer,
+                    sets,
+                    constants,
+                ).unwrap(),
+
+                IndexedIndirect {
+                    index_buffer: DynamicIndexBuffer::U32(index_buffer),
+                    indexed_indirect_buffer,
+                } => command_buffer_builder.draw_indexed_indirect(
+                    pipeline,
+                    dynamic,
+                    vertex_source,
+                    index_buffer,
+                    indexed_indirect_buffer,
+                    sets,
+                    constants,
+                ).unwrap(),
+            }
+        } else {
+            let sets = (
+                descriptor_set_scene,
+                descriptor_set_instance,
+                descriptor_set_node,
+                descriptor_set_material,
+            );
+
+            use ContextLessDrawCallBuffers::*;
+
+            match buffers {
+                Simple => command_buffer_builder.draw(
+                    pipeline,
+                    dynamic,
+                    vertex_source,
+                    sets,
+                    constants,
+                ).unwrap(),
+
+                Indexed {
+                    index_buffer: DynamicIndexBuffer::U16(index_buffer),
+                } => command_buffer_builder.draw_indexed(
+                    pipeline,
+                    dynamic,
+                    vertex_source,
+                    index_buffer,
+                    sets,
+                    constants,
+                ).unwrap(),
+
+                Indexed {
+                    index_buffer: DynamicIndexBuffer::U32(index_buffer),
+                } => command_buffer_builder.draw_indexed(
+                    pipeline,
+                    dynamic,
+                    vertex_source,
+                    index_buffer,
+                    sets,
+                    constants,
+                ).unwrap(),
+
+                Indirect {
+                    indirect_buffer,
+                } => command_buffer_builder.draw_indirect(
+                    pipeline,
+                    dynamic,
+                    vertex_source,
+                    indirect_buffer,
+                    sets,
+                    constants,
+                ).unwrap(),
+
+                IndexedIndirect {
+                    index_buffer: DynamicIndexBuffer::U16(index_buffer),
+                    indexed_indirect_buffer,
+                } => command_buffer_builder.draw_indexed_indirect(
+                    pipeline,
+                    dynamic,
+                    vertex_source,
+                    index_buffer,
+                    indexed_indirect_buffer,
+                    sets,
+                    constants,
+                ).unwrap(),
+
+                IndexedIndirect {
+                    index_buffer: DynamicIndexBuffer::U32(index_buffer),
+                    indexed_indirect_buffer,
+                } => command_buffer_builder.draw_indexed_indirect(
+                    pipeline,
+                    dynamic,
+                    vertex_source,
+                    index_buffer,
+                    indexed_indirect_buffer,
+                    sets,
+                    constants,
+                ).unwrap(),
+            }
+        }
+    }
+}
+
 pub struct Model {
     document: Document,
     device_buffers: Vec<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>,
@@ -169,6 +457,8 @@ pub struct Model {
     // Note: Do not ever try to express the descriptor set explicitly.
     node_descriptor_sets: Vec<DescriptorSetMap>,
     material_descriptor_sets: Vec<DescriptorSetMap>,
+    /// A `Vec` of lazily created `ContextLessDrawCall`s for each scene and subpass.
+    scene_subpass_context_less_draw_calls: Vec<[RwLock<Option<Vec<GltfContextLessDrawCall>>>; 4]>,
 }
 
 impl Model {
@@ -259,89 +549,6 @@ impl Model {
             .collect()
     }
 
-    pub fn draw_scene(
-        &self,
-        mut command_buffer: AutoCommandBufferBuilder,
-        instance_context: InstanceDrawContext,
-        alpha_mode: AlphaMode,
-        subpass: u8,
-        scene_index: usize,
-    ) -> Result<AutoCommandBufferBuilder, Error> {
-        if scene_index >= self.document.scenes().len() {
-            return Err(ModelDrawError::InvalidSceneIndex { index: scene_index }.into());
-        }
-
-        let scene = self.document.scenes().nth(scene_index).unwrap();
-
-        for node in scene.nodes() {
-            command_buffer = self.draw_node(node, command_buffer, &instance_context, alpha_mode, subpass);
-        }
-
-        Ok(command_buffer)
-    }
-
-    // pub fn draw_scene_old(
-    //     &self,
-    //     mut command_buffer: AutoCommandBufferBuilder,
-    //     context: InitializationDrawContext,
-    //     alpha_mode: AlphaMode,
-    //     subpass: u8,
-    //     scene_index: usize,
-    // ) -> Result<AutoCommandBufferBuilder, Error> {
-    //     if scene_index >= self.document.scenes().len() {
-    //         return Err(ModelDrawError::InvalidSceneIndex { index: scene_index }.into());
-    //     }
-
-    //     let InitializationDrawContext {
-    //         draw_context,
-    //         framebuffer,
-    //         clear_values,
-    //     } = context;
-
-    //     let scene = self.document.scenes().nth(scene_index).unwrap();
-    //     command_buffer = command_buffer.begin_render_pass(framebuffer.clone(), false, clear_values.clone())
-    //         .unwrap();
-
-    //     for node in scene.nodes() {
-    //         command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Opaque, 0);
-    //     }
-
-    //     command_buffer = command_buffer.next_subpass(false).unwrap();
-
-    //     for node in scene.nodes() {
-    //         command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Mask, 1);
-    //     }
-
-    //     command_buffer = command_buffer.next_subpass(false).unwrap();
-
-    //     for node in scene.nodes() {
-    //         command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Blend, 2);
-    //     }
-
-    //     command_buffer = command_buffer.next_subpass(false).unwrap();
-
-    //     for node in scene.nodes() {
-    //         command_buffer = self.draw_node(node, command_buffer, &draw_context, AlphaMode::Blend, 3);
-    //     }
-
-    //     command_buffer = command_buffer
-    //         .end_render_pass().unwrap();
-
-    //     Ok(command_buffer)
-    // }
-
-    // pub fn draw_main_scene_old(
-    //     &self,
-    //     command_buffer: AutoCommandBufferBuilder,
-    //     context: InitializationDrawContext,
-    // ) -> Result<AutoCommandBufferBuilder, Error> {
-    //     if let Some(main_scene_index) = self.document.default_scene().map(|default_scene| default_scene.index()) {
-    //         self.draw_scene(command_buffer, context, main_scene_index)
-    //     } else {
-    //         Err(ModelDrawError::NoDefaultScene.into())
-    //     }
-    // }
-
     pub fn draw_main_scene(
         &self,
         command_buffer: AutoCommandBufferBuilder,
@@ -356,23 +563,114 @@ impl Model {
         }
     }
 
-    pub fn draw_node<'a>(
+    pub fn draw_scene(
         &self,
-        node: Node<'a>,
         mut command_buffer: AutoCommandBufferBuilder,
-        instance_context: &InstanceDrawContext,
+        instance_context: InstanceDrawContext,
         alpha_mode: AlphaMode,
         subpass: u8,
-    ) -> AutoCommandBufferBuilder {
+        scene_index: usize,
+    ) -> Result<AutoCommandBufferBuilder, Error> {
+        if scene_index >= self.document.scenes().len() {
+            return Err(ModelDrawError::InvalidSceneIndex { index: scene_index }.into());
+        }
+
+        let draw_call_read_guard = self.get_or_create_draw_calls_subpass_scene(
+            &instance_context.draw_context,
+            alpha_mode,
+            subpass,
+            scene_index,
+        )?;
+
+        let context = GltfDrawCallContext {
+            descriptor_set_map_instance: instance_context.descriptor_set_map_instance,
+        };
+
+        if let Some(ref draw_calls) = *draw_call_read_guard {
+            for draw_call in draw_calls {
+                command_buffer = GltfDrawCallIssuer::issue_draw_call(
+                    command_buffer,
+                    &instance_context.draw_context.dynamic,
+                    draw_call.clone(),
+                    &context,
+                );
+            }
+        }
+
+        Ok(command_buffer)
+    }
+
+    fn get_or_create_draw_calls_subpass_scene<'a>(
+        &'a self,
+        draw_context: &DrawContext,
+        alpha_mode: AlphaMode,
+        subpass: u8,
+        scene_index: usize,
+    ) -> Result<RwLockReadGuard<'a, Option<Vec<GltfContextLessDrawCall>>>, Error> {
+        if scene_index >= self.document.scenes().len() {
+            return Err(ModelDrawError::InvalidSceneIndex { index: scene_index }.into());
+        }
+
+        let subpass_context_less_draw_calls = &self.scene_subpass_context_less_draw_calls[scene_index];
+        let context_less_draw_calls = &subpass_context_less_draw_calls[subpass as usize];
+
+        loop {
+            {
+                let read_lock = context_less_draw_calls.read().unwrap();
+
+                if read_lock.is_some() {
+                    return Ok(read_lock);
+                }
+            }
+
+            {
+                let mut write_lock = context_less_draw_calls.write().unwrap();
+
+                if write_lock.is_some() {
+                    continue;
+                }
+
+                *write_lock = Some(
+                    self.create_draw_calls_scene(draw_context, alpha_mode, subpass, scene_index)?
+                );
+            }
+        }
+    }
+
+    fn create_draw_calls_scene(
+        &self,
+        draw_context: &DrawContext,
+        alpha_mode: AlphaMode,
+        subpass: u8,
+        scene_index: usize,
+    ) -> Result<Vec<GltfContextLessDrawCall>, Error> {
+        if scene_index >= self.document.scenes().len() {
+            return Err(ModelDrawError::InvalidSceneIndex { index: scene_index }.into());
+        }
+
+        let mut draw_call_accumulator = Vec::new();
+        let scene = self.document.scenes().nth(scene_index).unwrap();
+
+        for node in scene.nodes() {
+            self.create_draw_calls_node(node, draw_context, alpha_mode, subpass, &mut draw_call_accumulator);
+        }
+
+        Ok(draw_call_accumulator)
+    }
+
+    fn create_draw_calls_node<'a>(
+        &self,
+        node: Node<'a>,
+        draw_context: &DrawContext,
+        alpha_mode: AlphaMode,
+        subpass: u8,
+        draw_call_accumulator: &mut Vec<GltfContextLessDrawCall>,
+    ) {
         if let Some(mesh) = node.mesh() {
             for primitive in mesh.primitives() {
                 let material = primitive.material();
 
                 if material.alpha_mode() == alpha_mode {
-                    let &InstanceDrawContext {
-                        ref draw_context,
-                        ref descriptor_set_map_instance,
-                    } = instance_context;
                     let properties = GraphicsPipelineProperties::from(&primitive, &material);
                     let pipeline_set = draw_context.pipeline_cache.get_or_create_pipeline(&properties);
                     let pipeline = match (alpha_mode, subpass) {
@@ -389,71 +687,48 @@ impl Model {
                         pipeline.layout_dependent_resources.default_material_descriptor_set.clone()
                     });
 
-                    let descriptor_set_instance = descriptor_set_map_instance.map
-                        .get(&pipeline.layout)
-                        .as_ref()
-                        .expect("A descriptor set has not been generated for one of the required pipelines.")
-                        .clone();
+                    let mut incomplete_descriptor_sets = GltfContextLessDescriptorSets {
+                        descriptor_set_scene: pipeline.layout_dependent_resources.descriptor_set_scene.clone(),
+                        descriptor_set_instance: (),
+                        descriptor_set_node: self.node_descriptor_sets[node.index()].map[&pipeline.layout].clone(),
+                        descriptor_set_material: material_descriptor_set,
+                        descriptor_set_blend: None,
+                    };
 
-                    match (alpha_mode, subpass) {
-                        (AlphaMode::Blend, 3) => {
-                            let descriptor_sets = (
-                                pipeline.layout_dependent_resources.descriptor_set_scene.clone(),
-                                descriptor_set_instance.clone(),
-                                self.node_descriptor_sets[node.index()].map[&pipeline.layout].clone(),
-                                material_descriptor_set,
-                                pipeline.layout_dependent_resources.descriptor_set_blend.as_ref()
-                                    .unwrap().clone(),
-                            );
-
-                            command_buffer = self.draw_primitive(
-                                &mesh,
-                                &primitive,
-                                command_buffer,
-                                draw_context,
-                                descriptor_sets.clone(),
-                                &pipeline.pipeline,
-                            );
-
-                        },
-                        _ => {
-                            let descriptor_sets = (
-                                pipeline.layout_dependent_resources.descriptor_set_scene.clone(),
-                                descriptor_set_instance.clone(),
-                                self.node_descriptor_sets[node.index()].map[&pipeline.layout].clone(),
-                                material_descriptor_set,
-                            );
-
-                            command_buffer = self.draw_primitive(
-                                &mesh,
-                                &primitive,
-                                command_buffer,
-                                draw_context,
-                                descriptor_sets.clone(),
-                                &pipeline.pipeline,
-                            );
-                        },
+                    if let (AlphaMode::Blend, 3) = (alpha_mode, subpass) {
+                        incomplete_descriptor_sets.descriptor_set_blend
+                            = Some(pipeline.layout_dependent_resources.descriptor_set_blend.as_ref()
+                                   .unwrap().clone());
                     }
+
+                    let draw_call = self.create_draw_call_primitive(
+                        &mesh,
+                        &primitive,
+                        draw_context,
+                        incomplete_descriptor_sets,
+                        &pipeline.pipeline,
+                        &pipeline.layout_dependent_resources.layout,
+                    );
+
+                    draw_call_accumulator.push(draw_call);
                 }
             }
         }
 
         for child in node.children() {
-            command_buffer = self.draw_node(child, command_buffer, instance_context, alpha_mode, subpass);
+            self.create_draw_calls_node(child, draw_context, alpha_mode, subpass, draw_call_accumulator);
         }
-
-        command_buffer
     }
 
-    pub fn draw_primitive<'a, S>(
+    fn create_draw_call_primitive<'a>(
         &self,
         mesh: &Mesh<'a>,
         primitive: &Primitive<'a>,
-        mut command_buffer: AutoCommandBufferBuilder,
         draw_context: &DrawContext,
-        sets: S,
+        incomplete_descriptor_sets: GltfContextLessDescriptorSets,
         pipeline: &Arc<GraphicsPipelineAbstract + Send + Sync>,
-    ) -> AutoCommandBufferBuilder where S: DescriptorSetsCollection + Clone {
+        pipeline_layout: &Arc<PipelineLayoutAbstract + Send + Sync>,
+    ) -> GltfContextLessDrawCall {
         let positions_accessor = primitive.get(&Semantic::Positions).unwrap();
         let normals_accessor = primitive.get(&Semantic::Normals);
         let tangents_accessor = primitive.get(&Semantic::Tangents);
@@ -526,9 +801,10 @@ impl Model {
             vertex_color_accessor.is_some(),
         );
 
-        if let Some(indices_accessor) = indices_accessor {
-            macro_rules! draw_indexed {
-                ($index_type:ty; $command_buffer:ident, $context:ident, $vertex_buffers:ident, $indices_accessor:ident, $sets:ident) => {
+        let buffers = if let Some(indices_accessor) = indices_accessor {
+            macro_rules! reinterpret_index_buffer_as_dynamic {
+                ($index_type:ty, $index_ident:ident; $indices_accessor:ident) => {{
+                    // FIXME: Isn't there a helper function to use?
                     let index_slice: BufferSlice<[$index_type], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> = {
                         let buffer_view = $indices_accessor.view();
                         let buffer_index = buffer_view.buffer().index();
@@ -542,56 +818,54 @@ impl Model {
 
                         unsafe { index_slice.reinterpret::<[$index_type]>() }
                     };
+                    let index_slice: Arc<dyn TypedBufferAccess<Content=[$index_type]> + Send + Sync> = Arc::new(index_slice);
 
                     // unsafe {
                     //     let index_slice: BufferSlicePublic<[u16], Arc<CpuAccessibleBuffer<[u8]>>> = mem::transmute(index_slice);
                     //     println!("index_slice: {:?}", index_slice);
                     // }
 
-                    $command_buffer = $command_buffer.draw_indexed(
-                        pipeline.clone(),
-                        $context.dynamic,
-                        $vertex_buffers.get_individual_buffers(),
-                        index_slice,
-                        $sets.clone(),
-                        push_constants).unwrap();
-                }
+                    DynamicIndexBuffer::$index_ident(index_slice)
+                }}
             }
 
-            match indices_accessor.data_type() {
+            let index_buffer = match indices_accessor.data_type() {
                 DataType::U8 => {
                     let index_buffer = self.converted_index_buffers_by_accessor_index[indices_accessor.index()]
                         .as_ref()
                         .expect("Could not access a pre-generated `u16` index buffer, maybe it was not generated?")
                         .clone();
-                    command_buffer = command_buffer.draw_indexed(
-                        pipeline.clone(),
-                        draw_context.dynamic,
-                        vertex_buffers.get_individual_buffers(),
-                        index_buffer,
-                        sets.clone(),
-                        push_constants).unwrap();
+
+                    DynamicIndexBuffer::U16(index_buffer)
                 },
                 DataType::U16 => {
-                    draw_indexed!(u16; command_buffer, draw_context, vertex_buffers, indices_accessor, sets);
+                    reinterpret_index_buffer_as_dynamic!(u16, U16; indices_accessor)
                 },
                 DataType::U32 => {
-                    draw_indexed!(u32; command_buffer, draw_context, vertex_buffers, indices_accessor, sets);
+                    reinterpret_index_buffer_as_dynamic!(u32, U32; indices_accessor)
                 },
                 _ => {
                     panic!("Index type not supported.");
                 },
+            };
+
+            ContextLessDrawCallBuffers::Indexed {
+                index_buffer,
             }
         } else {
-            command_buffer = command_buffer.draw(
-                pipeline.clone(),
-                draw_context.dynamic,
-                vertex_buffers.get_individual_buffers(),
-                sets.clone(),
-                push_constants).unwrap();
-        }
+            ContextLessDrawCallBuffers::Simple
+        };
 
-        command_buffer
+        ContextLessDrawCall {
+            pipeline: pipeline.clone(),
+            pipeline_layout: pipeline_layout.clone(),
+            vertex_source: vertex_buffers.get_individual_buffers(),
+            buffers,
+            custom_data: GltfContextLessDrawCallCustomData {
+                incomplete_descriptor_sets,
+                push_constants,
+            }
+        }
     }
 }
 

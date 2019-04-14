@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::path::Path;
 use std::mem;
 use vulkano::sampler::SamplerAddressMode;
@@ -789,6 +789,7 @@ pub fn import_model<'a, I, S>(device: &Arc<Device>,
     let device_images = import_device_images(device, &queue_families, helper_resources, &document, image_data_array, &mut initialization_tasks)?;
     let node_descriptor_sets = create_node_descriptor_sets(device, &pipelines[..], &document, &mut initialization_tasks)?;
     let material_descriptor_sets = create_material_descriptor_sets(device, &pipelines[..], helper_resources, &document, &device_images[..], &mut initialization_tasks)?;
+    let scene_subpass_context_less_draw_calls = document.scenes().map(|_| arr![RwLock::new(None); 4]).collect();
 
     Ok(SimpleUninitializedResource::new(Model {
         document,
@@ -799,5 +800,6 @@ pub fn import_model<'a, I, S>(device: &Arc<Device>,
         tangent_buffers,
         node_descriptor_sets,
         material_descriptor_sets,
+        scene_subpass_context_less_draw_calls,
     }, initialization_tasks))
 }

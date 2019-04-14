@@ -50,27 +50,20 @@ use std::time::{Instant, Duration};
 use std::rc::Rc;
 use std::cell::RefCell;
 use vulkano::descriptor::descriptor_set::DescriptorSet;
-use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
-use vulkano::descriptor::descriptor_set::FixedSizeDescriptorSetsPool;
-use vulkano::descriptor::descriptor_set::FixedSizeDescriptorSet;
 use vulkano::instance::RawInstanceExtensions;
-use vulkano::buffer::{TypedBufferAccess, BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer};
+use vulkano::buffer::{TypedBufferAccess};
 use vulkano::buffer::cpu_pool::CpuBufferPool;
 use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
 use vulkano::device::{Device, RawDeviceExtensions, DeviceExtensions, Queue, Features};
 use vulkano::instance::{Instance, PhysicalDevice, QueueFamily};
 use vulkano::sync::{FlushError, GpuFuture};
 use vulkano::format::{Format, ClearValue};
-use vulkano::image::{AttachmentImage, ImageUsage};
 use vulkano::image::swapchain::SwapchainImage;
-use vulkano::framebuffer::{Framebuffer, FramebufferAbstract};
 use vulkano::pipeline::viewport::Viewport;
 use vulkano::swapchain::{self, PresentMode, SurfaceTransform, Swapchain, AcquireError, SwapchainCreationError, Surface};
 use vulkano_win::VkSurfaceBuild;
-use gltf::material::AlphaMode;
 use winit::{ElementState, MouseButton, Event, DeviceEvent, WindowEvent, KeyboardInput, VirtualKeyCode, EventsLoop, WindowBuilder, Window};
 use winit::dpi::PhysicalSize;
-use crate::buffer::StagedBuffer;
 use crate::math::matrix::*;
 use crate::math::vector::*;
 use crate::model::FramebufferWithClearValues;
@@ -80,6 +73,7 @@ use crate::model::InstanceDrawContext;
 use crate::model::HelperResources;
 use crate::model::resource::UninitializedResource;
 use crate::camera::*;
+use crate::pipeline::GltfGraphicsPipeline;
 use crate::pipeline::GraphicsPipelineSetCache;
 use crate::pipeline::DescriptorSetMap;
 
@@ -271,21 +265,21 @@ pub struct WorldSpaceModel<'a> {
 }
 
 pub struct Ammolite {
-    vulkan_instance: Arc<Instance>,
-    device: Arc<Device>,
-    queue: Arc<Queue>,
-    pipeline_cache: GraphicsPipelineSetCache,
-    helper_resources: HelperResources,
-    window: Arc<Surface<Window>>,
-    window_events_loop: Rc<RefCell<EventsLoop>>,
-    window_dimensions: [u32; 2],
-    window_swapchain: Arc<Swapchain<Window>>,
-    window_swapchain_images: Vec<Arc<SwapchainImage<Window>>>,
-    window_swapchain_framebuffers: Option<Vec<Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>>>,
-    window_swapchain_recreate: bool,
-    synchronization: Option<Box<dyn GpuFuture>>,
+    pub vulkan_instance: Arc<Instance>,
+    pub device: Arc<Device>,
+    pub queue: Arc<Queue>,
+    pub pipeline_cache: GraphicsPipelineSetCache,
+    pub helper_resources: HelperResources,
+    pub window: Arc<Surface<Window>>,
+    pub window_events_loop: Rc<RefCell<EventsLoop>>,
+    pub window_dimensions: [u32; 2],
+    pub window_swapchain: Arc<Swapchain<Window>>,
+    pub window_swapchain_images: Vec<Arc<SwapchainImage<Window>>>,
+    pub window_swapchain_framebuffers: Option<Vec<Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>>>,
+    pub window_swapchain_recreate: bool,
+    pub synchronization: Option<Box<dyn GpuFuture>>,
     // TODO Consider moving to SharedGltfGraphicsPipelineResources
-    buffer_pool_uniform_instance: CpuBufferPool<InstanceUBO>,
+    pub buffer_pool_uniform_instance: CpuBufferPool<InstanceUBO>,
     pub camera_position: Vec3,
     pub camera_view_matrix: Mat4,
     pub camera_projection_matrix: Mat4,
@@ -304,7 +298,7 @@ impl Ammolite {
         // (EventsLoop, Arc<Surface<Window>>, [u32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Arc<Swapchain<Window>>, Vec<Arc<SwapchainImage<Window>>>)
         let (events_loop, window, dimensions, device, queue_family, queue, swapchain, images) = vulkan_initialize(&instance);
 
-        let descriptor_set_gltf_blend: Option<Arc<DescriptorSet + Send + Sync>> = None;
+        let _descriptor_set_gltf_blend: Option<Arc<DescriptorSet + Send + Sync>> = None;
 
         let init_command_buffer_builder = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap();
         let (init_command_buffer_builder, helper_resources) = HelperResources::new(
@@ -419,6 +413,18 @@ impl Ammolite {
                         &self.window_swapchain_images,
                     )
                 );
+
+                for (_, pipeline) in self.pipeline_cache.pipeline_map.write().unwrap().iter_mut() {
+                    let per_pipeline = |pipeline: &mut GltfGraphicsPipeline| {
+                        pipeline.layout_dependent_resources
+                            .reconstruct_descriptor_sets(&self.pipeline_cache.shared_resources);
+                    };
+
+                    (per_pipeline)(&mut pipeline.opaque);
+                    (per_pipeline)(&mut pipeline.mask);
+                    (per_pipeline)(&mut pipeline.blend_preprocess);
+                    (per_pipeline)(&mut pipeline.blend_finalize);
+                }
             }
 
             // Before we can draw on the output, we have to *acquire* an image from the swapchain. If
@@ -586,7 +592,7 @@ impl Ammolite {
                 command_buffer = command_buffer.next_subpass(false).unwrap();
             }
 
-            for (index, world_space_model) in instances.iter().enumerate() {
+            for (_index, world_space_model) in instances.iter().enumerate() {
                 let &(ref model, ref descriptor_set_map_instance) = world_space_model;
                 let instance_context = InstanceDrawContext {
                     draw_context: &draw_context,

@@ -1,4 +1,3 @@
-use std::hash::{Hash, Hasher};
 use std::collections::hash_map::Entry;
 use std::sync::{Arc, RwLock, Weak, Mutex};
 use std::ops::{BitOr, BitOrAssign, Not};
@@ -8,13 +7,12 @@ use vulkano::image::traits::ImageViewAccess;
 use vulkano::descriptor::descriptor_set::DescriptorSet;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::descriptor::descriptor_set::FixedSizeDescriptorSetsPool;
-use vulkano::descriptor::descriptor_set::FixedSizeDescriptorSet;
 use vulkano::descriptor::descriptor_set::FixedSizeDescriptorSetBuilder;
 use vulkano::descriptor::pipeline_layout::PipelineLayoutDesc;
 use vulkano::instance::QueueFamily;
 use vulkano::image::{AttachmentImage, ImageUsage};
 use vulkano::image::swapchain::SwapchainImage;
-use vulkano::buffer::{TypedBufferAccess, BufferAccess, BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer};
+use vulkano::buffer::BufferUsage;
 use vulkano::buffer::immutable::ImmutableBuffer;
 use vulkano::framebuffer::Framebuffer;
 use vulkano::framebuffer::RenderPassAbstract;
@@ -23,7 +21,6 @@ use vulkano::pipeline::blend::AttachmentBlend;
 use vulkano::pipeline::blend::BlendFactor;
 use vulkano::pipeline::blend::BlendOp;
 use vulkano::pipeline::GraphicsPipelineAbstract;
-use vulkano::pipeline::vertex::VertexSource;
 use vulkano::device::Device;
 use vulkano::format::Format;
 use vulkano::framebuffer::Subpass;
@@ -42,6 +39,7 @@ use crate::vertex::{GltfVertexBufferDefinition, VertexAttributePropertiesSet};
 use crate::model::{FramebufferWithClearValues, HelperResources};
 use crate::model::resource::{InitializationTask, UninitializedResource, SimpleUninitializedResource};
 use crate::buffer::StagedBuffer;
+use crate::iter::ArrayIterator;
 use crate::shaders::*;
 
 #[derive(PartialEq, Eq)]
@@ -153,7 +151,7 @@ impl SharedGltfGraphicsPipelineResources {
                 BufferUsage::uniform_buffer_transfer_destination(),
             )
         }?;
-        let mut tasks = vec![
+        let tasks = vec![
             InitializationTask::MaterialDescriptorSet {
                 data: MaterialUBO::default(),
                 initialization_buffer: Arc::new(default_material_ubo_buffer_initialization),
@@ -221,32 +219,17 @@ impl SharedGltfGraphicsPipelineResources {
     }
 }
 
-// FIXME: May not be necessary, if `GltfGraphicsPipeline` has no generics
-// pub trait GltfGraphicsPipelineAbstract {
-//     fn pipeline(&self) -> &Arc<dyn GraphicsPipelineAbstract + Send + Sync>;
-
-//     fn reconstruct_descriptor_sets(&mut self,
-//                                    shared_resources: &SharedGltfGraphicsPipelineResources);
-
-//     fn next_instance_descriptor_set(
-//         &mut self,
-//         buffer: Arc<TypedBufferAccess<Content=InstanceUBO> + Send + Sync>)
-//             -> Arc<dyn DescriptorSet + Send + Sync>;
-// }
-
-// FIXME: Cleanup comments
 #[derive(Clone)]
-pub struct GltfGraphicsPipeline/*<Layout>
-        where Layout: PipelineLayoutAbstract + 'static + Clone + Send + Sync*/ {
+pub struct GltfGraphicsPipeline {
     pub layout: Arc<dyn PipelineLayoutAbstract + Send + Sync>,
     pub pipeline: Arc<dyn GraphicsPipelineAbstract + Send + Sync>,
-    pub layout_dependent_resources: Arc<GltfPipelineLayoutDependentResources>,
+    pub layout_dependent_resources: GltfPipelineLayoutDependentResources,
 }
 
 impl GltfGraphicsPipeline {
     pub fn from(layout: Arc<dyn PipelineLayoutAbstract + Send + Sync>,
                 pipeline: Arc<dyn GraphicsPipelineAbstract + Send + Sync>,
-                layout_dependent_resources: Arc<GltfPipelineLayoutDependentResources>) -> Self {
+                layout_dependent_resources: GltfPipelineLayoutDependentResources) -> Self {
         Self {
             layout,
             pipeline,
@@ -266,8 +249,8 @@ pub struct DescriptorSetMap {
 }
 
 impl DescriptorSetMap {
-    pub fn custom<'a>(pipelines: impl IntoIterator<Item=&'a Arc<GltfGraphicsPipeline>>,
-                      set_provider: impl Fn(&'a Arc<GltfGraphicsPipeline>)
+    pub fn custom<'a>(pipelines: impl IntoIterator<Item=&'a GltfGraphicsPipeline>,
+                      set_provider: impl Fn(&'a GltfGraphicsPipeline)
                       -> Arc<dyn DescriptorSet + Send + Sync>) -> Self {
         let mut map = HashMap::<
             Arc<dyn PipelineLayoutAbstract + Send + Sync>,
@@ -289,36 +272,23 @@ impl DescriptorSetMap {
         Self { map }
     }
 
-    pub fn new<'a, L>(pipelines: impl IntoIterator<Item=&'a Arc<GltfGraphicsPipeline>>,
-                      pool_provider: impl Fn(Arc<GltfPipelineLayoutDependentResources>)
+    pub fn new<'a, L>(pipelines: impl IntoIterator<Item=&'a GltfGraphicsPipeline>,
+                      pool_provider: impl Fn(GltfPipelineLayoutDependentResources)
                                           -> Arc<Mutex<FixedSizeDescriptorSetsPool<L>>>,
                       set_builder_fn: impl Fn(FixedSizeDescriptorSetBuilder<L, ()>)
                                            -> Arc<dyn DescriptorSet + Send + Sync>) -> Self
             where L: PipelineLayoutAbstract + Clone {
-        let mut map = HashMap::<
-            Arc<dyn PipelineLayoutAbstract + Send + Sync>,
-            Arc<dyn DescriptorSet + Send + Sync>,
-            FnvBuildHasher,
-        >::default();
+        Self::custom(pipelines, |pipeline| {
+            let pool = pool_provider(pipeline.layout_dependent_resources.clone());
+            let mut pool = pool.lock().unwrap();
+            let set_builder = pool.next();
 
-        for pipeline in pipelines {
-            match map.entry(pipeline.layout.clone()) {
-                Entry::Occupied(_) => (),
-                Entry::Vacant(entry) => {
-                    let pool = pool_provider(pipeline.layout_dependent_resources.clone());
-                    let mut pool = pool.lock().unwrap();
-                    let set_builder = pool.next();
-                    let set = (set_builder_fn)(set_builder);
-
-                    entry.insert(set);
-                }
-            }
-        }
-
-        Self { map }
+            (set_builder_fn)(set_builder)
+        })
     }
 }
 
+#[derive(Clone)]
 pub struct GltfPipelineLayoutDependentResources {
     pub layout: Arc<dyn PipelineLayoutAbstract + Send + Sync>,
     pub descriptor_set_scene: Arc<dyn DescriptorSet + Send + Sync>,
@@ -376,7 +346,7 @@ impl GltfPipelineLayoutDependentResources {
         }
     }
 
-    fn reconstruct_descriptor_sets(&mut self, shared_resources: &SharedGltfGraphicsPipelineResources) {
+    pub fn reconstruct_descriptor_sets(&mut self, shared_resources: &SharedGltfGraphicsPipelineResources) {
         self.descriptor_set_scene = Arc::new(
             PersistentDescriptorSet::start(self.layout.clone(), 0)
                 .add_buffer(shared_resources.scene_ubo_buffer.device_buffer().clone()).unwrap()
@@ -392,19 +362,30 @@ impl GltfPipelineLayoutDependentResources {
 
 #[derive(Clone)]
 pub struct GraphicsPipelineSet {
-    pub opaque: Arc<GltfGraphicsPipeline>,
-    pub mask: Arc<GltfGraphicsPipeline>,
-    pub blend_preprocess: Arc<GltfGraphicsPipeline>,
-    pub blend_finalize: Arc<GltfGraphicsPipeline>,
+    pub opaque: GltfGraphicsPipeline,
+    pub mask: GltfGraphicsPipeline,
+    pub blend_preprocess: GltfGraphicsPipeline,
+    pub blend_finalize: GltfGraphicsPipeline,
+}
+
+impl GraphicsPipelineSet {
+    pub fn iter(&self) -> impl Iterator<Item=&GltfGraphicsPipeline> {
+        ArrayIterator::new([
+            &self.opaque,
+            &self.mask,
+            &self.blend_preprocess,
+            &self.blend_finalize,
+        ])
+    }
 }
 
 // Consider improving the synchronization data type
 pub struct GraphicsPipelineSetCache {
-    pub pipeline_map: Arc<RwLock<HashMap<GraphicsPipelineProperties, Arc<GraphicsPipelineSet>>>>,
+    pub pipeline_map: Arc<RwLock<HashMap<GraphicsPipelineProperties, GraphicsPipelineSet>>>,
     pub shared_resources: SharedGltfGraphicsPipelineResources,
     pub pipeline_layout_dependent_resources: Arc<RwLock<WeakKeyHashMap<
                                                  Weak<dyn PipelineLayoutDesc + Send + Sync>,
-                                                 Arc<GltfPipelineLayoutDependentResources>
+                                                 GltfPipelineLayoutDependentResources
                                              >>>,
     pub device: Arc<Device>,
     pub render_pass: Arc<RenderPassAbstract + Send + Sync>,
@@ -422,10 +403,10 @@ macro_rules! cache_layout {
             let layout: Arc<dyn PipelineLayoutAbstract + Send + Sync> = Arc::new(
                 layout_desc.clone().build($cache.device.clone()).unwrap()
             );
-            let resources = Arc::new(GltfPipelineLayoutDependentResources::from(
+            let resources = GltfPipelineLayoutDependentResources::from(
                 layout.clone(),
                 &$cache.shared_resources
-            ));
+            );
 
             resources_map.insert(layout_desc, resources.clone());
 
@@ -437,7 +418,7 @@ macro_rules! cache_layout {
                     .unwrap()
         );
 
-        Arc::new(GltfGraphicsPipeline::from(layout, pipeline, resources))
+        GltfGraphicsPipeline::from(layout, pipeline, resources)
     }}
 }
 
@@ -646,7 +627,7 @@ impl GraphicsPipelineSetCache {
         }.expect("Could not create a render pass."))
     }
 
-    pub fn get_pipeline(&self, properties: &GraphicsPipelineProperties) -> Option<Arc<GraphicsPipelineSet>> {
+    pub fn get_pipeline(&self, properties: &GraphicsPipelineProperties) -> Option<GraphicsPipelineSet> {
         self.pipeline_map
             .as_ref()
             .read()
@@ -660,7 +641,7 @@ impl GraphicsPipelineSetCache {
     //     self.get_pipeline(&GraphicsPipelineProperties::default())
     // }
 
-    pub fn get_or_create_pipeline(&self, properties: &GraphicsPipelineProperties) -> Arc<GraphicsPipelineSet> {
+    pub fn get_or_create_pipeline(&self, properties: &GraphicsPipelineProperties) -> GraphicsPipelineSet {
         if let Some(pipeline) = self.get_pipeline(properties) {
             pipeline
         } else {
@@ -668,7 +649,7 @@ impl GraphicsPipelineSetCache {
         }
     }
 
-    pub fn create_pipeline(&self, properties: &GraphicsPipelineProperties) -> Arc<GraphicsPipelineSet> {
+    pub fn create_pipeline(&self, properties: &GraphicsPipelineProperties) -> GraphicsPipelineSet {
         let mut builder = GraphicsPipeline::start();
 
         macro_rules! flag {
@@ -704,12 +685,12 @@ impl GraphicsPipelineSetCache {
             // viewport the shape is going to be drawn to. This topic isn't covered here.
             .viewports_dynamic_scissors_irrelevant(1);
 
-        let pipeline_set = Arc::new(GraphicsPipelineSet {
+        let pipeline_set = GraphicsPipelineSet {
             opaque: construct_pipeline_opaque!(self, builder, &self.shared_resources),
             mask: construct_pipeline_mask!(self, builder, &self.shared_resources),
             blend_preprocess: construct_pipeline_blend_preprocess!(self, builder, &self.shared_resources),
             blend_finalize: construct_pipeline_blend_finalize!(self, builder, &self.shared_resources),
-        });
+        };
 
         pipeline_map.insert(properties.clone(), pipeline_set.clone());
 

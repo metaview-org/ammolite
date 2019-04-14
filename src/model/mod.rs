@@ -6,17 +6,14 @@ use std::marker::PhantomData;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::path::Path;
 use std::mem;
-use std::ops::Deref;
 use std::collections::HashMap;
 use vulkano::buffer::BufferAccess;
 use vulkano::buffer::BufferSlice;
 use vulkano::buffer::BufferUsage;
 use vulkano::buffer::TypedBufferAccess;
 use vulkano::buffer::immutable::ImmutableBuffer;
-use vulkano::command_buffer::{DynamicState, AutoCommandBuffer, AutoCommandBufferBuilder, DrawIndirectCommand, DrawIndexedIndirectCommand};
+use vulkano::command_buffer::{DynamicState, AutoCommandBufferBuilder, DrawIndirectCommand, DrawIndexedIndirectCommand};
 use vulkano::descriptor::descriptor_set::DescriptorSet;
-use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
-use vulkano::descriptor::descriptor_set::collection::DescriptorSetsCollection;
 use vulkano::descriptor::pipeline_layout::PipelineLayoutAbstract;
 use vulkano::device::Device;
 use vulkano::format::*;
@@ -31,7 +28,6 @@ use vulkano::image::traits::ImageViewAccess;
 use vulkano::instance::QueueFamily;
 use vulkano::pipeline::GraphicsPipelineAbstract;
 use vulkano::pipeline::vertex::VertexSource;
-use vulkano::pipeline::input_assembly::Index;
 use vulkano::sampler::Filter;
 use vulkano::sampler::MipmapMode;
 use vulkano::sampler::Sampler;
@@ -44,7 +40,7 @@ use gltf::Node;
 use gltf::accessor::DataType;
 use failure::Error;
 use safe_transmute::PodTransmutable;
-use crate::shaders::{InstanceUBO, MaterialUBO, PushConstants};
+use crate::shaders::{PushConstants};
 use crate::vertex::*;
 use crate::pipeline::GraphicsPipelineProperties;
 use crate::pipeline::GraphicsPipelineSetCache;
@@ -512,12 +508,12 @@ impl Model {
         ])
     }
 
-    pub fn get_used_pipelines_layouts(&self, pipeline_cache: &GraphicsPipelineSetCache) -> Vec<Arc<GltfGraphicsPipeline>> {
+    pub fn get_used_pipelines_layouts(&self, pipeline_cache: &GraphicsPipelineSetCache) -> Vec<GltfGraphicsPipeline> {
         Self::get_pipelines_layouts(&self.document, pipeline_cache)
     }
 
     // TODO: Cache result
-    pub fn get_pipelines_layouts(document: &Document, pipeline_cache: &GraphicsPipelineSetCache) -> Vec<Arc<GltfGraphicsPipeline>> {
+    pub fn get_pipelines_layouts(document: &Document, pipeline_cache: &GraphicsPipelineSetCache) -> Vec<GltfGraphicsPipeline> {
         let mut pipelines = HashMap::new();
 
         for mesh in document.meshes() {

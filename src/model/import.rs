@@ -8,10 +8,9 @@ use vulkano::format::*;
 use vulkano::buffer::TypedBufferAccess;
 use vulkano::buffer::BufferSlice;
 use vulkano::buffer::BufferUsage;
-use vulkano::pipeline::GraphicsPipelineAbstract;
+
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::buffer::immutable::ImmutableBuffer;
-use vulkano::descriptor::descriptor_set::DescriptorSet;
 use vulkano::sampler::Sampler;
 use vulkano::image::immutable::ImmutableImage;
 use vulkano::image::immutable::ImmutableImageInitialization;
@@ -577,7 +576,7 @@ fn get_node_matrices(document: &Document) -> Vec<Mat4> {
 }
 
 pub fn create_node_descriptor_sets<'a>(device: &Arc<Device>,
-                                       pipelines: impl IntoIterator<Item=&'a Arc<GltfGraphicsPipeline>>,
+                                       pipelines: impl IntoIterator<Item=&'a GltfGraphicsPipeline>,
                                        document: &Document,
                                        initialization_tasks: &mut Vec<InitializationTask>)
         -> Result<Vec<DescriptorSetMap>, Error> {
@@ -639,7 +638,7 @@ pub fn create_samplers(device: &Arc<Device>, document: &Document) -> Result<Vec<
 }
 
 pub fn create_material_descriptor_sets<'a>(device: &Arc<Device>,
-                                           pipelines: impl IntoIterator<Item=&'a Arc<GltfGraphicsPipeline>>,
+                                           pipelines: impl IntoIterator<Item=&'a GltfGraphicsPipeline>,
                                            helper_resources: &HelperResources,
                                            document: &Document,
                                            device_images: &[Arc<dyn ImageViewAccess + Send + Sync>],

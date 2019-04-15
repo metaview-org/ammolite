@@ -669,7 +669,7 @@ fn main() {
 
         let world_space_models = [
             WorldSpaceModel { model: &model, matrix: model_matrices[0].clone() },
-            WorldSpaceModel { model: &model, matrix: model_matrices[1].clone() },
+            // WorldSpaceModel { model: &model, matrix: model_matrices[1].clone() },
         ];
 
         ammolite.render(&elapsed, || &world_space_models[..]);

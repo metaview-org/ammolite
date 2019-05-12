@@ -7,6 +7,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::path::Path;
 use std::mem;
 use std::collections::HashMap;
+use core::num::NonZeroU32;
 use vulkano::buffer::BufferAccess;
 use vulkano::buffer::BufferSlice;
 use vulkano::buffer::BufferUsage;
@@ -14,17 +15,22 @@ use vulkano::buffer::TypedBufferAccess;
 use vulkano::buffer::immutable::ImmutableBuffer;
 use vulkano::command_buffer::{DynamicState, AutoCommandBufferBuilder, DrawIndirectCommand, DrawIndexedIndirectCommand};
 use vulkano::descriptor::descriptor_set::DescriptorSet;
-use vulkano::descriptor::pipeline_layout::PipelineLayoutAbstract;
+use vulkano::descriptor::pipeline_layout::PipelineLayout;
 use vulkano::device::Device;
 use vulkano::format::*;
 use vulkano::framebuffer::FramebufferAbstract;
 use vulkano::framebuffer::RenderPassDescClearValues;
-use vulkano::image::Dimensions;
+use vulkano::image::sync::locker;
+use vulkano::image::layout::RequiredLayouts;
+use vulkano::image::layout::typesafety;
+use vulkano::image::Swizzle;
+use vulkano::image::ImageDimensions;
 use vulkano::image::ImageLayout;
 use vulkano::image::ImageUsage;
 use vulkano::image::MipmapsCount;
-use vulkano::image::immutable::ImmutableImage;
+use vulkano::image::SyncImage;
 use vulkano::image::traits::ImageViewAccess;
+use vulkano::image::view::ImageView;
 use vulkano::instance::QueueFamily;
 use vulkano::pipeline::GraphicsPipelineAbstract;
 use vulkano::pipeline::vertex::VertexSource;
@@ -82,24 +88,43 @@ impl HelperResources {
     pub fn new<'a, I>(device: &Arc<Device>, queue_families: I)
             -> Result<SimpleUninitializedResource<HelperResources>, Error>
             where I: IntoIterator<Item = QueueFamily<'a>> + Clone {
-        let (empty_device_image, empty_image_initialization) = ImmutableImage::uninitialized(
-            device.clone(),
-            Dimensions::Dim2d {
-                width: 1,
-                height: 1,
-            },
-            R8Uint,
-            MipmapsCount::One,
-            // ImageUsage::all(),
-            ImageUsage {
+        let empty_device_image_view = {
+            let usage = ImageUsage {
                 input_attachment: true,
                 transfer_destination: true,
                 sampled: true,
                 ..ImageUsage::none()
-            },
-            ImageLayout::ShaderReadOnlyOptimal,
-            queue_families.clone(),
-        )?;
+            };
+            let empty_device_image = SyncImage::<locker::SimpleImageResourceLocker>::new(
+                device.clone(),
+                // ImageUsage::all(),
+                usage.clone(),
+                R8Uint,
+                ImageDimensions::Dim2D {
+                    width: NonZeroU32::new(1).unwrap(),
+                    height: NonZeroU32::new(1).unwrap(),
+                },
+                NonZeroU32::new(1).unwrap(),
+                MipmapsCount::One,
+            )?;
+
+            let mut required_layouts = RequiredLayouts::none();
+
+            required_layouts.infer_mut(usage);
+
+            // TODO: Remove; this is a temporary workaround for faulty `infer_mut`
+            required_layouts.global = Some(typesafety::ImageLayoutEnd::General);
+            // required_layouts.global = Some(typesafety::ImageLayoutEnd::TransferDstOptimal);
+
+            Arc::new(ImageView::new::<R8Uint>(
+                empty_device_image,
+                None,
+                None,
+                Swizzle::identity(),
+                None,
+                required_layouts,
+            )?)
+        };
 
         // Size of mat4 (square, rank 4 matrix of f32s):
         let zero_buffer_len = 4 * 4 * 4; 
@@ -134,7 +159,7 @@ impl HelperResources {
         let tasks = vec![
             InitializationTask::Image {
                 data: Arc::new(vec![0]),
-                device_image: Arc::new(empty_image_initialization),
+                device_image: empty_device_image_view.clone(),
                 texel_conversion: None,
             },
             InitializationTask::ZeroBuffer {
@@ -144,7 +169,7 @@ impl HelperResources {
         ];
 
         let output = HelperResources {
-            empty_image: empty_device_image,
+            empty_image: empty_device_image_view,
             zero_buffer: zero_device_buffer,
             cheapest_sampler,
         };
@@ -178,14 +203,13 @@ pub enum ContextLessDrawCallBuffers {
 }
 
 #[derive(Clone)]
-pub struct ContextLessDrawCall<Gp, Gpl, V, Cd>
+pub struct ContextLessDrawCall<Gp, V, Cd>
     where Gp: GraphicsPipelineAbstract + VertexSource<V> + Send + Sync + 'static + Clone,
-          Gpl: PipelineLayoutAbstract + Send + Sync + Clone,
           V: Clone,
           Cd: Clone,
 {
     pipeline: Gp,
-    pipeline_layout: Gpl,
+    pipeline_layout: Arc<PipelineLayout>,
     vertex_source: V,
     buffers: ContextLessDrawCallBuffers,
     /// Data to provide additional draw call information, eg. to compute resulting descriptor sets
@@ -195,15 +219,14 @@ pub struct ContextLessDrawCall<Gp, Gpl, V, Cd>
 
 // FIXME: Error handling
 /// Takes a `ContextLessDrawCall` and constructs a final draw call from it
-pub trait DrawCallIssuer<Gpl>
-        where Gpl: PipelineLayoutAbstract + Send + Sync + Clone, {
+pub trait DrawCallIssuer {
     type Context;
     type CustomData: Clone;
 
     fn issue_draw_call<Gp, V>(
         command_buffer_builder: AutoCommandBufferBuilder,
         dynamic: &DynamicState,
-        context_less: ContextLessDrawCall<Gp, Gpl, V, Self::CustomData>,
+        context_less: ContextLessDrawCall<Gp, V, Self::CustomData>,
         context: &Self::Context,
     ) -> AutoCommandBufferBuilder
         where Gp: GraphicsPipelineAbstract + VertexSource<V> + Send + Sync + 'static + Clone,
@@ -229,7 +252,6 @@ pub struct GltfContextLessDrawCallCustomData {
 
 pub type GltfContextLessDrawCall = ContextLessDrawCall<
     Arc<dyn GraphicsPipelineAbstract + Send + Sync>,
-    Arc<dyn PipelineLayoutAbstract + Send + Sync>,
     Vec<Arc<(dyn BufferAccess + Send + Sync + 'static)>>,
     GltfContextLessDrawCallCustomData,
 >;
@@ -243,14 +265,14 @@ pub struct GltfDrawCallIssuer<'a> {
 }
 
 // FIXME: Should be more generic
-impl<'a> DrawCallIssuer<Arc<dyn PipelineLayoutAbstract + Send + Sync>> for GltfDrawCallIssuer<'a> {
+impl<'a> DrawCallIssuer for GltfDrawCallIssuer<'a> {
     type Context = GltfDrawCallContext<'a>;
     type CustomData = GltfContextLessDrawCallCustomData;
 
     fn issue_draw_call<Gp, V>(
         command_buffer_builder: AutoCommandBufferBuilder,
         dynamic: &DynamicState,
-        context_less: ContextLessDrawCall<Gp, Arc<dyn PipelineLayoutAbstract + Send + Sync>, V, Self::CustomData>,
+        context_less: ContextLessDrawCall<Gp, V, Self::CustomData>,
         context: &Self::Context,
     ) -> AutoCommandBufferBuilder
             where Gp: GraphicsPipelineAbstract + VertexSource<V> + Send + Sync + 'static + Clone,
@@ -270,7 +292,7 @@ impl<'a> DrawCallIssuer<Arc<dyn PipelineLayoutAbstract + Send + Sync>> for GltfD
             ..
         } = incomplete_descriptor_sets;
         let descriptor_set_instance = context.descriptor_set_map_instance.map
-            .get(&pipeline_layout)
+            .get(pipeline_layout.desc())
             .expect("A descriptor set has not been generated for one of the required pipelines.")
             .clone();
 
@@ -532,8 +554,8 @@ impl Model {
                             _ => panic!("Invalid alpha_mode/subpass combination."),
                         };
 
-                        if !pipelines.contains_key(&pipeline.layout) {
-                            pipelines.insert(pipeline.layout.clone(), pipeline.clone());
+                        if !pipelines.contains_key(pipeline.layout.desc()) {
+                            pipelines.insert(pipeline.layout.desc().clone(), pipeline.clone());
                         }
                     }
                 }
@@ -678,7 +700,7 @@ impl Model {
                     };
 
                     let material_descriptor_set = material.index().map(|material_index| {
-                        self.material_descriptor_sets[material_index].map[&pipeline.layout].clone()
+                        self.material_descriptor_sets[material_index].map[pipeline.layout.desc()].clone()
                     }).unwrap_or_else(|| {
                         pipeline.layout_dependent_resources.default_material_descriptor_set.clone()
                     });
@@ -686,7 +708,7 @@ impl Model {
                     let mut incomplete_descriptor_sets = GltfContextLessDescriptorSets {
                         descriptor_set_scene: pipeline.layout_dependent_resources.descriptor_set_scene.clone(),
                         descriptor_set_instance: (),
-                        descriptor_set_node: self.node_descriptor_sets[node.index()].map[&pipeline.layout].clone(),
+                        descriptor_set_node: self.node_descriptor_sets[node.index()].map[pipeline.layout.desc()].clone(),
                         descriptor_set_material: material_descriptor_set,
                         descriptor_set_blend: None,
                     };
@@ -723,7 +745,7 @@ impl Model {
         draw_context: &DrawContext,
         incomplete_descriptor_sets: GltfContextLessDescriptorSets,
         pipeline: &Arc<GraphicsPipelineAbstract + Send + Sync>,
-        pipeline_layout: &Arc<PipelineLayoutAbstract + Send + Sync>,
+        pipeline_layout: &Arc<PipelineLayout>,
     ) -> GltfContextLessDrawCall {
         let positions_accessor = primitive.get(&Semantic::Positions).unwrap();
         let normals_accessor = primitive.get(&Semantic::Normals);

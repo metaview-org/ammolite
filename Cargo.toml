@@ -27,4 +27,4 @@ vulkano = { path = "../vulkano/vulkano" }
 vulkano-shaders = { path = "../vulkano/vulkano-shaders" }
 vulkano-win = { path = "../vulkano/vulkano-win" }
 weak-table = "0.2.3"
-winit = "0.18.0"
+winit = "0.19.0"

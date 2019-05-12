@@ -49,6 +49,8 @@ use std::sync::Arc;
 use std::time::{Instant, Duration};
 use std::rc::Rc;
 use std::cell::RefCell;
+use core::num::NonZeroU32;
+use vulkano::swapchain::ColorSpace;
 use vulkano::descriptor::descriptor_set::DescriptorSet;
 use vulkano::instance::RawInstanceExtensions;
 use vulkano::buffer::{TypedBufferAccess};
@@ -58,7 +60,7 @@ use vulkano::device::{Device, RawDeviceExtensions, DeviceExtensions, Queue, Feat
 use vulkano::instance::{Instance, PhysicalDevice, QueueFamily};
 use vulkano::sync::{FlushError, GpuFuture};
 use vulkano::format::{Format, ClearValue};
-use vulkano::image::swapchain::SwapchainImage;
+use vulkano::image::SwapchainImage;
 use vulkano::pipeline::viewport::Viewport;
 use vulkano::swapchain::{self, PresentMode, SurfaceTransform, Swapchain, AcquireError, SwapchainCreationError, Surface};
 use vulkano_win::VkSurfaceBuild;
@@ -90,7 +92,7 @@ fn swapchain_format_compare(a: &Format, b: &Format) -> std::cmp::Ordering {
     swapchain_format_priority(a).cmp(&swapchain_format_priority(b))
 }
 
-fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surface<Window>>, [u32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Arc<Swapchain<Window>>, Vec<Arc<SwapchainImage<Window>>>) {
+fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surface<Window>>, [NonZeroU32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Arc<Swapchain<Window>>, Vec<Arc<SwapchainImage<Window>>>) {
     // TODO: Better device selection & SLI support
     let physical_device = PhysicalDevice::enumerate(instance).next().expect("No physical device available.");
 
@@ -101,13 +103,17 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
     let window = WindowBuilder::new()
         .with_title("ammolite")
         .with_dimensions(PhysicalSize::new(1280.0, 720.0).to_logical(primary_monitor.get_hidpi_factor()))
+        // If this doesn't compile, you are probably using a conflicting version of winit
         .build_vk_surface(&events_loop, instance.clone()).unwrap();
 
     window.window().hide_cursor(true);
 
-    let mut dimensions: [u32; 2] = {
+    let mut dimensions: [NonZeroU32; 2] = {
         let (width, height) = window.window().get_inner_size().unwrap().into();
-        [width, height]
+        [
+            NonZeroU32::new(width).expect("The width of the window must not be 0."),
+            NonZeroU32::new(height).expect("The height of the window must not be 0."),
+        ]
     };
 
     // Queues are like CPU threads, queue families are groups of queues with certain capabilities.
@@ -160,7 +166,10 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
 
         // Determines the behaviour of the alpha channel
         let alpha = capabilities.supported_composite_alpha.iter().next().unwrap();
-        dimensions = capabilities.current_extent.unwrap_or(dimensions);
+        dimensions = capabilities.current_extent.map(|extent| [
+            NonZeroU32::new(extent[0]).unwrap(),
+            NonZeroU32::new(extent[1]).unwrap(),
+        ]).unwrap_or(dimensions);
 
         // Order supported swapchain formats by priority and choose the most preferred one.
         // The swapchain format must be in SRGB space.
@@ -171,15 +180,16 @@ fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surfac
         let format = supported_formats[0];
 
         // Please take a look at the docs for the meaning of the parameters we didn't mention.
-        Swapchain::new(
+        Swapchain::new::<_, &Arc<Queue>>(
             device.clone(),
             window.clone(),
-            capabilities.min_image_count,
-            format,
+            (&queue).into(),
             dimensions,
-            1,
+            NonZeroU32::new(1).unwrap(),
+            NonZeroU32::new(capabilities.min_image_count).expect("Invalid swapchaing image count."),
+            format,
+            ColorSpace::SrgbNonLinear,
             capabilities.supported_usage_flags,
-            &queue,
             SurfaceTransform::Identity,
             alpha,
             PresentMode::Immediate, /* PresentMode::Relaxed TODO: Getting only ~60 FPS in a window */
@@ -272,7 +282,7 @@ pub struct Ammolite {
     pub helper_resources: HelperResources,
     pub window: Arc<Surface<Window>>,
     pub window_events_loop: Rc<RefCell<EventsLoop>>,
-    pub window_dimensions: [u32; 2],
+    pub window_dimensions: [NonZeroU32; 2],
     pub window_swapchain: Arc<Swapchain<Window>>,
     pub window_swapchain_images: Vec<Arc<SwapchainImage<Window>>>,
     pub window_swapchain_framebuffers: Option<Vec<Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>>>,
@@ -379,9 +389,12 @@ impl Ammolite {
             if self.window_swapchain_recreate {
                 self.window_dimensions = {
                     let dpi = self.window.window().get_hidpi_factor();
-                    let (width, height) = self.window.window().get_inner_size().unwrap().to_physical(dpi)
+                    let (width, height): (u32, u32) = self.window.window().get_inner_size().unwrap().to_physical(dpi)
                         .into();
-                    [width, height]
+                    [
+                        NonZeroU32::new(width).expect("The width of the window must not be 0."),
+                        NonZeroU32::new(height).expect("The height of the window must not be 0."),
+                    ]
                 };
 
                 let (new_swapchain, new_images) = match self.window_swapchain.recreate_with_dimension(self.window_dimensions) {
@@ -405,7 +418,7 @@ impl Ammolite {
             if self.window_swapchain_framebuffers.is_none() {
                 self.pipeline_cache.shared_resources.reconstruct_dimensions_dependent_images(
                     self.window_dimensions.clone()
-                );
+                ).expect("Could not reconstruct dimension dependent resources.");
 
                 self.window_swapchain_framebuffers = Some(
                     self.pipeline_cache.shared_resources.construct_swapchain_framebuffers(
@@ -450,7 +463,7 @@ impl Ammolite {
 
             let scene_ubo = SceneUBO::new(
                 secs_elapsed,
-                Vec2([self.window_dimensions[0] as f32, self.window_dimensions[1] as f32]),
+                Vec2([self.window_dimensions[0].get() as f32, self.window_dimensions[1].get() as f32]),
                 self.camera_position.clone(),
                 self.camera_view_matrix.clone(),
                 self.camera_projection_matrix.clone(),
@@ -536,7 +549,7 @@ impl Ammolite {
             line_width: None,
             viewports: Some(vec![Viewport {
                 origin: [0.0, 0.0],
-                dimensions: [self.window_dimensions[0] as f32, self.window_dimensions[1] as f32],
+                dimensions: [self.window_dimensions[0].get() as f32, self.window_dimensions[1].get() as f32],
                 depth_range: 0.0 .. 1.0,
             }]),
             scissors: None,
@@ -652,7 +665,7 @@ fn main() {
         ammolite.camera_projection_matrix = construct_perspective_projection_matrix(
             0.001,
             1000.0,
-            ammolite.window_dimensions[0] as f32 / ammolite.window_dimensions[1] as f32,
+            ammolite.window_dimensions[0].get() as f32 / ammolite.window_dimensions[1].get() as f32,
             std::f32::consts::FRAC_PI_2,
         );
         // construct_orthographic_projection_matrix(0.1, 1000.0, [ammolite.window_dimensions[0] as f32 / ammolite.window_dimensions[1] as f32, 1.0].into()),
@@ -719,7 +732,7 @@ fn main() {
                     ..
                 } if cursor_capture => {
                     ammolite.window.window().set_cursor_position(
-                        (ammolite.window_dimensions[0] as f64 / 2.0, ammolite.window_dimensions[1] as f64 / 2.0).into()
+                        (ammolite.window_dimensions[0].get() as f64 / 2.0, ammolite.window_dimensions[1].get() as f64 / 2.0).into()
                     ).expect("Could not center the cursor position.");
                 }
 

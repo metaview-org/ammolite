@@ -2,6 +2,7 @@ use std::collections::hash_map::Entry;
 use std::sync::{Arc, RwLock, Weak, Mutex};
 use std::ops::{BitOr, BitOrAssign, Not};
 use std::collections::HashMap;
+use core::num::NonZeroU32;
 use vulkano::format::*;
 use vulkano::image::traits::ImageViewAccess;
 use vulkano::descriptor::descriptor_set::DescriptorSet;
@@ -9,14 +10,23 @@ use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::descriptor::descriptor_set::FixedSizeDescriptorSetsPool;
 use vulkano::descriptor::descriptor_set::FixedSizeDescriptorSetBuilder;
 use vulkano::descriptor::pipeline_layout::PipelineLayoutDesc;
+use vulkano::descriptor::pipeline_layout::PipelineLayoutDescAggregation;
 use vulkano::instance::QueueFamily;
-use vulkano::image::{AttachmentImage, ImageUsage};
-use vulkano::image::swapchain::SwapchainImage;
+use vulkano::image::SwapchainImage;
+use vulkano::image::layout::RequiredLayouts;
+use vulkano::image::layout::typesafety;
+use vulkano::image::Swizzle;
+use vulkano::image::ImageDimensions;
+use vulkano::image::ImageLayout;
+use vulkano::image::ImageUsage;
+use vulkano::image::MipmapsCount;
+use vulkano::image::SyncImage;
+use vulkano::image::view::ImageView;
 use vulkano::buffer::BufferUsage;
 use vulkano::buffer::immutable::ImmutableBuffer;
 use vulkano::framebuffer::Framebuffer;
 use vulkano::framebuffer::RenderPassAbstract;
-use vulkano::descriptor::pipeline_layout::PipelineLayoutAbstract;
+use vulkano::descriptor::pipeline_layout::PipelineLayout;
 use vulkano::pipeline::blend::AttachmentBlend;
 use vulkano::pipeline::blend::BlendFactor;
 use vulkano::pipeline::blend::BlendOp;
@@ -130,9 +140,9 @@ pub struct SharedGltfGraphicsPipelineResources {
     pub scene_ubo_buffer: StagedBuffer<SceneUBO>,
     pub default_material_ubo_buffer: Arc<ImmutableBuffer<MaterialUBO>>,
     // TODO: Probaby add another type to group dimensions dependent resources into a single Option
-    pub depth_image: Option<Arc<AttachmentImage<D32Sfloat>>>,
-    pub blend_accumulation_image: Option<Arc<AttachmentImage<R32G32B32A32Sfloat>>>,
-    pub blend_revealage_image: Option<Arc<AttachmentImage<R32G32B32A32Sfloat>>>,
+    pub depth_image: Option<Arc<dyn ImageViewAccess + Send + Sync>>,
+    pub blend_accumulation_image: Option<Arc<dyn ImageViewAccess + Send + Sync>>,
+    pub blend_revealage_image: Option<Arc<dyn ImageViewAccess + Send + Sync>>,
 }
 
 impl SharedGltfGraphicsPipelineResources {
@@ -184,50 +194,81 @@ impl SharedGltfGraphicsPipelineResources {
         }).collect()
     }
 
-    pub fn reconstruct_dimensions_dependent_images(&mut self, dimensions: [u32; 2]) {
-        self.depth_image = Some(AttachmentImage::with_usage(
-                self.device.clone(),
-                dimensions.clone(),
-                D32Sfloat,
-                ImageUsage {
-                    depth_stencil_attachment: true,
-                    .. ImageUsage::none()
-                }
-        ).unwrap());
-        self.blend_accumulation_image = Some(AttachmentImage::with_usage(
-                self.device.clone(),
-                dimensions.clone(),
-                R32G32B32A32Sfloat,
-                ImageUsage {
-                    color_attachment: true,
-                    input_attachment: true,
-                    transient_attachment: true,
-                    .. ImageUsage::none()
-                }
-        ).unwrap());
-        self.blend_revealage_image = Some(AttachmentImage::with_usage(
-                self.device.clone(),
-                dimensions.clone(),
-                R32G32B32A32Sfloat, //FIXME
-                ImageUsage {
-                    color_attachment: true,
-                    input_attachment: true,
-                    transient_attachment: true,
-                    .. ImageUsage::none()
-                }
-        ).unwrap());
+    fn construct_attachment_image_view<F: FormatDesc>(
+        &self,
+        dimensions: [NonZeroU32; 2],
+        format: F,
+        usage: ImageUsage,
+    ) -> Result<Arc<ImageView<SyncImage>>, Error> {
+        let device_image = SyncImage::new(
+            self.device.clone(),
+            usage.clone(),
+            format,
+            ImageDimensions::Dim2D {
+                width: dimensions[0],
+                height: dimensions[1],
+            },
+            NonZeroU32::new(1).unwrap(),
+            MipmapsCount::One,
+        )?;
+
+        let mut required_layouts = RequiredLayouts::none();
+
+        required_layouts.infer_mut(usage);
+
+        Ok(Arc::new(ImageView::new::<F>(
+            device_image,
+            None,
+            None,
+            Swizzle::identity(),
+            None,
+            required_layouts,
+        )?))
+    }
+
+    pub fn reconstruct_dimensions_dependent_images(&mut self, dimensions: [NonZeroU32; 2]) -> Result<(), Error> {
+        self.depth_image = Some(self.construct_attachment_image_view(
+            dimensions.clone(),
+            D32Sfloat,
+            ImageUsage {
+                depth_stencil_attachment: true,
+                .. ImageUsage::none()
+            },
+        )?);
+        self.blend_accumulation_image = Some(self.construct_attachment_image_view(
+            dimensions.clone(),
+            R32G32B32A32Sfloat,
+            ImageUsage {
+                color_attachment: true,
+                input_attachment: true,
+                transient_attachment: true,
+                .. ImageUsage::none()
+            }
+        )?);
+        self.blend_revealage_image = Some(self.construct_attachment_image_view(
+            dimensions.clone(),
+            R32G32B32A32Sfloat, //FIXME
+            ImageUsage {
+                color_attachment: true,
+                input_attachment: true,
+                transient_attachment: true,
+                .. ImageUsage::none()
+            },
+        )?);
+
+        Ok(())
     }
 }
 
 #[derive(Clone)]
 pub struct GltfGraphicsPipeline {
-    pub layout: Arc<dyn PipelineLayoutAbstract + Send + Sync>,
+    pub layout: Arc<PipelineLayout>,
     pub pipeline: Arc<dyn GraphicsPipelineAbstract + Send + Sync>,
     pub layout_dependent_resources: GltfPipelineLayoutDependentResources,
 }
 
 impl GltfGraphicsPipeline {
-    pub fn from(layout: Arc<dyn PipelineLayoutAbstract + Send + Sync>,
+    pub fn from(layout: Arc<PipelineLayout>,
                 pipeline: Arc<dyn GraphicsPipelineAbstract + Send + Sync>,
                 layout_dependent_resources: GltfPipelineLayoutDependentResources) -> Self {
         Self {
@@ -242,7 +283,7 @@ pub struct DescriptorSetMap {
     // Consider implementing a lightweight "map" that stores values linearly in a `Vec` until a
     // certain size is reached.
     pub map: HashMap<
-        Arc<dyn PipelineLayoutAbstract + Send + Sync>,
+        PipelineLayoutDescAggregation,
         Arc<dyn DescriptorSet + Send + Sync>,
         FnvBuildHasher,
     >,
@@ -253,13 +294,13 @@ impl DescriptorSetMap {
                       set_provider: impl Fn(&'a GltfGraphicsPipeline)
                       -> Arc<dyn DescriptorSet + Send + Sync>) -> Self {
         let mut map = HashMap::<
-            Arc<dyn PipelineLayoutAbstract + Send + Sync>,
+            PipelineLayoutDescAggregation,
             Arc<dyn DescriptorSet + Send + Sync>,
             FnvBuildHasher,
         >::default();
 
         for pipeline in pipelines {
-            match map.entry(pipeline.layout.clone()) {
+            match map.entry(pipeline.layout.desc().clone()) {
                 Entry::Occupied(_) => (),
                 Entry::Vacant(entry) => {
                     let set = (set_provider)(pipeline);
@@ -272,12 +313,11 @@ impl DescriptorSetMap {
         Self { map }
     }
 
-    pub fn new<'a, L>(pipelines: impl IntoIterator<Item=&'a GltfGraphicsPipeline>,
-                      pool_provider: impl Fn(GltfPipelineLayoutDependentResources)
-                                          -> Arc<Mutex<FixedSizeDescriptorSetsPool<L>>>,
-                      set_builder_fn: impl Fn(FixedSizeDescriptorSetBuilder<L, ()>)
-                                           -> Arc<dyn DescriptorSet + Send + Sync>) -> Self
-            where L: PipelineLayoutAbstract + Clone {
+    pub fn new<'a>(pipelines: impl IntoIterator<Item=&'a GltfGraphicsPipeline>,
+                   pool_provider: impl Fn(GltfPipelineLayoutDependentResources)
+                                       -> Arc<Mutex<FixedSizeDescriptorSetsPool>>,
+                   set_builder_fn: impl Fn(FixedSizeDescriptorSetBuilder<()>)
+                                        -> Arc<dyn DescriptorSet + Send + Sync>) -> Self {
         Self::custom(pipelines, |pipeline| {
             let pool = pool_provider(pipeline.layout_dependent_resources.clone());
             let mut pool = pool.lock().unwrap();
@@ -290,15 +330,15 @@ impl DescriptorSetMap {
 
 #[derive(Clone)]
 pub struct GltfPipelineLayoutDependentResources {
-    pub layout: Arc<dyn PipelineLayoutAbstract + Send + Sync>,
+    pub layout: Arc<PipelineLayout>,
     pub descriptor_set_scene: Arc<dyn DescriptorSet + Send + Sync>,
-    pub descriptor_set_pool_instance: Arc<Mutex<FixedSizeDescriptorSetsPool<Arc<dyn PipelineLayoutAbstract + Send + Sync>>>>,
+    pub descriptor_set_pool_instance: Arc<Mutex<FixedSizeDescriptorSetsPool>>,
     pub descriptor_set_blend: Option<Arc<dyn DescriptorSet + Send + Sync>>,
     pub default_material_descriptor_set: Arc<dyn DescriptorSet + Send + Sync>,
 }
 
 impl GltfPipelineLayoutDependentResources {
-    pub fn from(layout: Arc<dyn PipelineLayoutAbstract + Send + Sync>,
+    pub fn from(layout: Arc<PipelineLayout>,
                 shared_resources: &SharedGltfGraphicsPipelineResources) -> Self {
         let descriptor_set_scene = Arc::new(
             PersistentDescriptorSet::start(layout.clone(), 0)
@@ -383,10 +423,15 @@ impl GraphicsPipelineSet {
 pub struct GraphicsPipelineSetCache {
     pub pipeline_map: Arc<RwLock<HashMap<GraphicsPipelineProperties, GraphicsPipelineSet>>>,
     pub shared_resources: SharedGltfGraphicsPipelineResources,
-    pub pipeline_layout_dependent_resources: Arc<RwLock<WeakKeyHashMap<
-                                                 Weak<dyn PipelineLayoutDesc + Send + Sync>,
+    // TODO: Since the hashmap no longer has weak keys, the resources don't get freed automatically
+    pub pipeline_layout_dependent_resources: Arc<RwLock<HashMap<
+                                                 PipelineLayoutDescAggregation,
                                                  GltfPipelineLayoutDependentResources
                                              >>>,
+    // pub pipeline_layout_dependent_resources: Arc<RwLock<WeakKeyHashMap<
+    //                                              Weak<dyn PipelineLayoutDesc + Send + Sync>,
+    //                                              GltfPipelineLayoutDependentResources
+    //                                          >>>,
     pub device: Arc<Device>,
     pub render_pass: Arc<RenderPassAbstract + Send + Sync>,
     pub vertex_shader: gltf_vert::Shader, // Stored here to avoid unnecessary reloading
@@ -400,9 +445,8 @@ macro_rules! cache_layout {
         let (layout, resources) = if let Some(resources) = resources_map.get(&layout_desc) {
             (resources.layout.clone(), resources.clone())
         } else {
-            let layout: Arc<dyn PipelineLayoutAbstract + Send + Sync> = Arc::new(
-                layout_desc.clone().build($cache.device.clone()).unwrap()
-            );
+            let layout: Arc<PipelineLayout> = layout_desc.clone()
+                .build($cache.device.clone()).unwrap();
             let resources = GltfPipelineLayoutDependentResources::from(
                 layout.clone(),
                 &$cache.shared_resources
@@ -549,7 +593,8 @@ impl GraphicsPipelineSetCache {
                 let result = GraphicsPipelineSetCache {
                     pipeline_map: Arc::new(RwLock::new(HashMap::new())),
                     shared_resources,
-                    pipeline_layout_dependent_resources: Arc::new(RwLock::new(WeakKeyHashMap::new())),
+                    pipeline_layout_dependent_resources: Arc::new(RwLock::new(HashMap::new())),
+                    // pipeline_layout_dependent_resources: Arc::new(RwLock::new(WeakKeyHashMap::new())),
                     device: device.clone(),
                     render_pass: Self::create_render_pass(&device, &swapchain),
                     vertex_shader: gltf_vert::Shader::load(device.clone())

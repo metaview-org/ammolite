@@ -8,7 +8,8 @@ use vulkano::instance::QueueFamily;
 use vulkano::buffer::TypedBufferAccess;
 use vulkano::buffer::BufferUsage;
 use vulkano::buffer::CpuAccessibleBuffer;
-use vulkano::image::traits::ImageAccess;
+use vulkano::image::traits::ImageViewAccess;
+use vulkano::image::sync::locker;
 use failure::Error;
 use crate::NodeUBO;
 use crate::MaterialUBO;
@@ -25,9 +26,14 @@ pub enum InitializationTask {
     },
     Image {
         data: Arc<Vec<u8>>,
-        device_image: Arc<dyn ImageAccess + Send + Sync>,
+        device_image: Arc<dyn ImageViewAccess + Send + Sync>,
         texel_conversion: Option<Box<dyn for<'a> Fn(&'a [u8]) -> Box<ExactSizeIterator<Item=u8> + 'a>>>,
     },
+    // ImageWithMipmaps {
+    //     data: Arc<Vec<u8>>,
+    //     device_image: SyncImage<locker::MatrixImageResourceLocker>,
+    //     texel_conversion: Option<Box<dyn for<'a> Fn(&'a [u8]) -> Box<ExactSizeIterator<Item=u8> + 'a>>>,
+    // },
     NodeDescriptorSet {
         data: NodeUBO,
         initialization_buffer: Arc<dyn TypedBufferAccess<Content=NodeUBO> + Send + Sync>,

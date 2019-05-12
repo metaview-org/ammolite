@@ -1,6 +1,7 @@
 use std::sync::{Arc, RwLock};
 use std::path::Path;
 use std::mem;
+use core::num::NonZeroU32;
 use vulkano::sampler::SamplerAddressMode;
 use vulkano::device::Device;
 use vulkano::instance::QueueFamily;
@@ -12,13 +13,19 @@ use vulkano::buffer::BufferUsage;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::buffer::immutable::ImmutableBuffer;
 use vulkano::sampler::Sampler;
-use vulkano::image::immutable::ImmutableImage;
-use vulkano::image::immutable::ImmutableImageInitialization;
-use vulkano::image::Dimensions;
+use vulkano::image::SyncImage;
+use vulkano::image::Swizzle;
+use vulkano::image::ImageDimensions;
 use vulkano::image::ImageUsage;
+use vulkano::image::layout::RequiredLayouts;
+use vulkano::image::layout::typesafety::ImageLayoutSampledImage;
+use vulkano::image::ImageSubresourceRange;
 use vulkano::image::ImageLayout;
 use vulkano::image::MipmapsCount;
+use vulkano::image::view::ImageView;
 use vulkano::image::traits::ImageViewAccess;
+use vulkano::image::layout::typesafety;
+use vulkano::image::sync::locker;
 use byteorder::NativeEndian;
 use byteorder::WriteBytesExt;
 use gltf::{self, Document};
@@ -470,25 +477,61 @@ pub fn import_device_images<'a, I>(device: &Arc<Device>,
 
             macro_rules! insert_image_with_format_impl {
                 ([$($vk_format:tt)+], $insert_init_tasks:expr) => {{
-                    let (device_image, image_initialization) = ImmutableImage::uninitialized(
-                        device.clone(),
-                        Dimensions::Dim2d {
-                            width,
-                            height,
-                        },
-                        $($vk_format)+,
-                        MipmapsCount::One,
-                        ImageUsage {
+                    let device_image_view = {
+                        let usage = ImageUsage {
                             transfer_source: true,
                             transfer_destination: true,
                             sampled: true,
                             ..ImageUsage::none()
-                        },
-                        ImageLayout::ShaderReadOnlyOptimal,
-                        queue_families.clone(),
-                    )?;
-                    ($insert_init_tasks)(image_initialization);
-                    device_images[image.index()] = device_image;
+                        };
+                        let device_image = SyncImage::<locker::SimpleImageResourceLocker>::new(
+                            device.clone(),
+                            usage.clone(),
+                            $($vk_format)+,
+                            ImageDimensions::Dim2D {
+                                width: NonZeroU32::new(width).expect("The image width must not be 0."),
+                                height: NonZeroU32::new(height).expect("The image height must not be 0."),
+                            },
+                            NonZeroU32::new(1).unwrap(),
+                            MipmapsCount::One,
+                        )?;
+
+                        let mut required_layouts = RequiredLayouts::none();
+
+                        required_layouts.infer_mut(usage);
+
+                        // TODO: Remove; this is a temporary workaround for faulty `infer_mut`
+                        required_layouts.global = Some(typesafety::ImageLayoutEnd::General);
+                        // required_layouts.global = Some(typesafety::ImageLayoutEnd::TransferDstOptimal);
+
+                        Arc::new(ImageView::new::<$($vk_format)+>(
+                            device_image,
+                            None,
+                            None,
+                            Swizzle::identity(),
+                            None,
+                            required_layouts,
+                        )?)
+                    };
+                    // let (device_image, image_initialization) = ImmutableImage::uninitialized(
+                    //     device.clone(),
+                    //     Dimensions::Dim2d {
+                    //         width,
+                    //         height,
+                    //     },
+                    //     $($vk_format)+,
+                    //     MipmapsCount::One,
+                    //     ImageUsage {
+                    //         transfer_source: true,
+                    //         transfer_destination: true,
+                    //         sampled: true,
+                    //         ..ImageUsage::none()
+                    //     },
+                    //     ImageLayout::ShaderReadOnlyOptimal,
+                    //     queue_families.clone(),
+                    // )?;
+                    ($insert_init_tasks)(device_image_view.clone());
+                    device_images[image.index()] = device_image_view;
                 }}
             }
 
@@ -496,15 +539,10 @@ pub fn import_device_images<'a, I>(device: &Arc<Device>,
                 ([$($vk_format:tt)+]) => {{
                     insert_image_with_format_impl! {
                         [$($vk_format)+],
-                        |image_initialization: ImmutableImageInitialization<$($vk_format)+>| {
+                        |image: Arc<dyn ImageViewAccess + Send + Sync>| {
                             initialization_tasks.push(InitializationTask::Image {
                                 data: pixels.clone(),
-                                device_image: Arc::new(image_initialization),
-
-
-
-
-
+                                device_image: image,
                                 texel_conversion: None,
                             });
                         }
@@ -514,10 +552,10 @@ pub fn import_device_images<'a, I>(device: &Arc<Device>,
                 ([$($vk_format:tt)+], $texel_conversion:expr) => {{
                     insert_image_with_format_impl! {
                         [$($vk_format)+],
-                        |image_initialization: ImmutableImageInitialization<$($vk_format)+>| {
+                        |image: Arc<dyn ImageViewAccess + Send + Sync>| {
                             initialization_tasks.push(InitializationTask::Image {
                                 data: pixels.clone(),
-                                device_image: Arc::new(image_initialization),
+                                device_image: image,
                                 texel_conversion: Some($texel_conversion),
                             });
                         }

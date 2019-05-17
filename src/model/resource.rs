@@ -2,14 +2,25 @@ use std::iter;
 use std::sync::Arc;
 use std::fmt;
 use std::marker::PhantomData;
+use core::num::NonZeroU32;
 use vulkano::command_buffer::AutoCommandBufferBuilder;
 use vulkano::device::Device;
 use vulkano::instance::QueueFamily;
 use vulkano::buffer::TypedBufferAccess;
 use vulkano::buffer::BufferUsage;
 use vulkano::buffer::CpuAccessibleBuffer;
+use vulkano::sampler::Filter;
 use vulkano::image::traits::ImageViewAccess;
+use vulkano::image::traits::ImageAccess;
+use vulkano::image::view::ImageView;
 use vulkano::image::sync::locker;
+use vulkano::image::SyncImage;
+use vulkano::image::ImageViewType;
+use vulkano::image::ImageDimensions;
+use vulkano::image::Swizzle;
+use vulkano::image::ImageSubresourceRange;
+use vulkano::image::layout::RequiredLayouts;
+use vulkano::image::layout::typesafety;
 use failure::Error;
 use crate::NodeUBO;
 use crate::MaterialUBO;
@@ -24,16 +35,17 @@ pub enum InitializationTask {
         len: usize,
         initialization_buffer: Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>,
     },
+    // TODO: Investigate whether it should be merged with `ImageWithMipmaps`
     Image {
         data: Arc<Vec<u8>>,
         device_image: Arc<dyn ImageViewAccess + Send + Sync>,
         texel_conversion: Option<Box<dyn for<'a> Fn(&'a [u8]) -> Box<ExactSizeIterator<Item=u8> + 'a>>>,
     },
-    // ImageWithMipmaps {
-    //     data: Arc<Vec<u8>>,
-    //     device_image: SyncImage<locker::MatrixImageResourceLocker>,
-    //     texel_conversion: Option<Box<dyn for<'a> Fn(&'a [u8]) -> Box<ExactSizeIterator<Item=u8> + 'a>>>,
-    // },
+    ImageWithMipmaps {
+        data: Arc<Vec<u8>>,
+        device_image: Arc<SyncImage<locker::MatrixImageResourceLocker>>,
+        texel_conversion: Option<Box<dyn for<'a> Fn(&'a [u8]) -> Box<ExactSizeIterator<Item=u8> + 'a>>>,
+    },
     NodeDescriptorSet {
         data: NodeUBO,
         initialization_buffer: Arc<dyn TypedBufferAccess<Content=NodeUBO> + Send + Sync>,
@@ -55,6 +67,9 @@ impl fmt::Debug for InitializationTask {
             },
             InitializationTask::Image { .. } => {
                 write!(f, "image")
+            },
+            InitializationTask::ImageWithMipmaps { .. } => {
+                write!(f, "image with mipmaps")
             },
             InitializationTask::NodeDescriptorSet { .. } => {
                 write!(f, "node descriptor set")
@@ -101,66 +116,88 @@ impl InitializationTask {
                 let command_buffer_builder = command_buffer_builder
                     .copy_buffer_to_image(staging_buffer, device_image.clone())?;
 
+                Ok(command_buffer_builder)
+            },
+            // InitializationTask::ImageWithMipmaps { .. } => {
+            //     unimplemented!();
+            // },
+            InitializationTask::ImageWithMipmaps { data, device_image, texel_conversion, .. } => {
+                let mut required_layouts = RequiredLayouts::none();
+
+                required_layouts.infer_mut(device_image.usage());
+
+                // TODO: Remove; this is a temporary workaround for faulty `infer_mut`
+                required_layouts.global = Some(typesafety::ImageLayoutEnd::ShaderReadOnlyOptimal);
+                // required_layouts.global = Some(typesafety::ImageLayoutEnd::TransferDstOptimal);
+
+                let mut source_layer = Arc::new(ImageView::new(
+                    device_image.clone(),
+                    Some(ImageViewType::Dim2D),
+                    Some(device_image.format()),
+                    Swizzle::identity(),
+                    Some(ImageSubresourceRange {
+                        array_layers: NonZeroU32::new(1).unwrap(),
+                        array_layers_offset: 0,
+                        mipmap_levels: NonZeroU32::new(1).unwrap(),
+                        mipmap_levels_offset: 0,
+                    }),
+                    required_layouts.clone(),
+                )?);
+                let staging_buffer = CpuAccessibleBuffer::from_iter(
+                    device.clone(),
+                    BufferUsage::transfer_source(),
+                    if let Some(texel_conversion) = texel_conversion {
+                        (texel_conversion)(&data[..])
+                    } else {
+                        Box::new(data.iter().cloned()) // FIXME: Single memcpy call, do not iterate
+                    },
+                )?;
+
+                let mut command_buffer_builder = command_buffer_builder
+                    .copy_buffer_to_image(staging_buffer, source_layer.clone())?;
+
                 // TODO: Set mip count to Log2
-                //
-                // let (width, height) = if let ImageDimensions::Dim2d { width, height, .. } = device_image.dimensions() {
-                //     (width, height)
-                // } else {
-                //     panic!("Texture mipmap generation is not implemented for non-2d textures.");
-                // };
 
-                // for mip_level in 1..device_image.mipmap_levels() {
-                //     let source_mip_level = mip_level - 1;
-                //     let mip_dimensions = (width >> mip_level, height >> mip_level);
-                //     let source_mip_dimensions = (width >> source_mip_level, height >> source_mip_level);
+                let (width, height) = if let ImageDimensions::Dim2D { width, height } = device_image.dimensions() {
+                    (width.get(), height.get())
+                } else {
+                    panic!("Texture mipmap generation is not implemented for non-2d textures.");
+                };
 
-                //     // unsafe {
-                //     //     let pool = Device::standard_command_pool(&device, queue_family);
-                //     //     let mut mipmap_layout_transition_commands = UnsafeCommandBufferBuilder::new(&pool, Kind::primary(), Flags::OneTimeSubmit)?;
-                //     //     let mut barrier = UnsafeCommandBufferBuilderPipelineBarrier::new();
+                for mip_level in 1..device_image.mipmap_levels().get() {
+                    let destination_layer = Arc::new(ImageView::new(
+                        device_image.clone(),
+                        Some(ImageViewType::Dim2D),
+                        Some(device_image.format()),
+                        Swizzle::identity(),
+                        Some(ImageSubresourceRange {
+                            array_layers: NonZeroU32::new(1).unwrap(),
+                            array_layers_offset: 0,
+                            mipmap_levels: NonZeroU32::new(1).unwrap(),
+                            mipmap_levels_offset: mip_level,
+                        }),
+                        required_layouts.clone(),
+                    )?);
+                    let source_mip_level = mip_level - 1;
+                    let mip_dimensions = (width >> mip_level, height >> mip_level);
+                    let source_mip_dimensions = (width >> source_mip_level, height >> source_mip_level);
 
-                //     //     barrier.add_image_memory_barrier(
-                //     //         &device_image,
-                //     //         mip_level..(mip_level + 1),
-                //     //         0..1,
-                //     //         PipelineStages {
-                //     //             transfer: true,
-                //     //             .. PipelineStages::none()
-                //     //         },
-                //     //         AccessFlagBits::none(),
-                //     //         PipelineStages {
-                //     //             host: true,
-                //     //             .. PipelineStages::none()
-                //     //         },
-                //     //         AccessFlagBits {
-                //     //             transfer_write: true,
-                //     //             .. AccessFlagBits::none()
-                //     //         },
-                //     //         false, //????
-                //     //         None,
-                //     //         ImageLayout::Undefined,
-                //     //         ImageLayout::TransferDstOptimal,
-                //     //     );
-                //     //     mipmap_layout_transition_commands.pipeline_barrier(&barrier);
-                //     //     command_buffer_builder = command_buffer_builder
-                //     //         .execute_commands(mipmap_layout_transition_commands)?;
-                //     // }
-
-                //     command_buffer_builder = command_buffer_builder.blit_image(
-                //         device_image.clone(),
-                //         [0, 0, 0],
-                //         [source_mip_dimensions.0 as i32, source_mip_dimensions.1 as i32, 1],
-                //         0,
-                //         source_mip_level,
-                //         device_image.clone(),
-                //         [0, 0, 0],
-                //         [mip_dimensions.0 as i32, mip_dimensions.1 as i32, 1],
-                //         0,
-                //         mip_level,
-                //         1,
-                //         Filter::Linear,
-                //     )?;
-                // }
+                    command_buffer_builder = command_buffer_builder.blit_image(
+                        source_layer.clone(),
+                        [0, 0, 0],
+                        [source_mip_dimensions.0 as i32, source_mip_dimensions.1 as i32, 1],
+                        0,
+                        source_mip_level,
+                        destination_layer.clone(),
+                        [0, 0, 0],
+                        [mip_dimensions.0 as i32, mip_dimensions.1 as i32, 1],
+                        0,
+                        mip_level,
+                        1,
+                        Filter::Linear,
+                    )?;
+                    source_layer = destination_layer;
+                }
 
                 Ok(command_buffer_builder)
             },

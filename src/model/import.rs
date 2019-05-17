@@ -477,14 +477,15 @@ pub fn import_device_images<'a, I>(device: &Arc<Device>,
 
             macro_rules! insert_image_with_format_impl {
                 ([$($vk_format:tt)+], $insert_init_tasks:expr) => {{
-                    let device_image_view = {
-                        let usage = ImageUsage {
-                            transfer_source: true,
-                            transfer_destination: true,
-                            sampled: true,
-                            ..ImageUsage::none()
-                        };
-                        let device_image = SyncImage::<locker::SimpleImageResourceLocker>::new(
+                    let usage = ImageUsage {
+                        transfer_source: true,
+                        transfer_destination: true,
+                        sampled: true,
+                        ..ImageUsage::none()
+                    };
+
+                    let device_image: Arc<SyncImage<locker::MatrixImageResourceLocker>> = Arc::new(
+                        SyncImage::new(
                             device.clone(),
                             usage.clone(),
                             $($vk_format)+,
@@ -493,19 +494,21 @@ pub fn import_device_images<'a, I>(device: &Arc<Device>,
                                 height: NonZeroU32::new(height).expect("The image height must not be 0."),
                             },
                             NonZeroU32::new(1).unwrap(),
-                            MipmapsCount::One,
-                        )?;
+                            MipmapsCount::Log2,
+                        )?
+                    );
 
+                    let device_image_view = {
                         let mut required_layouts = RequiredLayouts::none();
 
                         required_layouts.infer_mut(usage);
 
                         // TODO: Remove; this is a temporary workaround for faulty `infer_mut`
-                        required_layouts.global = Some(typesafety::ImageLayoutEnd::General);
+                        required_layouts.global = Some(typesafety::ImageLayoutEnd::ShaderReadOnlyOptimal);
                         // required_layouts.global = Some(typesafety::ImageLayoutEnd::TransferDstOptimal);
 
                         Arc::new(ImageView::new::<$($vk_format)+>(
-                            device_image,
+                            device_image.clone(),
                             None,
                             None,
                             Swizzle::identity(),
@@ -513,6 +516,7 @@ pub fn import_device_images<'a, I>(device: &Arc<Device>,
                             required_layouts,
                         )?)
                     };
+
                     // let (device_image, image_initialization) = ImmutableImage::uninitialized(
                     //     device.clone(),
                     //     Dimensions::Dim2d {
@@ -530,7 +534,7 @@ pub fn import_device_images<'a, I>(device: &Arc<Device>,
                     //     ImageLayout::ShaderReadOnlyOptimal,
                     //     queue_families.clone(),
                     // )?;
-                    ($insert_init_tasks)(device_image_view.clone());
+                    ($insert_init_tasks)(device_image);
                     device_images[image.index()] = device_image_view;
                 }}
             }
@@ -539,8 +543,8 @@ pub fn import_device_images<'a, I>(device: &Arc<Device>,
                 ([$($vk_format:tt)+]) => {{
                     insert_image_with_format_impl! {
                         [$($vk_format)+],
-                        |image: Arc<dyn ImageViewAccess + Send + Sync>| {
-                            initialization_tasks.push(InitializationTask::Image {
+                        |image: Arc<SyncImage<locker::MatrixImageResourceLocker>>| {
+                            initialization_tasks.push(InitializationTask::ImageWithMipmaps {
                                 data: pixels.clone(),
                                 device_image: image,
                                 texel_conversion: None,
@@ -552,8 +556,8 @@ pub fn import_device_images<'a, I>(device: &Arc<Device>,
                 ([$($vk_format:tt)+], $texel_conversion:expr) => {{
                     insert_image_with_format_impl! {
                         [$($vk_format)+],
-                        |image: Arc<dyn ImageViewAccess + Send + Sync>| {
-                            initialization_tasks.push(InitializationTask::Image {
+                        |image: Arc<SyncImage<locker::MatrixImageResourceLocker>>| {
+                            initialization_tasks.push(InitializationTask::ImageWithMipmaps {
                                 data: pixels.clone(),
                                 device_image: image,
                                 texel_conversion: Some($texel_conversion),
@@ -652,8 +656,10 @@ pub fn create_samplers(device: &Arc<Device>, document: &Document) -> Result<Vec<
     let mut device_samplers: Vec<Arc<Sampler>> = Vec::with_capacity(document.samplers().len());
 
     for gltf_sampler in document.samplers() {
-        let (min_filter, mipmap_mode) = gltf_sampler.min_filter()
-            .unwrap_or(MinFilter::LinearMipmapLinear)
+        // let (min_filter, mipmap_mode) = gltf_sampler.min_filter()
+        //     .unwrap_or(MinFilter::LinearMipmapLinear)
+        //     .into_vulkan_equivalent();
+        let (min_filter, mipmap_mode) = MinFilter::LinearMipmapLinear
             .into_vulkan_equivalent();
         let sampler = Sampler::new(
             device.clone(),
@@ -663,10 +669,18 @@ pub fn create_samplers(device: &Arc<Device>, document: &Document) -> Result<Vec<
             gltf_sampler.wrap_s().into_vulkan_equivalent(),
             gltf_sampler.wrap_t().into_vulkan_equivalent(),
             SamplerAddressMode::Repeat,
-            0.0,
-            1.0,
-            0.0,
-            1.0, // TODO check the range of LOD
+            /* These parameters affect how interpolation between Mip levels is calculated.
+             *
+             * We don't enforce any bounds on the resulting LOD value, `max_lod` is thus
+             * `std::f32::MAX`.
+             *
+             * See the following link for how LOD is calculated.
+             * https://www.khronos.org/registry/vulkan/specs/1.1-extensions/html/vkspec.html#textures-level-of-detail-operation
+             */
+            0.0, // mip_lod_bias
+            1.0, // max_anisotropy
+            0.0, // min_lod
+            std::f32::MAX, // max_lod
         )?;
 
         device_samplers.push(sampler);

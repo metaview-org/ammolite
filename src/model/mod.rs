@@ -113,7 +113,7 @@ impl HelperResources {
             required_layouts.infer_mut(usage);
 
             // TODO: Remove; this is a temporary workaround for faulty `infer_mut`
-            required_layouts.global = Some(typesafety::ImageLayoutEnd::General);
+            required_layouts.global = Some(typesafety::ImageLayoutEnd::ShaderReadOnlyOptimal);
             // required_layouts.global = Some(typesafety::ImageLayoutEnd::TransferDstOptimal);
 
             Arc::new(ImageView::new::<R8Uint>(

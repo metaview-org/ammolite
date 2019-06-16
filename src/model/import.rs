@@ -2,6 +2,7 @@ use std::sync::{Arc, RwLock};
 use std::path::Path;
 use std::mem;
 use core::num::NonZeroU32;
+use arr_macro::arr;
 use vulkano::sampler::SamplerAddressMode;
 use vulkano::device::Device;
 use vulkano::instance::QueueFamily;
@@ -9,7 +10,6 @@ use vulkano::format::*;
 use vulkano::buffer::TypedBufferAccess;
 use vulkano::buffer::BufferSlice;
 use vulkano::buffer::BufferUsage;
-
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::buffer::immutable::ImmutableBuffer;
 use vulkano::sampler::Sampler;
@@ -499,13 +499,10 @@ pub fn import_device_images<'a, I>(device: &Arc<Device>,
                     );
 
                     let device_image_view = {
+                        // let mut required_layouts = RequiredLayouts::general();
                         let mut required_layouts = RequiredLayouts::none();
-
                         required_layouts.infer_mut(usage);
-
-                        // TODO: Remove; this is a temporary workaround for faulty `infer_mut`
                         required_layouts.global = Some(typesafety::ImageLayoutEnd::ShaderReadOnlyOptimal);
-                        // required_layouts.global = Some(typesafety::ImageLayoutEnd::TransferDstOptimal);
 
                         Arc::new(ImageView::new::<$($vk_format)+>(
                             device_image.clone(),

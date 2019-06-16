@@ -122,13 +122,10 @@ impl InitializationTask {
             //     unimplemented!();
             // },
             InitializationTask::ImageWithMipmaps { data, device_image, texel_conversion, .. } => {
+                // let mut required_layouts = RequiredLayouts::general();
                 let mut required_layouts = RequiredLayouts::none();
-
                 required_layouts.infer_mut(device_image.usage());
-
-                // TODO: Remove; this is a temporary workaround for faulty `infer_mut`
                 required_layouts.global = Some(typesafety::ImageLayoutEnd::ShaderReadOnlyOptimal);
-                // required_layouts.global = Some(typesafety::ImageLayoutEnd::TransferDstOptimal);
 
                 let mut source_layer = Arc::new(ImageView::new(
                     device_image.clone(),

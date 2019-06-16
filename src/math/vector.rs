@@ -1,5 +1,6 @@
 use std::ops::{Add, Deref, DerefMut, Sub, Neg, AddAssign, SubAssign, Div, Mul, DivAssign, MulAssign};
 use std::fmt::{Debug, Formatter, Error};
+use det::det_copy;
 use typenum::{Unsigned, U1, U2, U3, U4};
 use crate::math::matrix::Mat4;
 

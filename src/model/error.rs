@@ -1,3 +1,5 @@
+use failure::Fail;
+
 #[derive(Debug, Fail)]
 pub enum ModelInitializationError {
     #[fail(display = "The model has already been initialized and cannot be initialized again")]

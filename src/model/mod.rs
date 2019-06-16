@@ -108,13 +108,10 @@ impl HelperResources {
                 MipmapsCount::One,
             )?;
 
+            // let mut required_layouts = RequiredLayouts::general();
             let mut required_layouts = RequiredLayouts::none();
-
             required_layouts.infer_mut(usage);
-
-            // TODO: Remove; this is a temporary workaround for faulty `infer_mut`
             required_layouts.global = Some(typesafety::ImageLayoutEnd::ShaderReadOnlyOptimal);
-            // required_layouts.global = Some(typesafety::ImageLayoutEnd::TransferDstOptimal);
 
             Arc::new(ImageView::new::<R8Uint>(
                 empty_device_image,

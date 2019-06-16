@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock, Weak, Mutex};
 use std::ops::{BitOr, BitOrAssign, Not};
 use std::collections::HashMap;
 use core::num::NonZeroU32;
+use vulkano::ordered_passes_renderpass;
 use vulkano::format::*;
 use vulkano::image::traits::ImageViewAccess;
 use vulkano::descriptor::descriptor_set::DescriptorSet;
@@ -213,8 +214,9 @@ impl SharedGltfGraphicsPipelineResources {
         )?;
 
         let mut required_layouts = RequiredLayouts::none();
-
+        // let mut required_layouts = RequiredLayouts::general();
         required_layouts.infer_mut(usage);
+        // required_layouts.global = Some(typesafety::ImageLayoutEnd::ColorAttachmentOptimal);
 
         Ok(Arc::new(ImageView::new::<F>(
             device_image,

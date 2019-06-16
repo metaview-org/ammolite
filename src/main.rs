@@ -9,30 +9,6 @@
 #![feature(core_intrinsics)]
 
 #[macro_use]
-extern crate arr_macro;
-#[macro_use]
-extern crate det;
-#[macro_use]
-extern crate failure;
-#[macro_use]
-extern crate vulkano;
-extern crate arrayvec;
-extern crate boolinator;
-extern crate byteorder;
-extern crate fnv;
-extern crate generic_array;
-extern crate gltf;
-extern crate image;
-extern crate mikktspace;
-extern crate rayon;
-extern crate safe_transmute;
-extern crate typenum;
-extern crate vulkano_shaders;
-extern crate vulkano_win;
-extern crate weak_table;
-extern crate winit;
-
-#[macro_use]
 pub mod math;
 pub mod iter;
 pub mod shaders;
@@ -302,7 +278,8 @@ impl Ammolite {
         let raw_extensions = [/*CString::new("VK_EXT_debug_marker").unwrap()*/];
         let extensions = RawInstanceExtensions::new(raw_extensions.into_iter().cloned())
             .union(&(&win_extensions).into());
-        let instance = Instance::new(None, extensions, None)
+        let layers = [];
+        let instance = Instance::new(None, extensions, layers.into_iter().cloned())
             .expect("Failed to create a Vulkan instance.");
 
         // (EventsLoop, Arc<Surface<Window>>, [u32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Arc<Swapchain<Window>>, Vec<Arc<SwapchainImage<Window>>>)
@@ -489,7 +466,6 @@ impl Ammolite {
             self.synchronization = Some(Box::new(self.synchronization.take().unwrap()
                 .then_execute(self.queue.clone(), buffer_updates).unwrap()
                 .join(acquire_future)));
-
 
             let current_framebuffer: Arc<dyn FramebufferWithClearValues<_>> = self.window_swapchain_framebuffers
                 .as_ref().unwrap()[image_num].clone();

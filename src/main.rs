@@ -25,7 +25,10 @@ use std::sync::Arc;
 use std::time::{Instant, Duration};
 use std::rc::Rc;
 use std::cell::RefCell;
+use std::ffi::{self, CString};
 use core::num::NonZeroU32;
+use openxr::Instance as XrInstance;
+use vulkano::VulkanObject;
 use vulkano::swapchain::ColorSpace;
 use vulkano::descriptor::descriptor_set::DescriptorSet;
 use vulkano::instance::RawInstanceExtensions;
@@ -33,7 +36,7 @@ use vulkano::buffer::{TypedBufferAccess};
 use vulkano::buffer::cpu_pool::CpuBufferPool;
 use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
 use vulkano::device::{Device, RawDeviceExtensions, DeviceExtensions, Queue, Features};
-use vulkano::instance::{Instance, PhysicalDevice, QueueFamily};
+use vulkano::instance::{self, ApplicationInfo, Instance as VkInstance, PhysicalDevice, QueueFamily};
 use vulkano::sync::{FlushError, GpuFuture};
 use vulkano::format::{Format, ClearValue};
 use vulkano::image::SwapchainImage;
@@ -42,6 +45,7 @@ use vulkano::swapchain::{self, PresentMode, SurfaceTransform, Swapchain, Acquire
 use vulkano_win::VkSurfaceBuild;
 use winit::{ElementState, MouseButton, Event, DeviceEvent, WindowEvent, KeyboardInput, VirtualKeyCode, EventsLoop, WindowBuilder, Window};
 use winit::dpi::PhysicalSize;
+use openxr::Entry;
 use crate::math::matrix::*;
 use crate::math::vector::*;
 use crate::model::FramebufferWithClearValues;
@@ -57,6 +61,9 @@ use crate::pipeline::DescriptorSetMap;
 
 pub use crate::shaders::gltf_opaque_frag::ty::*;
 
+pub type XrVkSession = openxr::Session<openxr::Vulkan>;
+pub type XrVkFrameStream = openxr::FrameStream<openxr::Vulkan>;
+
 fn swapchain_format_priority(format: &Format) -> u32 {
     match *format {
         Format::R8G8B8Srgb | Format::B8G8R8Srgb | Format::R8G8B8A8Srgb | Format::B8G8R8A8Srgb => 0,
@@ -66,115 +73,6 @@ fn swapchain_format_priority(format: &Format) -> u32 {
 
 fn swapchain_format_compare(a: &Format, b: &Format) -> std::cmp::Ordering {
     swapchain_format_priority(a).cmp(&swapchain_format_priority(b))
-}
-
-fn vulkan_initialize<'a>(instance: &'a Arc<Instance>) -> (EventsLoop, Arc<Surface<Window>>, [NonZeroU32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Arc<Swapchain<Window>>, Vec<Arc<SwapchainImage<Window>>>) {
-    // TODO: Better device selection & SLI support
-    let physical_device = PhysicalDevice::enumerate(instance).next().expect("No physical device available.");
-
-    let events_loop = EventsLoop::new();
-    let primary_monitor = events_loop.get_primary_monitor();
-
-    // )
-    let window = WindowBuilder::new()
-        .with_title("ammolite")
-        .with_dimensions(PhysicalSize::new(1280.0, 720.0).to_logical(primary_monitor.get_hidpi_factor()))
-        // If this doesn't compile, you are probably using a conflicting version of winit
-        .build_vk_surface(&events_loop, instance.clone()).unwrap();
-
-    window.window().hide_cursor(true);
-
-    let mut dimensions: [NonZeroU32; 2] = {
-        let (width, height) = window.window().get_inner_size().unwrap().into();
-        [
-            NonZeroU32::new(width).expect("The width of the window must not be 0."),
-            NonZeroU32::new(height).expect("The height of the window must not be 0."),
-        ]
-    };
-
-    // Queues are like CPU threads, queue families are groups of queues with certain capabilities.
-    // println!("Available queue families:");
-
-    // for queue_family in physical_device.queue_families() {
-    //     println!("\tFamily #{} -- queues: {}, supports graphics: {}, supports compute: {}, supports transfers: {}, supports sparse binding: {}", queue_family.id(), queue_family.queues_count(), queue_family.supports_graphics(), queue_family.supports_compute(), queue_family.supports_transfers(), queue_family.supports_sparse_binding());
-    // }
-
-    let queue_family = physical_device.queue_families()
-        .find(|&queue_family| {
-            queue_family.supports_graphics() && window.is_supported(queue_family).unwrap_or(false)
-        })
-        .expect("Couldn't find a graphical queue family.");
-
-    /*
-     * Device Creation
-     */
-
-    // Create a device with a single queue
-    let (device, mut queues) = {
-        let safe_device_extensions = DeviceExtensions {
-            khr_swapchain: true,
-            // ext_debug_marker: true,
-            .. DeviceExtensions::none()
-        };
-        let raw_device_extensions = [/*CString::new("VK_EXT_debug_utils").unwrap()*/];
-        let device_extensions = RawDeviceExtensions::new(raw_device_extensions.into_iter().cloned())
-            .union(&(&safe_device_extensions).into());
-
-        Device::new(physical_device,
-                    &Features {
-                        independent_blend: true,
-                        .. Features::none()
-                    },
-                    device_extensions,
-                    // A list of queues to use specified by an iterator of (QueueFamily, priority).
-                    // In a real-life application, we would probably use at least a graphics queue
-                    // and a transfers queue to handle data transfers in parallel. In this example
-                    // we only use one queue.
-                    [(queue_family, 0.5)].iter().cloned())
-            .expect("Failed to create a Vulkan device.")
-    };
-    // println!("queues: {}", queues.len());
-    let queue = queues.next().unwrap();
-
-    let (swapchain, images) = {
-        let capabilities = window.capabilities(physical_device)
-            .expect("Failed to retrieve surface capabilities.");
-
-        // Determines the behaviour of the alpha channel
-        let alpha = capabilities.supported_composite_alpha.iter().next().unwrap();
-        dimensions = capabilities.current_extent.map(|extent| [
-            NonZeroU32::new(extent[0]).unwrap(),
-            NonZeroU32::new(extent[1]).unwrap(),
-        ]).unwrap_or(dimensions);
-
-        // Order supported swapchain formats by priority and choose the most preferred one.
-        // The swapchain format must be in SRGB space.
-        let mut supported_formats: Vec<Format> = capabilities.supported_formats.iter()
-            .map(|(current_format, _)| *current_format)
-            .collect();
-        supported_formats.sort_by(swapchain_format_compare);
-        let format = supported_formats[0];
-
-        // Please take a look at the docs for the meaning of the parameters we didn't mention.
-        Swapchain::new::<_, &Arc<Queue>>(
-            device.clone(),
-            window.clone(),
-            (&queue).into(),
-            dimensions,
-            NonZeroU32::new(1).unwrap(),
-            NonZeroU32::new(capabilities.min_image_count).expect("Invalid swapchaing image count."),
-            format,
-            ColorSpace::SrgbNonLinear,
-            capabilities.supported_usage_flags,
-            SurfaceTransform::Identity,
-            alpha,
-            PresentMode::Immediate, /* PresentMode::Relaxed TODO: Getting only ~60 FPS in a window */
-            true,
-            None,
-        ).expect("failed to create swapchain")
-    };
-
-    (events_loop, window, dimensions, device, queue_family, queue, swapchain, images)
 }
 
 // fn vulkan_find_supported_format(physical_device: &Arc<PhysicalDevice>, candidates: &[Format]) -> Option<Format> {
@@ -251,7 +149,8 @@ pub struct WorldSpaceModel<'a> {
 }
 
 pub struct Ammolite {
-    pub vulkan_instance: Arc<Instance>,
+    pub vk_instance: Arc<VkInstance>,
+    pub xr_instance: Arc<XrInstance>,
     pub device: Arc<Device>,
     pub queue: Arc<Queue>,
     pub pipeline_cache: GraphicsPipelineSetCache,
@@ -272,20 +171,247 @@ pub struct Ammolite {
 }
 
 impl Ammolite {
+    fn setup_openxr_instance() -> XrInstance {
+        let entry = openxr::Entry::linked();
+        let available_extensions = entry.enumerate_extensions().unwrap(); // FIXME: unwrap
+
+        // TODO: Add support for the following extensions:
+        // * XR_KHR_visibility_mask
+        // * XR_EXT_debug_utils
+        //
+        // Low priority:
+        // * XR_KHR_vulkan_swapchain_format_list
+        // * XR_EXT_performance_settings
+        // * XR_EXT_thermal_query
+
+        println!("Supported OpenXR extensions: {:#?}", available_extensions);
+
+        if !available_extensions.khr_vulkan_enable {
+            panic!("The OpenXR runtime does not support Vulkan.");
+        }
+
+        let used_extensions = openxr::ExtensionSet {
+            khr_vulkan_enable: true,
+            khr_visibility_mask: available_extensions.khr_visibility_mask,
+            ext_debug_utils: available_extensions.ext_debug_utils,
+            ..Default::default()
+        };
+
+        struct OpenXRVersion((u16, u16, u16)); // (major, minor, patch)
+
+        impl OpenXRVersion {
+            fn from_crate() -> Self {
+                Self((
+                    env!("CARGO_PKG_VERSION_MAJOR").parse()
+                        .expect("Invalid crate major version, must be u16."),
+                    env!("CARGO_PKG_VERSION_MINOR").parse()
+                        .expect("Invalid crate minor version, must be u16."),
+                    env!("CARGO_PKG_VERSION_PATCH").parse()
+                        .expect("Invalid crate patch version, must be u16."),
+                ))
+            }
+        }
+
+        impl Into<u32> for OpenXRVersion {
+            fn into(self) -> u32 {
+                  ((((self.0).0 & 0x3FF) as u32) << 22)
+                | ((((self.0).1 & 0x3FF) as u32) << 12)
+                | ((((self.0).2 & 0xFFF) as u32) <<  0)
+            }
+        }
+
+        let app_info = openxr::ApplicationInfo::new()
+            .api_version(OpenXRVersion((0, 90, 0)).into())
+            .engine_name(env!("CARGO_PKG_NAME"))
+            .engine_version(OpenXRVersion::from_crate().into())
+            .application_name(env!("CARGO_PKG_NAME")) // TODO: Make customizable
+            .application_version(OpenXRVersion::from_crate().into()); // TODO: Make customizable
+
+        entry.create_instance(app_info, &used_extensions).unwrap()
+    }
+
+    fn vulkan_initialize<'a>(vk_instance: &'a Arc<VkInstance>, xr_instance: &'a Arc<XrInstance>, xr_system: openxr::SystemId) -> (EventsLoop, Arc<Surface<Window>>, [NonZeroU32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Arc<Swapchain<Window>>, Vec<Arc<SwapchainImage<Window>>>) {
+        let openxr::vulkan::Requirements {
+            min_api_version_supported: min_api_version,
+            max_api_version_supported: max_api_version,
+        } = xr_instance.graphics_requirements::<openxr::Vulkan>(xr_system).unwrap();
+        let min_api_version = min_api_version.into_raw();
+        let max_api_version = max_api_version.into_raw();
+        // TODO: Better device selection & SLI support
+        let physical_device = PhysicalDevice::enumerate(vk_instance)
+            .filter(|physical_device| {
+                let api_version = physical_device.api_version().into_vulkan_version();
+
+                api_version >= min_api_version && api_version <= max_api_version
+            })
+            .next().expect("No physical device available.");
+
+        let events_loop = EventsLoop::new();
+        let primary_monitor = events_loop.get_primary_monitor();
+
+        // )
+        let window = WindowBuilder::new()
+            .with_title("ammolite")
+            .with_dimensions(PhysicalSize::new(1280.0, 720.0).to_logical(primary_monitor.get_hidpi_factor()))
+            // If this doesn't compile, you are probably using a conflicting version of winit
+            .build_vk_surface(&events_loop, vk_instance.clone()).unwrap();
+
+        window.window().hide_cursor(true);
+
+        let mut dimensions: [NonZeroU32; 2] = {
+            let (width, height) = window.window().get_inner_size().unwrap().into();
+            [
+                NonZeroU32::new(width).expect("The width of the window must not be 0."),
+                NonZeroU32::new(height).expect("The height of the window must not be 0."),
+            ]
+        };
+
+        // Queues are like CPU threads, queue families are groups of queues with certain capabilities.
+        // println!("Available queue families:");
+
+        // for queue_family in physical_device.queue_families() {
+        //     println!("\tFamily #{} -- queues: {}, supports graphics: {}, supports compute: {}, supports transfers: {}, supports sparse binding: {}", queue_family.id(), queue_family.queues_count(), queue_family.supports_graphics(), queue_family.supports_compute(), queue_family.supports_transfers(), queue_family.supports_sparse_binding());
+        // }
+
+        let queue_family = physical_device.queue_families()
+            .find(|&queue_family| {
+                queue_family.supports_graphics() && window.is_supported(queue_family).unwrap_or(false)
+            })
+            .expect("Couldn't find a graphical queue family.");
+
+        /*
+         * Device Creation
+         */
+
+        // Create a device with a single queue
+        let (device, mut queues) = {
+            let safe_device_extensions = DeviceExtensions {
+                khr_swapchain: true,
+                // ext_debug_marker: true,
+                .. DeviceExtensions::none()
+            };
+            let xr_extensions: Vec<_> = xr_instance.vulkan_device_extensions(xr_system)
+                .unwrap().split_ascii_whitespace()
+                .map(|str_slice| CString::new(str_slice).unwrap()).collect();
+            let raw_device_extensions = [/*CString::new("VK_EXT_debug_utils").unwrap()*/];
+            let device_extensions = RawDeviceExtensions::new(raw_device_extensions.into_iter().cloned())
+                .union(&(&safe_device_extensions).into())
+                .union(&RawDeviceExtensions::new(xr_extensions.into_iter()));
+
+            Device::new(physical_device,
+                        &Features {
+                            independent_blend: true,
+                            .. Features::none()
+                        },
+                        device_extensions,
+                        // A list of queues to use specified by an iterator of (QueueFamily, priority).
+                        // In a real-life application, we would probably use at least a graphics queue
+                        // and a transfers queue to handle data transfers in parallel. In this example
+                        // we only use one queue.
+                        [(queue_family, 0.5)].iter().cloned())
+                .expect("Failed to create a Vulkan device.")
+        };
+        // println!("queues: {}", queues.len());
+        let queue = queues.next().unwrap();
+
+        let (swapchain, images) = {
+            let capabilities = window.capabilities(physical_device)
+                .expect("Failed to retrieve surface capabilities.");
+
+            // Determines the behaviour of the alpha channel
+            let alpha = capabilities.supported_composite_alpha.iter().next().unwrap();
+            dimensions = capabilities.current_extent.map(|extent| [
+                NonZeroU32::new(extent[0]).unwrap(),
+                NonZeroU32::new(extent[1]).unwrap(),
+            ]).unwrap_or(dimensions);
+
+            // Order supported swapchain formats by priority and choose the most preferred one.
+            // The swapchain format must be in SRGB space.
+            let mut supported_formats: Vec<Format> = capabilities.supported_formats.iter()
+                .map(|(current_format, _)| *current_format)
+                .collect();
+            supported_formats.sort_by(swapchain_format_compare);
+            let format = supported_formats[0];
+
+            // Please take a look at the docs for the meaning of the parameters we didn't mention.
+            Swapchain::new::<_, &Arc<Queue>>(
+                device.clone(),
+                window.clone(),
+                (&queue).into(),
+                dimensions,
+                NonZeroU32::new(1).unwrap(),
+                NonZeroU32::new(capabilities.min_image_count).expect("Invalid swapchaing image count."),
+                format,
+                ColorSpace::SrgbNonLinear,
+                capabilities.supported_usage_flags,
+                SurfaceTransform::Identity,
+                alpha,
+                PresentMode::Immediate, /* PresentMode::Relaxed TODO: Getting only ~60 FPS in a window */
+                true,
+                None,
+            ).expect("failed to create swapchain")
+        };
+
+        (events_loop, window, dimensions, device, queue_family, queue, swapchain, images)
+    }
+
+    fn setup_openxr_session(
+        xr_instance: &Arc<XrInstance>,
+        vk_instance: &Arc<VkInstance>,
+        xr_system: openxr::SystemId,
+        vk_device: &Arc<Device>,
+        vk_queue: &Arc<Queue>,
+    ) -> (XrVkSession, XrVkFrameStream) {
+        let create_info = openxr::vulkan::SessionCreateInfo {
+            instance: vk_instance.internal_object() as *const ffi::c_void,
+            physical_device: vk_device.physical_device().internal_object() as *const ffi::c_void,
+            device: vk_device.internal_object() as *const ffi::c_void,
+            queue_family_index: vk_queue.family().id(),
+            queue_index: vk_queue.id_within_family(),
+        };
+
+        unsafe {
+            xr_instance.create_session::<openxr::Vulkan>(xr_system, &create_info)
+        }.unwrap()
+    }
+
     pub fn new() -> Self {
+        // OpenXR
+        let xr_instance = Arc::new(Self::setup_openxr_instance());
+        let xr_system = xr_instance.system(openxr::FormFactor::HEAD_MOUNTED_DISPLAY).unwrap();
+
         // Instance
+        let app_info = {
+            let version = vulkano::instance::Version {
+                major: env!("CARGO_PKG_VERSION_MAJOR").parse().unwrap(),
+                minor: env!("CARGO_PKG_VERSION_MINOR").parse().unwrap(),
+                patch: env!("CARGO_PKG_VERSION_PATCH").parse().unwrap()
+            };
+            let name = env!("CARGO_PKG_NAME");
+
+            ApplicationInfo {
+                application_name: Some(name.into()), // TODO: Make customizable
+                application_version: Some(version.into()), // TODO: Make customizable
+                engine_name: Some(name.into()),
+                engine_version: Some(version.into()),
+            }
+        };
         let win_extensions = vulkano_win::required_extensions();
+        let xr_extensions: Vec<_> = xr_instance.vulkan_instance_extensions(xr_system)
+            .unwrap().split_ascii_whitespace()
+            .map(|str_slice| CString::new(str_slice).unwrap()).collect();
         let raw_extensions = [/*CString::new("VK_EXT_debug_marker").unwrap()*/];
         let extensions = RawInstanceExtensions::new(raw_extensions.into_iter().cloned())
-            .union(&(&win_extensions).into());
+            .union(&(&win_extensions).into())
+            .union(&RawInstanceExtensions::new(xr_extensions.into_iter()));
         let layers = [];
-        let instance = Instance::new(None, extensions, layers.into_iter().cloned())
+        let vk_instance = VkInstance::new(Some(&app_info), extensions, layers.into_iter().cloned())
             .expect("Failed to create a Vulkan instance.");
 
         // (EventsLoop, Arc<Surface<Window>>, [u32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Arc<Swapchain<Window>>, Vec<Arc<SwapchainImage<Window>>>)
-        let (events_loop, window, dimensions, device, queue_family, queue, swapchain, images) = vulkan_initialize(&instance);
-
-        let _descriptor_set_gltf_blend: Option<Arc<DescriptorSet + Send + Sync>> = None;
+        let (events_loop, window, dimensions, device, queue_family, queue, swapchain, images)
+            = Self::vulkan_initialize(&vk_instance, &xr_instance, xr_system);
+        let (xr_session, xr_frame_stream) = Self::setup_openxr_session(&xr_instance, &vk_instance, xr_system, &device, &queue);
 
         let init_command_buffer_builder = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap();
         let (init_command_buffer_builder, helper_resources) = HelperResources::new(
@@ -306,7 +432,8 @@ impl Ammolite {
             .then_signal_fence_and_flush().unwrap());
 
         Self {
-            vulkan_instance: instance,
+            vk_instance,
+            xr_instance,
             device: device.clone(),
             queue,
             pipeline_cache,

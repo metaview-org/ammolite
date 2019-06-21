@@ -10,14 +10,15 @@
 
 #[macro_use]
 pub mod math;
-pub mod iter;
-pub mod shaders;
-pub mod vertex;
-pub mod sampler;
-pub mod pipeline;
-pub mod camera;
-pub mod model;
 pub mod buffer;
+pub mod camera;
+pub mod iter;
+pub mod model;
+pub mod pipeline;
+pub mod sampler;
+pub mod shaders;
+pub mod swapchain;
+pub mod vertex;
 
 use std::path::Path;
 use std::collections::HashSet;
@@ -28,6 +29,7 @@ use std::cell::RefCell;
 use std::ffi::{self, CString};
 use core::num::NonZeroU32;
 use openxr::Instance as XrInstance;
+use vulkano;
 use vulkano::VulkanObject;
 use vulkano::swapchain::ColorSpace;
 use vulkano::descriptor::descriptor_set::DescriptorSet;
@@ -41,7 +43,7 @@ use vulkano::sync::{FlushError, GpuFuture};
 use vulkano::format::{Format, ClearValue};
 use vulkano::image::SwapchainImage;
 use vulkano::pipeline::viewport::Viewport;
-use vulkano::swapchain::{self, PresentMode, SurfaceTransform, Swapchain, AcquireError, SwapchainCreationError, Surface};
+use vulkano::swapchain::{PresentMode, SurfaceTransform, Swapchain, AcquireError, SwapchainCreationError, Surface};
 use vulkano_win::VkSurfaceBuild;
 use winit::{ElementState, MouseButton, Event, DeviceEvent, WindowEvent, KeyboardInput, VirtualKeyCode, EventsLoop, WindowBuilder, Window};
 use winit::dpi::PhysicalSize;
@@ -151,6 +153,9 @@ pub struct WorldSpaceModel<'a> {
 pub struct Ammolite {
     pub vk_instance: Arc<VkInstance>,
     pub xr_instance: Arc<XrInstance>,
+    pub xr_session: Arc<XrVkSession>,
+    pub xr_frame_stream: XrVkFrameStream,
+    pub xr_reference_space_stage: openxr::Space,
     pub device: Arc<Device>,
     pub queue: Arc<Queue>,
     pub pipeline_cache: GraphicsPipelineSetCache,
@@ -413,6 +418,14 @@ impl Ammolite {
             = Self::vulkan_initialize(&vk_instance, &xr_instance, xr_system);
         let (xr_session, xr_frame_stream) = Self::setup_openxr_session(&xr_instance, &vk_instance, xr_system, &device, &queue);
 
+        let xr_reference_space_stage = xr_session.create_reference_space(
+            openxr::ReferenceSpaceType::STAGE,
+            openxr::Posef {
+                orientation: openxr::Quaternionf { x: 1.0, y: 0.0, z: 0.0, w: 0.0 },
+                position: openxr::Vector3f { x: 0.0, y: 0.0, z: 0.0 },
+            },
+        ).unwrap();
+
         let init_command_buffer_builder = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap();
         let (init_command_buffer_builder, helper_resources) = HelperResources::new(
             &device,
@@ -434,6 +447,9 @@ impl Ammolite {
         Self {
             vk_instance,
             xr_instance,
+            xr_session: Arc::new(xr_session),
+            xr_frame_stream,
+            xr_reference_space_stage,
             device: device.clone(),
             queue,
             pipeline_cache,
@@ -486,6 +502,12 @@ impl Ammolite {
         // Calling this function polls various fences in order to determine what the GPU has
         // already processed, and frees the resources that are no longer needed.
         self.synchronization.as_mut().unwrap().cleanup_finished();
+
+        let state = self.xr_frame_stream.wait().unwrap();
+        let (view_flags, views) = self.xr_session
+            .locate_views(state.predicted_display_time, &self.xr_reference_space_stage)
+            .unwrap();
+        let status = self.xr_frame_stream.begin().unwrap();
 
         // A loop is used as a way to reset the rendering using `continue` if something goes wrong,
         // there is a `break` statement at the end.
@@ -551,7 +573,7 @@ impl Ammolite {
             //
             // This function can block if no image is available. The parameter is an optional timeout
             // after which the function call will return an error.
-            let (image_num, acquire_future) = match swapchain::acquire_next_image(self.window_swapchain.clone(),
+            let (image_num, acquire_future) = match vulkano::swapchain::acquire_next_image(self.window_swapchain.clone(),
                                                                                   None) {
                 Ok((image_num, acquire_future)) => {
                     (image_num, acquire_future)

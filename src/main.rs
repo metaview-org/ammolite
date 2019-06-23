@@ -43,7 +43,7 @@ use vulkano::sync::{FlushError, GpuFuture};
 use vulkano::format::{Format, ClearValue};
 use vulkano::image::SwapchainImage;
 use vulkano::pipeline::viewport::Viewport;
-use vulkano::swapchain::{PresentMode, SurfaceTransform, Swapchain, AcquireError, SwapchainCreationError, Surface};
+use vulkano::swapchain::{PresentMode, SurfaceTransform, AcquireError, SwapchainCreationError, Surface};
 use vulkano_win::VkSurfaceBuild;
 use winit::{ElementState, MouseButton, Event, DeviceEvent, WindowEvent, KeyboardInput, VirtualKeyCode, EventsLoop, WindowBuilder, Window};
 use winit::dpi::PhysicalSize;
@@ -60,11 +60,14 @@ use crate::camera::*;
 use crate::pipeline::GltfGraphicsPipeline;
 use crate::pipeline::GraphicsPipelineSetCache;
 use crate::pipeline::DescriptorSetMap;
+use crate::swapchain::{Swapchain, VkSwapchain, XrSwapchain};
 
 pub use crate::shaders::gltf_opaque_frag::ty::*;
 
 pub type XrVkSession = openxr::Session<openxr::Vulkan>;
 pub type XrVkFrameStream = openxr::FrameStream<openxr::Vulkan>;
+
+pub const NONZERO_ONE: NonZeroU32 = unsafe { NonZeroU32::new_unchecked(1) };
 
 fn swapchain_format_priority(format: &Format) -> u32 {
     match *format {
@@ -163,8 +166,7 @@ pub struct Ammolite {
     pub window: Arc<Surface<Window>>,
     pub window_events_loop: Rc<RefCell<EventsLoop>>,
     pub window_dimensions: [NonZeroU32; 2],
-    pub window_swapchain: Arc<Swapchain<Window>>,
-    pub window_swapchain_images: Vec<Arc<SwapchainImage<Window>>>,
+    pub window_swapchain: VkSwapchain<Window>,
     pub window_swapchain_framebuffers: Option<Vec<Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>>>,
     pub window_swapchain_recreate: bool,
     pub synchronization: Option<Box<dyn GpuFuture>>,
@@ -235,7 +237,7 @@ impl Ammolite {
         entry.create_instance(app_info, &used_extensions).unwrap()
     }
 
-    fn vulkan_initialize<'a>(vk_instance: &'a Arc<VkInstance>, xr_instance: &'a Arc<XrInstance>, xr_system: openxr::SystemId) -> (EventsLoop, Arc<Surface<Window>>, [NonZeroU32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Arc<Swapchain<Window>>, Vec<Arc<SwapchainImage<Window>>>) {
+    fn vulkan_initialize<'a>(vk_instance: &'a Arc<VkInstance>, xr_instance: &'a Arc<XrInstance>, xr_system: openxr::SystemId) -> (EventsLoop, Arc<Surface<Window>>, [NonZeroU32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, VkSwapchain<Window>) {
         let openxr::vulkan::Requirements {
             min_api_version_supported: min_api_version,
             max_api_version_supported: max_api_version,
@@ -319,7 +321,7 @@ impl Ammolite {
         // println!("queues: {}", queues.len());
         let queue = queues.next().unwrap();
 
-        let (swapchain, images) = {
+        let swapchain = {
             let capabilities = window.capabilities(physical_device)
                 .expect("Failed to retrieve surface capabilities.");
 
@@ -339,7 +341,7 @@ impl Ammolite {
             let format = supported_formats[0];
 
             // Please take a look at the docs for the meaning of the parameters we didn't mention.
-            Swapchain::new::<_, &Arc<Queue>>(
+            let swapchain: VkSwapchain<Window> = vulkano::swapchain::Swapchain::new::<_, &Arc<Queue>>(
                 device.clone(),
                 window.clone(),
                 (&queue).into(),
@@ -354,10 +356,12 @@ impl Ammolite {
                 PresentMode::Immediate, /* PresentMode::Relaxed TODO: Getting only ~60 FPS in a window */
                 true,
                 None,
-            ).expect("failed to create swapchain")
+            ).expect("failed to create swapchain").into();
+
+            swapchain
         };
 
-        (events_loop, window, dimensions, device, queue_family, queue, swapchain, images)
+        (events_loop, window, dimensions, device, queue_family, queue, swapchain)
     }
 
     fn setup_openxr_session(
@@ -414,7 +418,7 @@ impl Ammolite {
             .expect("Failed to create a Vulkan instance.");
 
         // (EventsLoop, Arc<Surface<Window>>, [u32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Arc<Swapchain<Window>>, Vec<Arc<SwapchainImage<Window>>>)
-        let (events_loop, window, dimensions, device, queue_family, queue, swapchain, images)
+        let (events_loop, window, dimensions, device, queue_family, queue, swapchain)
             = Self::vulkan_initialize(&vk_instance, &xr_instance, xr_system);
         let (xr_session, xr_frame_stream) = Self::setup_openxr_session(&xr_instance, &vk_instance, xr_system, &device, &queue);
 
@@ -432,7 +436,7 @@ impl Ammolite {
             [queue_family].into_iter().cloned(),
         ).unwrap()
             .initialize_resource(&device, queue_family, init_command_buffer_builder).unwrap();
-        let (init_command_buffer_builder, pipeline_cache) = GraphicsPipelineSetCache::create(device.clone(), swapchain.clone(), helper_resources.clone(), queue_family)
+        let (init_command_buffer_builder, pipeline_cache) = GraphicsPipelineSetCache::create(device.clone(), &swapchain, helper_resources.clone(), queue_family)
             .initialize_resource(&device, queue_family, init_command_buffer_builder).unwrap();
         let init_command_buffer = init_command_buffer_builder.build().unwrap();
 
@@ -458,7 +462,6 @@ impl Ammolite {
             window_events_loop: Rc::new(RefCell::new(events_loop)),
             window_dimensions: dimensions,
             window_swapchain: swapchain,
-            window_swapchain_images: images,
             window_swapchain_framebuffers: None,
             window_swapchain_recreate: false,
             synchronization: Some(synchronization),
@@ -523,8 +526,8 @@ impl Ammolite {
                     ]
                 };
 
-                let (new_swapchain, new_images) = match self.window_swapchain.recreate_with_dimension(self.window_dimensions) {
-                    Ok(r) => r,
+                match self.window_swapchain.recreate_with_dimension(self.window_dimensions) {
+                    Ok(()) => (),
                     // This error tends to happen when the user is manually resizing the window.
                     // Simply restarting the loop is the easiest way to fix this issue.
                     Err(SwapchainCreationError::UnsupportedDimensions) => {
@@ -533,8 +536,6 @@ impl Ammolite {
                     Err(err) => panic!("{:?}", err)
                 };
 
-                self.window_swapchain = new_swapchain;
-                self.window_swapchain_images = new_images;
                 self.window_swapchain_framebuffers = None;
                 self.window_swapchain_recreate = false;
             }
@@ -549,7 +550,7 @@ impl Ammolite {
                 self.window_swapchain_framebuffers = Some(
                     self.pipeline_cache.shared_resources.construct_swapchain_framebuffers(
                         self.pipeline_cache.render_pass.clone(),
-                        &self.window_swapchain_images,
+                        self.window_swapchain.images(),
                     )
                 );
 
@@ -573,10 +574,9 @@ impl Ammolite {
             //
             // This function can block if no image is available. The parameter is an optional timeout
             // after which the function call will return an error.
-            let (image_num, acquire_future) = match vulkano::swapchain::acquire_next_image(self.window_swapchain.clone(),
-                                                                                  None) {
-                Ok((image_num, acquire_future)) => {
-                    (image_num, acquire_future)
+            let (image, acquire_future) = match self.window_swapchain.acquire_next_image() {
+                Ok(result) => {
+                    result
                 },
                 Err(AcquireError::OutOfDate) => {
                     self.window_swapchain_recreate = true;
@@ -617,26 +617,26 @@ impl Ammolite {
                 .join(acquire_future)));
 
             let current_framebuffer: Arc<dyn FramebufferWithClearValues<_>> = self.window_swapchain_framebuffers
-                .as_ref().unwrap()[image_num].clone();
+                .as_ref().unwrap()[image.index()].clone();
 
             self.render_instances(current_framebuffer, world_space_models);
 
 
             let result = self.synchronization.take().unwrap()
-                .then_signal_fence()
+                .then_signal_fence();
                 // The color output is now expected to contain our triangle. But in order to show it on
                 // the screen, we have to *present* the image by calling `present`.
                 // This function does not actually present the image immediately. Instead it submits a
                 // present command at the end of the queue. This means that it will only be presented once
                 // the GPU has finished executing the command buffer that draws the triangle.
-                .then_swapchain_present(self.queue.clone(), self.window_swapchain.clone(), image_num)
+            let result = self.window_swapchain.present(Box::new(result), self.queue.clone(), image.index())
                 .then_signal_fence_and_flush();
 
             self.synchronization = Some(match result {
-                Ok(future) => Box::new(future) as Box<GpuFuture>,
+                Ok(future) => Box::new(future) as Box<dyn GpuFuture>,
                 Err(FlushError::OutOfDate) => {
                     self.window_swapchain_recreate = true;
-                    Box::new(vulkano::sync::now(self.device.clone())) as Box<GpuFuture>
+                    Box::new(vulkano::sync::now(self.device.clone())) as Box<dyn GpuFuture>
                 },
                 Err(err) => panic!("{:?}", err),
             });

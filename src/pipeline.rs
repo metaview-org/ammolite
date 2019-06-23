@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock, Weak, Mutex};
 use std::ops::{BitOr, BitOrAssign, Not};
 use std::collections::HashMap;
 use core::num::NonZeroU32;
+use vulkano;
 use vulkano::ordered_passes_renderpass;
 use vulkano::format::*;
 use vulkano::image::traits::ImageViewAccess;
@@ -39,7 +40,6 @@ use vulkano::pipeline::GraphicsPipeline;
 use vulkano::pipeline::depth_stencil::DepthStencil;
 use vulkano::pipeline::depth_stencil::Compare;
 use vulkano::pipeline::depth_stencil::DepthBounds;
-use vulkano::swapchain::Swapchain;
 use winit::Window;
 use weak_table::WeakKeyHashMap;
 use gltf::material::Material;
@@ -52,6 +52,7 @@ use crate::model::resource::{InitializationTask, UninitializedResource, SimpleUn
 use crate::buffer::StagedBuffer;
 use crate::iter::ArrayIterator;
 use crate::shaders::*;
+use crate::swapchain::Swapchain;
 
 #[derive(PartialEq, Eq)]
 #[repr(C)]
@@ -182,7 +183,7 @@ impl SharedGltfGraphicsPipelineResources {
 
     pub fn construct_swapchain_framebuffers(&mut self,
                                             render_pass: Arc<RenderPassAbstract + Send + Sync>,
-                                            swapchain_images: &[Arc<SwapchainImage<Window>>])
+                                            swapchain_images: &[Arc<dyn SwapchainImage>])
             -> Vec<Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>> {
         let render_pass = &render_pass;
         swapchain_images.iter().map(|image| {
@@ -588,7 +589,8 @@ macro_rules! construct_pipeline_blend_finalize {
 }
 
 impl GraphicsPipelineSetCache {
-    pub fn create(device: Arc<Device>, swapchain: Arc<Swapchain<Window>>, helper_resources: HelperResources, queue_family: QueueFamily) -> impl UninitializedResource<Self> {
+    pub fn create(device: Arc<Device>, swapchain: &dyn Swapchain<Window>, helper_resources: HelperResources, queue_family: QueueFamily) -> impl UninitializedResource<Self> {
+        let swapchain_format = swapchain.format();
         SharedGltfGraphicsPipelineResources::new(device.clone(), helper_resources, queue_family)
             .unwrap()
             .map(move |shared_resources| {
@@ -598,7 +600,7 @@ impl GraphicsPipelineSetCache {
                     pipeline_layout_dependent_resources: Arc::new(RwLock::new(HashMap::new())),
                     // pipeline_layout_dependent_resources: Arc::new(RwLock::new(WeakKeyHashMap::new())),
                     device: device.clone(),
-                    render_pass: Self::create_render_pass(&device, &swapchain),
+                    render_pass: Self::create_render_pass(&device, swapchain_format),
                     vertex_shader: gltf_vert::Shader::load(device.clone())
                         .expect("Failed to create shader module."),
                 };
@@ -611,14 +613,14 @@ impl GraphicsPipelineSetCache {
             })
     }
 
-    fn create_render_pass(device: &Arc<Device>, swapchain: &Arc<Swapchain<Window>>) -> Arc<RenderPassAbstract + Send + Sync> {
+    fn create_render_pass(device: &Arc<Device>, swapchain_format: Format) -> Arc<RenderPassAbstract + Send + Sync> {
         Arc::new(ordered_passes_renderpass! {
             device.clone(),
             attachments: {
                 color: {
                     load: Clear,
                     store: Store,
-                    format: swapchain.format(),
+                    format: swapchain_format,
                     samples: 1,
                     initial_layout: ImageLayout::Undefined,
                     final_layout: ImageLayout::ColorAttachmentOptimal,

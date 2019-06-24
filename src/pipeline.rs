@@ -589,7 +589,7 @@ macro_rules! construct_pipeline_blend_finalize {
 }
 
 impl GraphicsPipelineSetCache {
-    pub fn create(device: Arc<Device>, swapchain: &dyn Swapchain<Window>, helper_resources: HelperResources, queue_family: QueueFamily) -> impl UninitializedResource<Self> {
+    pub fn create(device: Arc<Device>, swapchain: &dyn Swapchain, helper_resources: HelperResources, queue_family: QueueFamily) -> impl UninitializedResource<Self> {
         let swapchain_format = swapchain.format();
         SharedGltfGraphicsPipelineResources::new(device.clone(), helper_resources, queue_family)
             .unwrap()

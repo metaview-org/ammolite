@@ -41,7 +41,7 @@ use vulkano::device::{Device, RawDeviceExtensions, DeviceExtensions, Queue, Feat
 use vulkano::instance::{self, ApplicationInfo, Instance as VkInstance, PhysicalDevice, QueueFamily};
 use vulkano::sync::{FlushError, GpuFuture};
 use vulkano::format::{Format, ClearValue, R8G8B8A8Srgb};
-use vulkano::image::{SwapchainImage, ImageUsage};
+use vulkano::image::{SwapchainImage, ImageUsage, ImageDimensions, ImageAccess};
 use vulkano::pipeline::viewport::Viewport;
 use vulkano::swapchain::{PresentMode, SurfaceTransform, AcquireError, SwapchainCreationError, Surface};
 use vulkano_win::VkSurfaceBuild;
@@ -167,7 +167,7 @@ pub struct Ammolite {
     pub window_events_loop: Rc<RefCell<EventsLoop>>,
     pub window_dimensions: [NonZeroU32; 2],
     pub window_swapchain: Box<dyn Swapchain>,
-    pub window_swapchain_framebuffers: Option<Vec<Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>>>,
+    pub window_swapchain_framebuffers: Option<Vec<Vec<Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>>>>,
     pub window_swapchain_recreate: bool,
     pub synchronization: Option<Box<dyn GpuFuture>>,
     // TODO Consider moving to SharedGltfGraphicsPipelineResources
@@ -227,14 +227,14 @@ impl Ammolite {
             }
         }
 
-        let app_info = openxr::ApplicationInfo::new()
-            .api_version(OpenXRVersion((0, 90, 0)).into())
-            .engine_name(env!("CARGO_PKG_NAME"))
-            .engine_version(OpenXRVersion::from_crate().into())
-            .application_name(env!("CARGO_PKG_NAME")) // TODO: Make customizable
-            .application_version(OpenXRVersion::from_crate().into()); // TODO: Make customizable
+        let app_info = openxr::ApplicationInfo {
+            engine_name: env!("CARGO_PKG_NAME"),
+            engine_version: OpenXRVersion::from_crate().into(),
+            application_name: env!("CARGO_PKG_NAME"), // TODO: Make customizable
+            application_version: OpenXRVersion::from_crate().into(), // TODO: Make customizable
+        };
 
-        entry.create_instance(app_info, &used_extensions).unwrap()
+        entry.create_instance(&app_info, &used_extensions).unwrap()
     }
 
     fn vulkan_initialize<'a>(vk_instance: &'a Arc<VkInstance>, xr_instance: &'a Arc<XrInstance>, xr_system: openxr::SystemId) -> (Arc<XrVkSession>, XrVkFrameStream, EventsLoop, Arc<Surface<Window>>, [NonZeroU32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Box<dyn Swapchain>) {
@@ -335,13 +335,25 @@ impl Ammolite {
 
         let swapchain = {
             if true {
+                let view = view_config_views[0];
+
+                for other in view_config_views.iter().skip(1) {
+                    assert_eq!(view, *other);
+                }
+
+                dimensions = [
+                    NonZeroU32::new(view.recommended_image_rect_width).unwrap(),
+                    NonZeroU32::new(view.recommended_image_rect_height).unwrap(),
+                ];
+
                 let swapchain = XrSwapchain::new(
                     device.clone(),
                     xr_session.clone(),
                     dimensions,
-                    crate::NONZERO_ONE, // TODO
+                    NonZeroU32::new(view_config_views.len() as u32).unwrap(), // TODO
                     R8G8B8A8Srgb,
                     ImageUsage::all(), // TODO
+                    NonZeroU32::new(view.recommended_swapchain_sample_count).unwrap(),
                 );
 
                 Box::new(swapchain) as Box<dyn Swapchain>
@@ -526,7 +538,6 @@ impl Ammolite {
     }
 
     pub fn render<'a>(&mut self, elapsed: &Duration, model_provider: impl FnOnce() -> &'a [WorldSpaceModel<'a>]) {
-        let world_space_models = model_provider();
         // It is important to call this function from time to time, otherwise resources will keep
         // accumulating and you will eventually reach an out of memory error.
         // Calling this function polls various fences in order to determine what the GPU has
@@ -540,6 +551,8 @@ impl Ammolite {
         let status = self.xr_frame_stream.begin().unwrap();
 
         if status != openxr::sys::Result::SESSION_VISIBILITY_UNAVAILABLE {
+            let world_space_models = model_provider();
+
             // A loop is used as a way to reset the rendering using `continue` if something goes wrong,
             // there is a `break` statement at the end.
             loop {
@@ -602,7 +615,7 @@ impl Ammolite {
                 //
                 // This function can block if no image is available. The parameter is an optional timeout
                 // after which the function call will return an error.
-                let (image, acquire_future) = match self.window_swapchain.acquire_next_image() {
+                let (multilayer_image, acquire_future) = match self.window_swapchain.acquire_next_image() {
                     Ok(result) => {
                         result
                     },
@@ -615,59 +628,74 @@ impl Ammolite {
 
                 let secs_elapsed = ((elapsed.as_secs() as f64) + (elapsed.as_nanos() as f64) / (1_000_000_000f64)) as f32;
 
-                let scene_ubo = SceneUBO::new(
-                    secs_elapsed,
-                    Vec2([self.window_dimensions[0].get() as f32, self.window_dimensions[1].get() as f32]),
-                    self.camera_position.clone(),
-                    self.camera_view_matrix.clone(),
-                    self.camera_projection_matrix.clone(),
-                );
+                let layers = match ImageAccess::dimensions(&multilayer_image) {
+                    ImageDimensions::Dim2D { .. } => 1,
+                    ImageDimensions::Dim2DArray { array_layers, .. } => array_layers.get(),
+                    _ => panic!("Unsupported swapchain dimensions."),
+                } as usize;
 
-                let buffer_updates = AutoCommandBufferBuilder::primary_one_time_submit(
-                    self.device.clone(),
-                    self.queue.family(),
-                ).unwrap()
-                    .update_buffer(
-                        self.pipeline_cache.shared_resources.scene_ubo_buffer.staging_buffer().clone(),
-                        scene_ubo.clone()
-                    ).unwrap()
-                    .copy_buffer(
-                        self.pipeline_cache.shared_resources.scene_ubo_buffer.staging_buffer().clone(),
-                        self.pipeline_cache.shared_resources.scene_ubo_buffer.device_buffer().clone()
-                    ).unwrap()
-                    .build().unwrap();
-
-
-                // TODO don't Box the future, pass it as `impl GpuFuture` to render_instances,
-                // which should then return an `impl GpuFuture`
                 self.synchronization = Some(Box::new(self.synchronization.take().unwrap()
-                    .then_execute(self.queue.clone(), buffer_updates).unwrap()
                     .join(acquire_future)));
 
-                let current_framebuffer: Arc<dyn FramebufferWithClearValues<_>> = self.window_swapchain_framebuffers
-                    .as_ref().unwrap()[image.index()].clone();
+                println!("Layers: {}", layers);
 
-                self.render_instances(current_framebuffer, world_space_models);
+                for layer in 0..layers {
+                    let scene_ubo = SceneUBO::new(
+                        secs_elapsed,
+                        Vec2([self.window_dimensions[0].get() as f32, self.window_dimensions[1].get() as f32]),
+                        self.camera_position.clone(),
+                        self.camera_view_matrix.clone(),
+                        self.camera_projection_matrix.clone(),
+                    );
+
+                    let buffer_updates = AutoCommandBufferBuilder::primary_one_time_submit(
+                        self.device.clone(),
+                        self.queue.family(),
+                    ).unwrap()
+                        .update_buffer(
+                            self.pipeline_cache.shared_resources.scene_ubo_buffer.staging_buffer().clone(),
+                            scene_ubo.clone()
+                        ).unwrap()
+                        .copy_buffer(
+                            self.pipeline_cache.shared_resources.scene_ubo_buffer.staging_buffer().clone(),
+                            self.pipeline_cache.shared_resources.scene_ubo_buffer.device_buffer().clone()
+                        ).unwrap()
+                        .build().unwrap();
 
 
-                let result = self.synchronization.take().unwrap()
-                    .then_signal_fence();
-                    // The color output is now expected to contain our triangle. But in order to show it on
-                    // the screen, we have to *present* the image by calling `present`.
-                    // This function does not actually present the image immediately. Instead it submits a
-                    // present command at the end of the queue. This means that it will only be presented once
-                    // the GPU has finished executing the command buffer that draws the triangle.
-                let result = self.window_swapchain.present(Box::new(result), self.queue.clone(), image.index())
-                    .then_signal_fence_and_flush();
+                    // TODO don't Box the future, pass it as `impl GpuFuture` to render_instances,
+                    // which should then return an `impl GpuFuture`
+                    // self.synchronization = Some(Box::new(self.synchronization.take().unwrap()
+                    //     .then_execute(self.queue.clone(), buffer_updates).unwrap()
+                    //     .join(acquire_future)));
+                    self.synchronization = Some(Box::new(self.synchronization.take().unwrap()
+                        .then_execute(self.queue.clone(), buffer_updates).unwrap()));
 
-                self.synchronization = Some(match result {
-                    Ok(future) => Box::new(future) as Box<dyn GpuFuture>,
-                    Err(FlushError::OutOfDate) => {
-                        self.window_swapchain_recreate = true;
-                        Box::new(vulkano::sync::now(self.device.clone())) as Box<dyn GpuFuture>
-                    },
-                    Err(err) => panic!("{:?}", err),
-                });
+                    let current_framebuffer: Arc<dyn FramebufferWithClearValues<_>> = self.window_swapchain_framebuffers
+                        .as_ref().unwrap()[multilayer_image.index()][layer].clone();
+
+                    self.render_instances(current_framebuffer, world_space_models);
+
+
+                    let result = self.synchronization.take().unwrap()
+                        .then_signal_fence();
+                        // The color output is now expected to contain our triangle. But in order to show it on
+                        // the screen, we have to *present* the image by calling `present`.
+                        // This function does not actually present the image immediately. Instead it submits a
+                        // present command at the end of the queue. This means that it will only be presented once
+                        // the GPU has finished executing the command buffer that draws the triangle.
+                    let result = self.window_swapchain.present(Box::new(result), self.queue.clone(), multilayer_image.index())
+                        .then_signal_fence_and_flush();
+
+                    self.synchronization = Some(match result {
+                        Ok(future) => Box::new(future) as Box<dyn GpuFuture>,
+                        Err(FlushError::OutOfDate) => {
+                            self.window_swapchain_recreate = true;
+                            Box::new(vulkano::sync::now(self.device.clone())) as Box<dyn GpuFuture>
+                        },
+                        Err(err) => panic!("{:?}", err),
+                    });
+                }
 
                 if self.window_swapchain_recreate {
                     continue;
@@ -705,25 +733,23 @@ impl Ammolite {
                                         width: self.window_dimensions[0].get() as i32,
                                         height: self.window_dimensions[1].get() as i32,
                                     },
-                                    // extent: view_resolution[0],
                                 })
                         ),
-                    // openxr::CompositionLayerProjectionView::new()
-                    //     .pose(views[1].pose)
-                    //     .fov(views[1].fov)
-                    //     .sub_image(
-                    //         openxr::SwapchainSubImage::new()
-                    //             .swapchain(self.window_swapchain.downcast_xr().unwrap().inner())
-                    //             .image_array_index(1)
-                    //             .image_rect(openxr::Rect2Di {
-                    //                 offset: openxr::Offset2Di { x: 0, y: 0 },
-                    //                 extent: openxr::Extent2Di { // FIXME
-                    //                     width: self.window_dimensions[0].get() as i32,
-                    //                     height: self.window_dimensions[1].get() as i32,
-                    //                 },
-                    //                 // extent: view_resolution[1],
-                    //             })
-                    //     ),
+                    openxr::CompositionLayerProjectionView::new()
+                        .pose(views[1].pose)
+                        .fov(views[1].fov)
+                        .sub_image(
+                            openxr::SwapchainSubImage::new()
+                                .swapchain(self.window_swapchain.downcast_xr().unwrap().inner())
+                                .image_array_index(1)
+                                .image_rect(openxr::Rect2Di {
+                                    offset: openxr::Offset2Di { x: 0, y: 0 },
+                                    extent: openxr::Extent2Di { // FIXME
+                                        width: self.window_dimensions[0].get() as i32,
+                                        height: self.window_dimensions[1].get() as i32,
+                                    },
+                                })
+                        ),
                 ])]
         ).unwrap();
 

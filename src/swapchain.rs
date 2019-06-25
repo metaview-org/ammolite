@@ -120,6 +120,7 @@ impl XrSwapchain {
         layers: NonZeroU32,
         format: F,
         usage: ImageUsage,
+        mip_count: NonZeroU32,
     ) -> Self {
         let create_info = openxr::SwapchainCreateInfo {
             create_flags: openxr::SwapchainCreateFlags::EMPTY,
@@ -130,7 +131,7 @@ impl XrSwapchain {
             height: dimensions[1].get(),
             face_count: 1, // 6 for cubemaps, or 1
             array_size: layers.get(),
-            mip_count: 1, // TODO customizability
+            mip_count: mip_count.get(),
         };
         let xr_swapchain = xr_session.create_swapchain(&create_info).unwrap();
         let images: Vec<Arc<dyn SwapchainImage>> = xr_swapchain.enumerate_images().unwrap()

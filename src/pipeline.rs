@@ -14,6 +14,8 @@ use vulkano::descriptor::descriptor_set::FixedSizeDescriptorSetBuilder;
 use vulkano::descriptor::pipeline_layout::PipelineLayoutDesc;
 use vulkano::descriptor::pipeline_layout::PipelineLayoutDescAggregation;
 use vulkano::instance::QueueFamily;
+use vulkano::image::ImageAccess;
+use vulkano::image::ImageSubresourceRange;
 use vulkano::image::SwapchainImage;
 use vulkano::image::layout::RequiredLayouts;
 use vulkano::image::layout::typesafety;
@@ -182,17 +184,42 @@ impl SharedGltfGraphicsPipelineResources {
     }
 
     pub fn construct_swapchain_framebuffers(&mut self,
-                                            render_pass: Arc<RenderPassAbstract + Send + Sync>,
+                                            render_pass: Arc<dyn RenderPassAbstract + Send + Sync>,
                                             swapchain_images: &[Arc<dyn SwapchainImage>])
-            -> Vec<Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>> {
+            -> Vec<Vec<Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>>> {
         let render_pass = &render_pass;
-        swapchain_images.iter().map(|image| {
-            Arc::new(Framebuffer::start(render_pass.clone())
-                     .add(image.clone()).unwrap()
-                     .add(self.depth_image.as_ref().unwrap().clone()).unwrap()
-                     .add(self.blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
-                     .add(self.blend_revealage_image.as_ref().unwrap().clone()).unwrap()
-                     .build().unwrap()) as Arc<dyn FramebufferWithClearValues<_>>
+        swapchain_images.iter().map(|multilayer_image| {
+            let layers = match ImageAccess::dimensions(&multilayer_image) {
+                ImageDimensions::Dim2D { .. } => 1,
+                ImageDimensions::Dim2DArray { array_layers, .. } => array_layers.get(),
+                _ => panic!("Unsupported swapchain dimensions."),
+            } as usize;
+            let mut result = Vec::with_capacity(layers);
+
+            println!("constructing with layers: {}", layers);
+
+            for layer in 0..layers {
+                let image = ImageView::new_attachment::<Format>(
+                    multilayer_image.clone(),
+                    None,
+                    Some(ImageSubresourceRange {
+                        array_layers: crate::NONZERO_ONE,
+                        array_layers_offset: layer as u32,
+                        mipmap_levels: multilayer_image.mipmap_levels(),
+                        mipmap_levels_offset: 0,
+                    }),
+                ).unwrap();
+                result.push(
+                    Arc::new(Framebuffer::start(render_pass.clone())
+                             .add(image).unwrap()
+                             .add(self.depth_image.as_ref().unwrap().clone()).unwrap()
+                             .add(self.blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
+                             .add(self.blend_revealage_image.as_ref().unwrap().clone()).unwrap()
+                             .build().unwrap()) as Arc<dyn FramebufferWithClearValues<_>>
+                );
+            }
+
+            result
         }).collect()
     }
 

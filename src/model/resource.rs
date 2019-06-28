@@ -39,12 +39,12 @@ pub enum InitializationTask {
     Image {
         data: Arc<Vec<u8>>,
         device_image: Arc<dyn ImageViewAccess + Send + Sync>,
-        texel_conversion: Option<Box<dyn for<'a> Fn(&'a [u8]) -> Box<ExactSizeIterator<Item=u8> + 'a>>>,
+        texel_conversion: Option<Box<dyn for<'a> Fn(&'a [u8]) -> Box<dyn ExactSizeIterator<Item=u8> + 'a>>>,
     },
     ImageWithMipmaps {
         data: Arc<Vec<u8>>,
         device_image: Arc<SyncImage<locker::MatrixImageResourceLocker>>,
-        texel_conversion: Option<Box<dyn for<'a> Fn(&'a [u8]) -> Box<ExactSizeIterator<Item=u8> + 'a>>>,
+        texel_conversion: Option<Box<dyn for<'a> Fn(&'a [u8]) -> Box<dyn ExactSizeIterator<Item=u8> + 'a>>>,
     },
     NodeDescriptorSet {
         data: NodeUBO,

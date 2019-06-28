@@ -25,7 +25,7 @@ use vulkano::image::layout::RequiredLayouts;
 use vulkano::image::layout::typesafety;
 use vulkano::image::Swizzle;
 use vulkano::image::ImageDimensions;
-use vulkano::image::ImageLayout;
+
 use vulkano::image::ImageUsage;
 use vulkano::image::MipmapsCount;
 use vulkano::image::SyncImage;
@@ -179,12 +179,12 @@ impl HelperResources {
 
 #[derive(Clone)]
 pub enum DynamicIndexBuffer {
-    U16(Arc<TypedBufferAccess<Content = [u16]> + Send + Sync + 'static>),
-    U32(Arc<TypedBufferAccess<Content = [u32]> + Send + Sync + 'static>),
+    U16(Arc<dyn TypedBufferAccess<Content = [u16]> + Send + Sync + 'static>),
+    U32(Arc<dyn TypedBufferAccess<Content = [u32]> + Send + Sync + 'static>),
 }
 
-type DynamicIndirectBuffer = Arc<TypedBufferAccess<Content = [DrawIndirectCommand]> + Send + Sync + 'static>;
-type DynamicIndexedIndirectBuffer = Arc<TypedBufferAccess<Content = [DrawIndexedIndirectCommand]> + Send + Sync + 'static>;
+type DynamicIndirectBuffer = Arc<dyn TypedBufferAccess<Content = [DrawIndirectCommand]> + Send + Sync + 'static>;
+type DynamicIndexedIndirectBuffer = Arc<dyn TypedBufferAccess<Content = [DrawIndexedIndirectCommand]> + Send + Sync + 'static>;
 
 #[derive(Clone)]
 pub enum ContextLessDrawCallBuffers {
@@ -743,7 +743,7 @@ impl Model {
         primitive: &Primitive<'a>,
         draw_context: &DrawContext,
         incomplete_descriptor_sets: GltfContextLessDescriptorSets,
-        pipeline: &Arc<GraphicsPipelineAbstract + Send + Sync>,
+        pipeline: &Arc<dyn GraphicsPipelineAbstract + Send + Sync>,
         pipeline_layout: &Arc<PipelineLayout>,
     ) -> GltfContextLessDrawCall {
         let positions_accessor = primitive.get(&Semantic::Positions).unwrap();

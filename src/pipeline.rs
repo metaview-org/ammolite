@@ -1,5 +1,5 @@
 use std::collections::hash_map::Entry;
-use std::sync::{Arc, RwLock, Weak, Mutex};
+use std::sync::{Arc, RwLock, Mutex};
 use std::ops::{BitOr, BitOrAssign, Not};
 use std::collections::HashMap;
 use core::num::NonZeroU32;
@@ -14,14 +14,12 @@ use vulkano::descriptor::descriptor_set::FixedSizeDescriptorSetBuilder;
 use vulkano::descriptor::pipeline_layout::PipelineLayoutDesc;
 use vulkano::descriptor::pipeline_layout::PipelineLayoutDescAggregation;
 use vulkano::instance::QueueFamily;
-use vulkano::image::ImageAccess;
-use vulkano::image::ImageSubresourceRange;
-use vulkano::image::SwapchainImage;
+
 use vulkano::image::layout::RequiredLayouts;
-use vulkano::image::layout::typesafety;
+
 use vulkano::image::Swizzle;
 use vulkano::image::ImageDimensions;
-use vulkano::image::ImageLayout;
+
 use vulkano::image::ImageUsage;
 use vulkano::image::MipmapsCount;
 use vulkano::image::SyncImage;
@@ -42,8 +40,8 @@ use vulkano::pipeline::GraphicsPipeline;
 use vulkano::pipeline::depth_stencil::DepthStencil;
 use vulkano::pipeline::depth_stencil::Compare;
 use vulkano::pipeline::depth_stencil::DepthBounds;
-use winit::Window;
-use weak_table::WeakKeyHashMap;
+
+
 use gltf::material::Material;
 use gltf::mesh::Primitive;
 use failure::Error;
@@ -56,7 +54,6 @@ use crate::model::resource::{InitializationTask, UninitializedResource, SimpleUn
 use crate::buffer::StagedBuffer;
 use crate::iter::ArrayIterator;
 use crate::shaders::*;
-use crate::swapchain::Swapchain;
 
 #[derive(PartialEq, Eq)]
 #[repr(C)]

@@ -5,8 +5,8 @@ use vulkano::instance::QueueFamily;
 
 #[derive(Clone)]
 pub struct StagedBuffer<T: Sized + Send + Sync + 'static> {
-    staging_buffer: Arc<TypedBufferAccess<Content=T> + Send + Sync>,
-    device_buffer: Arc<TypedBufferAccess<Content=T> + Send + Sync>,
+    staging_buffer: Arc<dyn TypedBufferAccess<Content=T> + Send + Sync>,
+    device_buffer: Arc<dyn TypedBufferAccess<Content=T> + Send + Sync>,
 }
 
 impl<T: Send + Sync> StagedBuffer<T> {
@@ -38,11 +38,11 @@ impl<T: Send + Sync> StagedBuffer<T> {
         }
     }
 
-    pub fn staging_buffer(&self) -> &Arc<TypedBufferAccess<Content=T> + Send + Sync> {
+    pub fn staging_buffer(&self) -> &Arc<dyn TypedBufferAccess<Content=T> + Send + Sync> {
         &self.staging_buffer
     }
 
-    pub fn device_buffer(&self) -> &Arc<TypedBufferAccess<Content=T> + Send + Sync> {
+    pub fn device_buffer(&self) -> &Arc<dyn TypedBufferAccess<Content=T> + Send + Sync> {
         &self.device_buffer
     }
 }

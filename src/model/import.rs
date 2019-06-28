@@ -18,9 +18,9 @@ use vulkano::image::Swizzle;
 use vulkano::image::ImageDimensions;
 use vulkano::image::ImageUsage;
 use vulkano::image::layout::RequiredLayouts;
-use vulkano::image::layout::typesafety::ImageLayoutSampledImage;
-use vulkano::image::ImageSubresourceRange;
-use vulkano::image::ImageLayout;
+
+
+
 use vulkano::image::MipmapsCount;
 use vulkano::image::view::ImageView;
 use vulkano::image::traits::ImageViewAccess;
@@ -55,7 +55,7 @@ enum ColorSpace {
     Linear,
 }
 
-fn convert_double_channel_to_triple_channel<'a>(data_slice: &'a [u8]) -> Box<ExactSizeIterator<Item=u8> + 'a> {
+fn convert_double_channel_to_triple_channel<'a>(data_slice: &'a [u8]) -> Box<dyn ExactSizeIterator<Item=u8> + 'a> {
     let unsized_iterator = data_slice.chunks(3).flat_map(|rgb| {
         ArrayIterator::new([rgb[0], rgb[1], rgb[2], 0xFF])
     });
@@ -142,7 +142,7 @@ pub fn precompute_missing_normal_buffers<'a, I>(device: &Arc<Device>,
             let mut normals_data: Vec<GltfVertexNormal> = vec![GltfVertexNormal([0.0; 3]); vertex_count];
             let mut normals_count: Vec<u8> = vec![0; vertex_count];
 
-            let mut index_iter: Box<Iterator<Item=usize>> = if let Some(index_accessor) = primitive.indices() {
+            let mut index_iter: Box<dyn Iterator<Item=usize>> = if let Some(index_accessor) = primitive.indices() {
                 match index_accessor.data_type() {
                     DataType::U8 => Box::new(
                         ByteBufferIterator::<u8>::from_accessor(buffer_data_array, &index_accessor)
@@ -259,7 +259,7 @@ pub fn precompute_missing_tangent_buffers<'a, I>(device: &Arc<Device>,
             let vertices_per_face = 3;
             let face_count = index_count / vertices_per_face;
 
-            let get_semantic_index: Box<Fn(usize, usize) -> usize> = if let Some(index_accessor) = primitive.indices() {
+            let get_semantic_index: Box<dyn Fn(usize, usize) -> usize> = if let Some(index_accessor) = primitive.indices() {
                 match index_accessor.data_type() {
                     DataType::U8 => {
                         Box::new(move |face_index, vertex_index| *Model::index_byte_slice::<u8>(
@@ -435,7 +435,7 @@ pub fn import_device_buffers<'a, I>(device: &Arc<Device>,
 }
 
 pub fn import_device_images<'a, I>(device: &Arc<Device>,
-                                   queue_families: &I,
+                                   _queue_families: &I,
                                    helper_resources: &HelperResources,
                                    document: &Document,
                                    image_data_array: Vec<gltf::image::Data>,

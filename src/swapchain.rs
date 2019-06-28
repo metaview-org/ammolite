@@ -7,7 +7,7 @@ use vulkano::VulkanObject;
 use vulkano::command_buffer::submit::SubmitSemaphoresWaitBuilder;
 use vulkano::image::ImageUsage;
 use vulkano::device::{Device, DeviceOwned, Queue};
-use vulkano::sync::{GpuFuture, NowFuture};
+use vulkano::sync::GpuFuture;
 use vulkano::sync::AccessCheckError;
 use vulkano::sync::Fence;
 use vulkano::sync::Semaphore;
@@ -16,8 +16,8 @@ use vulkano::sync::FlushError;
 use vulkano::sync::PipelineStages;
 use vulkano::sync::AccessFlagBits;
 use vulkano::format::{Format, FormatDesc};
-use vulkano::pipeline::viewport::Viewport;
-use vulkano::swapchain::{self, PresentFuture, AcquireError, SwapchainAcquireFuture, SwapchainCreationError};
+
+use vulkano::swapchain::{self, AcquireError, SwapchainCreationError};
 use vulkano::buffer::BufferAccess;
 use vulkano::image::{
     sys::{UnsafeImage, UnsafeImageView, UnsafeImageViewCreationError},
@@ -226,7 +226,7 @@ impl Swapchain for XrSwapchain {
 
     fn images(&self) -> &[Arc<dyn SwapchainImage>] { &self.images[..] }
 
-    fn recreate_with_dimension(&mut self, dimensions: [NonZeroU32; 2]) -> Result<(), SwapchainCreationError> {
+    fn recreate_with_dimension(&mut self, _dimensions: [NonZeroU32; 2]) -> Result<(), SwapchainCreationError> {
         // no-op
         Ok(())
     }
@@ -239,7 +239,7 @@ impl Swapchain for XrSwapchain {
         self.format
     }
 
-    fn present(&self, sync: Box<dyn GpuFuture>, queue: Arc<Queue>, index: usize) -> Box<dyn GpuFuture> {
+    fn present(&self, sync: Box<dyn GpuFuture>, _queue: Arc<Queue>, _index: usize) -> Box<dyn GpuFuture> {
         // FIXME
         sync
     }
@@ -372,7 +372,7 @@ impl fmt::Debug for XrSwapchainImage {
 unsafe impl ImageAccess for XrSwapchainImage {
     fn inner(&self) -> &UnsafeImage { self.inner_image() }
 
-    fn conflicts_buffer(&self, other: &BufferAccess) -> bool { false }
+    fn conflicts_buffer(&self, _other: &dyn BufferAccess) -> bool { false }
 
     fn conflicts_image(
         &self, subresource_range: ImageSubresourceRange, other: &dyn ImageAccess,
@@ -405,7 +405,7 @@ unsafe impl ImageAccess for XrSwapchainImage {
     unsafe fn increase_gpu_lock(&self, _: ImageSubresourceRange) {}
 
     unsafe fn decrease_gpu_lock(
-        &self, _: ImageSubresourceRange, new_layout: Option<ImageLayoutEnd>
+        &self, _: ImageSubresourceRange, _new_layout: Option<ImageLayoutEnd>
     ) {
         // TODO: store that the image was initialized?
     }
@@ -413,13 +413,13 @@ unsafe impl ImageAccess for XrSwapchainImage {
 
 // Basically copied from the source code of `vulkano::image::swapchain`
 unsafe impl ImageViewAccess for XrSwapchainImage {
-    fn parent(&self) -> &ImageAccess { self }
+    fn parent(&self) -> &dyn ImageAccess { self }
 
     fn inner(&self) -> &UnsafeImageView { &self.view }
 
     fn dimensions(&self) -> ImageDimensions { self.view.dimensions() }
 
-    fn conflicts_buffer(&self, other: &dyn BufferAccess) -> bool { false }
+    fn conflicts_buffer(&self, _other: &dyn BufferAccess) -> bool { false }
 
     fn required_layouts(&self) -> &RequiredLayouts { &Self::REQUIRED_LAYOUTS }
 }
@@ -462,7 +462,7 @@ unsafe impl GpuFuture for XrSwapchainAcquireFuture {
     fn queue(&self) -> Option<Arc<Queue>> { None }
 
     fn check_buffer_access(
-        &self, _: &BufferAccess, _: bool, _: &Queue
+        &self, _: &dyn BufferAccess, _: bool, _: &Queue
     ) -> Result<Option<(PipelineStages, AccessFlagBits)>, AccessCheckError> {
         Err(AccessCheckError::Unknown)
     }

@@ -32,22 +32,21 @@ use openxr::Instance as XrInstance;
 use vulkano;
 use vulkano::VulkanObject;
 use vulkano::swapchain::ColorSpace;
-use vulkano::descriptor::descriptor_set::DescriptorSet;
 use vulkano::instance::RawInstanceExtensions;
-use vulkano::buffer::{TypedBufferAccess};
+use vulkano::buffer::TypedBufferAccess;
 use vulkano::buffer::cpu_pool::CpuBufferPool;
 use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
 use vulkano::device::{Device, RawDeviceExtensions, DeviceExtensions, Queue, Features};
-use vulkano::instance::{self, ApplicationInfo, Instance as VkInstance, PhysicalDevice, QueueFamily};
+use vulkano::instance::{ApplicationInfo, Instance as VkInstance, PhysicalDevice, QueueFamily};
 use vulkano::sync::{FlushError, GpuFuture};
 use vulkano::format::{Format, ClearValue, R8G8B8A8Srgb};
-use vulkano::image::{SwapchainImage, ImageUsage, ImageDimensions, ImageAccess};
+use vulkano::image::ImageUsage;
 use vulkano::pipeline::viewport::Viewport;
 use vulkano::swapchain::{PresentMode, SurfaceTransform, AcquireError, SwapchainCreationError, Surface};
 use vulkano_win::VkSurfaceBuild;
 use winit::{ElementState, MouseButton, Event, DeviceEvent, WindowEvent, KeyboardInput, VirtualKeyCode, EventsLoop, WindowBuilder, Window};
 use winit::dpi::PhysicalSize;
-use openxr::Entry;
+
 use crate::math::matrix::*;
 use crate::math::vector::*;
 use crate::model::FramebufferWithClearValues;
@@ -383,7 +382,7 @@ impl Ammolite {
             if true {
                 let mut swapchains = Vec::with_capacity(view_config_views.len());
 
-                for (index, view) in view_config_views.into_iter().enumerate() {
+                for (_index, view) in view_config_views.into_iter().enumerate() {
                     let dimensions = [
                         NonZeroU32::new(view.recommended_image_rect_width).unwrap(),
                         NonZeroU32::new(view.recommended_image_rect_height).unwrap(),
@@ -590,7 +589,7 @@ impl Ammolite {
         self.synchronization.as_mut().unwrap().cleanup_finished();
 
         let state = self.xr_frame_stream.wait().unwrap();
-        let (view_flags, views) = self.xr_session
+        let (_view_flags, views) = self.xr_session
             .locate_views(state.predicted_display_time, &self.xr_reference_space_stage)
             .unwrap();
         let status = self.xr_frame_stream.begin().unwrap();

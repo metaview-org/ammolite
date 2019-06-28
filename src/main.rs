@@ -22,7 +22,7 @@ pub mod vertex;
 
 use std::path::Path;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Instant, Duration};
 use std::rc::Rc;
 use std::cell::RefCell;
@@ -153,6 +153,54 @@ pub struct WorldSpaceModel<'a> {
     pub matrix: Mat4,
 }
 
+pub struct ViewSwapchain {
+    /// The swapchain
+    pub swapchain: Box<dyn Swapchain>,
+    pub index: usize,
+    /// Swapchain images, those that get presented in a window or in an HMD
+    pub framebuffers: Option<Vec<Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>>>,
+    pub recreate: bool, // TODO: consider representing as Option<ViewSwapchain>
+}
+
+impl ViewSwapchain {
+    fn new(swapchain: Box<dyn Swapchain>, index: usize) -> Self {
+        Self {
+            swapchain,
+            index,
+            framebuffers: None,
+            recreate: false,
+        }
+    }
+}
+
+pub struct ViewSwapchains {
+    pub inner: Vec<Arc<RwLock<ViewSwapchain>>>,
+    pub format: Format,
+}
+
+impl<T> From<T> for ViewSwapchains
+        where T: IntoIterator<Item=Box<dyn Swapchain>> {
+    fn from(into_iter: T) -> Self {
+        let swapchains: Vec<Box<dyn Swapchain>> = into_iter.into_iter().collect();
+        let format = {
+            let format = swapchains[0].format();
+
+            for view_swapchain in swapchains.iter().skip(1) {
+                assert_eq!(format, view_swapchain.format(), "All swapchains must use the same format.");
+            }
+
+            format
+        };
+        let inner: Vec<Arc<RwLock<ViewSwapchain>>> = swapchains.into_iter()
+            .enumerate()
+            .map(|(index, swapchain)| {
+                Arc::new(RwLock::new(ViewSwapchain::new(swapchain, index)))
+            })
+            .collect();
+        ViewSwapchains { inner, format }
+    }
+}
+
 pub struct Ammolite {
     pub vk_instance: Arc<VkInstance>,
     pub xr_instance: Arc<XrInstance>,
@@ -166,9 +214,7 @@ pub struct Ammolite {
     pub window: Arc<Surface<Window>>,
     pub window_events_loop: Rc<RefCell<EventsLoop>>,
     pub window_dimensions: [NonZeroU32; 2],
-    pub window_swapchain: Box<dyn Swapchain>,
-    pub window_swapchain_framebuffers: Option<Vec<Vec<Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>>>>,
-    pub window_swapchain_recreate: bool,
+    pub view_swapchains: Arc<ViewSwapchains>,
     pub synchronization: Option<Box<dyn GpuFuture>>,
     // TODO Consider moving to SharedGltfGraphicsPipelineResources
     pub buffer_pool_uniform_instance: CpuBufferPool<InstanceUBO>,
@@ -237,7 +283,7 @@ impl Ammolite {
         entry.create_instance(&app_info, &used_extensions).unwrap()
     }
 
-    fn vulkan_initialize<'a>(vk_instance: &'a Arc<VkInstance>, xr_instance: &'a Arc<XrInstance>, xr_system: openxr::SystemId) -> (Arc<XrVkSession>, XrVkFrameStream, EventsLoop, Arc<Surface<Window>>, [NonZeroU32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Box<dyn Swapchain>) {
+    fn vulkan_initialize<'a>(vk_instance: &'a Arc<VkInstance>, xr_instance: &'a Arc<XrInstance>, xr_system: openxr::SystemId) -> (Arc<XrVkSession>, XrVkFrameStream, EventsLoop, Arc<Surface<Window>>, [NonZeroU32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Arc<ViewSwapchains>) {
         let openxr::vulkan::Requirements {
             min_api_version_supported: min_api_version,
             max_api_version_supported: max_api_version,
@@ -333,30 +379,30 @@ impl Ammolite {
         let (xr_session, xr_frame_stream) = Self::setup_openxr_session(&xr_instance, &vk_instance, xr_system, &device, &queue);
         let xr_session = Arc::new(xr_session);
 
-        let swapchain = {
+        let swapchains = {
             if true {
-                let view = view_config_views[0];
+                let mut swapchains = Vec::with_capacity(view_config_views.len());
 
-                for other in view_config_views.iter().skip(1) {
-                    assert_eq!(view, *other);
+                for (index, view) in view_config_views.into_iter().enumerate() {
+                    let dimensions = [
+                        NonZeroU32::new(view.recommended_image_rect_width).unwrap(),
+                        NonZeroU32::new(view.recommended_image_rect_height).unwrap(),
+                    ];
+
+                    let swapchain = XrSwapchain::new(
+                        device.clone(),
+                        xr_session.clone(),
+                        dimensions,
+                        crate::NONZERO_ONE,
+                        R8G8B8A8Srgb,
+                        ImageUsage::all(), // TODO
+                        NonZeroU32::new(view.recommended_swapchain_sample_count).unwrap(),
+                    );
+
+                    swapchains.push(Box::new(swapchain) as Box<dyn Swapchain>);
                 }
 
-                dimensions = [
-                    NonZeroU32::new(view.recommended_image_rect_width).unwrap(),
-                    NonZeroU32::new(view.recommended_image_rect_height).unwrap(),
-                ];
-
-                let swapchain = XrSwapchain::new(
-                    device.clone(),
-                    xr_session.clone(),
-                    dimensions,
-                    NonZeroU32::new(view_config_views.len() as u32).unwrap(), // TODO
-                    R8G8B8A8Srgb,
-                    ImageUsage::all(), // TODO
-                    NonZeroU32::new(view.recommended_swapchain_sample_count).unwrap(),
-                );
-
-                Box::new(swapchain) as Box<dyn Swapchain>
+                swapchains
             } else {
                 let capabilities = window.capabilities(physical_device)
                     .expect("Failed to retrieve surface capabilities.");
@@ -394,14 +440,15 @@ impl Ammolite {
                     None,
                 ).expect("failed to create swapchain").into();
 
-                Box::new(swapchain) as Box<dyn Swapchain>
+                vec![Box::new(swapchain) as Box<dyn Swapchain>]
             }
         };
+        let view_swapchains: Arc<ViewSwapchains> = Arc::new(swapchains.into());
 
         xr_session.begin(openxr::ViewConfigurationType::PRIMARY_STEREO)
                   .unwrap();
 
-        (xr_session, xr_frame_stream, events_loop, window, dimensions, device, queue_family, queue, swapchain)
+        (xr_session, xr_frame_stream, events_loop, window, dimensions, device, queue_family, queue, view_swapchains)
     }
 
     fn setup_openxr_session(
@@ -458,7 +505,7 @@ impl Ammolite {
             .expect("Failed to create a Vulkan instance.");
 
         // (EventsLoop, Arc<Surface<Window>>, [u32; 2], Arc<Device>, QueueFamily<'a>, Arc<Queue>, Arc<Swapchain<Window>>, Vec<Arc<SwapchainImage<Window>>>)
-        let (xr_session, xr_frame_stream, events_loop, window, dimensions, device, queue_family, queue, swapchain)
+        let (xr_session, xr_frame_stream, events_loop, window, dimensions, device, queue_family, queue, view_swapchains)
             = Self::vulkan_initialize(&vk_instance, &xr_instance, xr_system);
 
         let xr_reference_space_stage = xr_session.create_reference_space(
@@ -475,7 +522,7 @@ impl Ammolite {
             [queue_family].into_iter().cloned(),
         ).unwrap()
             .initialize_resource(&device, queue_family, init_command_buffer_builder).unwrap();
-        let (init_command_buffer_builder, pipeline_cache) = GraphicsPipelineSetCache::create(device.clone(), swapchain.as_ref(), helper_resources.clone(), queue_family)
+        let (init_command_buffer_builder, pipeline_cache) = GraphicsPipelineSetCache::create(device.clone(), &view_swapchains, helper_resources.clone(), queue_family)
             .initialize_resource(&device, queue_family, init_command_buffer_builder).unwrap();
         let init_command_buffer = init_command_buffer_builder.build().unwrap();
 
@@ -500,9 +547,7 @@ impl Ammolite {
             window,
             window_events_loop: Rc::new(RefCell::new(events_loop)),
             window_dimensions: dimensions,
-            window_swapchain: swapchain,
-            window_swapchain_framebuffers: None,
-            window_swapchain_recreate: false,
+            view_swapchains,
             synchronization: Some(synchronization),
             buffer_pool_uniform_instance: CpuBufferPool::uniform_buffer(device),
             camera_position: Vec3::zero(),
@@ -553,93 +598,95 @@ impl Ammolite {
         if status != openxr::sys::Result::SESSION_VISIBILITY_UNAVAILABLE {
             let world_space_models = model_provider();
 
-            // A loop is used as a way to reset the rendering using `continue` if something goes wrong,
-            // there is a `break` statement at the end.
-            loop {
-                if self.window_swapchain_recreate {
-                    self.window_dimensions = {
-                        let dpi = self.window.window().get_hidpi_factor();
-                        let (width, height): (u32, u32) = self.window.window().get_inner_size().unwrap().to_physical(dpi)
-                            .into();
-                        [
-                            NonZeroU32::new(width).expect("The width of the window must not be 0."),
-                            NonZeroU32::new(height).expect("The height of the window must not be 0."),
-                        ]
-                    };
+            for view_swapchain in &self.view_swapchains.clone().inner[..] {
+                let mut view_swapchain = view_swapchain.write().unwrap();
+                // A loop is used as a way to reset the rendering using `continue` if something goes wrong,
+                // there is a `break` statement at the end.
+                loop {
+                    if view_swapchain.recreate {
+                        // FIXME: uncomment, but enable only for window swapchains
+                        // self.window_dimensions = {
+                        //     let dpi = self.window.window().get_hidpi_factor();
+                        //     let (width, height): (u32, u32) = self.window.window().get_inner_size().unwrap().to_physical(dpi)
+                        //         .into();
+                        //     [
+                        //         NonZeroU32::new(width).expect("The width of the window must not be 0."),
+                        //         NonZeroU32::new(height).expect("The height of the window must not be 0."),
+                        //     ]
+                        // };
 
-                    match self.window_swapchain.recreate_with_dimension(self.window_dimensions) {
-                        Ok(()) => (),
-                        // This error tends to happen when the user is manually resizing the window.
-                        // Simply restarting the loop is the easiest way to fix this issue.
-                        Err(SwapchainCreationError::UnsupportedDimensions) => {
+                        match view_swapchain.swapchain.recreate_with_dimension(self.window_dimensions) {
+                            Ok(()) => (),
+                            // This error tends to happen when the user is manually resizing the window.
+                            // Simply restarting the loop is the easiest way to fix this issue.
+                            Err(SwapchainCreationError::UnsupportedDimensions) => {
+                                continue;
+                            },
+                            Err(err) => panic!("{:?}", err)
+                        };
+
+                        view_swapchain.framebuffers = None;
+                        view_swapchain.recreate = false;
+                    }
+
+                    // Because framebuffers contains an Arc on the old swapchain, we need to
+                    // recreate framebuffers as well.
+                    if view_swapchain.framebuffers.is_none() {
+                        self.pipeline_cache.shared_resources
+                            .reconstruct_dimensions_dependent_images(&view_swapchain)
+                            .expect("Could not reconstruct dimension dependent resources.");
+
+                        view_swapchain.framebuffers = Some(
+                            self.pipeline_cache.shared_resources.construct_swapchain_framebuffers(
+                                self.pipeline_cache.render_pass.clone(),
+                                &view_swapchain,
+                            )
+                        );
+
+                        for (_, pipeline) in self.pipeline_cache.pipeline_map.write().unwrap().iter_mut() {
+                            let per_pipeline = |pipeline: &mut GltfGraphicsPipeline| {
+                                pipeline.layout_dependent_resources
+                                    .reconstruct_descriptor_sets(&self.pipeline_cache.shared_resources, &self.view_swapchains, &view_swapchain);
+                            };
+
+                            (per_pipeline)(&mut pipeline.opaque);
+                            (per_pipeline)(&mut pipeline.mask);
+                            (per_pipeline)(&mut pipeline.blend_preprocess);
+                            (per_pipeline)(&mut pipeline.blend_finalize);
+                        }
+                    }
+
+                    // Before we can draw on the output, we have to *acquire* an image from the swapchain. If
+                    // no image is available (which happens if you submit draw commands too quickly), then the
+                    // function will block.
+                    // This operation returns the index of the image that we are allowed to draw upon.
+                    //
+                    // This function can block if no image is available. The parameter is an optional timeout
+                    // after which the function call will return an error.
+                    let (multilayer_image, acquire_future) = match view_swapchain.swapchain.acquire_next_image() {
+                        Ok(result) => {
+                            result
+                        },
+                        Err(AcquireError::OutOfDate) => {
+                            view_swapchain.recreate = true;
                             continue;
                         },
                         Err(err) => panic!("{:?}", err)
                     };
 
-                    self.window_swapchain_framebuffers = None;
-                    self.window_swapchain_recreate = false;
-                }
+                    let secs_elapsed = ((elapsed.as_secs() as f64) + (elapsed.as_nanos() as f64) / (1_000_000_000f64)) as f32;
 
-                // Because framebuffers contains an Arc on the old swapchain, we need to
-                // recreate framebuffers as well.
-                if self.window_swapchain_framebuffers.is_none() {
-                    self.pipeline_cache.shared_resources.reconstruct_dimensions_dependent_images(
-                        self.window_dimensions.clone()
-                    ).expect("Could not reconstruct dimension dependent resources.");
+                    let layers = match ImageAccess::dimensions(&multilayer_image) {
+                        ImageDimensions::Dim2D { .. } => 1,
+                        ImageDimensions::Dim2DArray { array_layers, .. } => array_layers.get(),
+                        _ => panic!("Unsupported swapchain dimensions."),
+                    } as usize;
 
-                    self.window_swapchain_framebuffers = Some(
-                        self.pipeline_cache.shared_resources.construct_swapchain_framebuffers(
-                            self.pipeline_cache.render_pass.clone(),
-                            self.window_swapchain.images(),
-                        )
-                    );
+                    self.synchronization = Some(Box::new(self.synchronization.take().unwrap()
+                        .join(acquire_future)));
 
-                    for (_, pipeline) in self.pipeline_cache.pipeline_map.write().unwrap().iter_mut() {
-                        let per_pipeline = |pipeline: &mut GltfGraphicsPipeline| {
-                            pipeline.layout_dependent_resources
-                                .reconstruct_descriptor_sets(&self.pipeline_cache.shared_resources);
-                        };
+                    println!("Layers: {}", layers);
 
-                        (per_pipeline)(&mut pipeline.opaque);
-                        (per_pipeline)(&mut pipeline.mask);
-                        (per_pipeline)(&mut pipeline.blend_preprocess);
-                        (per_pipeline)(&mut pipeline.blend_finalize);
-                    }
-                }
-
-                // Before we can draw on the output, we have to *acquire* an image from the swapchain. If
-                // no image is available (which happens if you submit draw commands too quickly), then the
-                // function will block.
-                // This operation returns the index of the image that we are allowed to draw upon.
-                //
-                // This function can block if no image is available. The parameter is an optional timeout
-                // after which the function call will return an error.
-                let (multilayer_image, acquire_future) = match self.window_swapchain.acquire_next_image() {
-                    Ok(result) => {
-                        result
-                    },
-                    Err(AcquireError::OutOfDate) => {
-                        self.window_swapchain_recreate = true;
-                        continue;
-                    },
-                    Err(err) => panic!("{:?}", err)
-                };
-
-                let secs_elapsed = ((elapsed.as_secs() as f64) + (elapsed.as_nanos() as f64) / (1_000_000_000f64)) as f32;
-
-                let layers = match ImageAccess::dimensions(&multilayer_image) {
-                    ImageDimensions::Dim2D { .. } => 1,
-                    ImageDimensions::Dim2DArray { array_layers, .. } => array_layers.get(),
-                    _ => panic!("Unsupported swapchain dimensions."),
-                } as usize;
-
-                self.synchronization = Some(Box::new(self.synchronization.take().unwrap()
-                    .join(acquire_future)));
-
-                println!("Layers: {}", layers);
-
-                for layer in 0..layers {
                     let scene_ubo = SceneUBO::new(
                         secs_elapsed,
                         Vec2([self.window_dimensions[0].get() as f32, self.window_dimensions[1].get() as f32]),
@@ -671,11 +718,10 @@ impl Ammolite {
                     self.synchronization = Some(Box::new(self.synchronization.take().unwrap()
                         .then_execute(self.queue.clone(), buffer_updates).unwrap()));
 
-                    let current_framebuffer: Arc<dyn FramebufferWithClearValues<_>> = self.window_swapchain_framebuffers
-                        .as_ref().unwrap()[multilayer_image.index()][layer].clone();
+                    let current_framebuffer: Arc<dyn FramebufferWithClearValues<_>> = view_swapchain.framebuffers
+                        .as_ref().unwrap()[multilayer_image.index()].clone();
 
-                    self.render_instances(current_framebuffer, world_space_models);
-
+                    self.render_instances(current_framebuffer, world_space_models, &view_swapchain);
 
                     let result = self.synchronization.take().unwrap()
                         .then_signal_fence();
@@ -684,33 +730,66 @@ impl Ammolite {
                         // This function does not actually present the image immediately. Instead it submits a
                         // present command at the end of the queue. This means that it will only be presented once
                         // the GPU has finished executing the command buffer that draws the triangle.
-                    let result = self.window_swapchain.present(Box::new(result), self.queue.clone(), multilayer_image.index())
+                    let result = view_swapchain.swapchain.present(Box::new(result), self.queue.clone(), multilayer_image.index())
                         .then_signal_fence_and_flush();
 
                     self.synchronization = Some(match result {
                         Ok(future) => Box::new(future) as Box<dyn GpuFuture>,
                         Err(FlushError::OutOfDate) => {
-                            self.window_swapchain_recreate = true;
+                            view_swapchain.recreate = true;
                             Box::new(vulkano::sync::now(self.device.clone())) as Box<dyn GpuFuture>
                         },
                         Err(err) => panic!("{:?}", err),
                     });
-                }
 
-                if self.window_swapchain_recreate {
-                    continue;
-                }
+                    if view_swapchain.recreate {
+                        continue;
+                    }
 
-                // Note that in more complex programs it is likely that one of `acquire_next_image`,
-                // `command_buffer::submit`, or `present` will block for some time. This happens when the
-                // GPU's queue is full and the driver has to wait until the GPU finished some work.
-                //
-                // Unfortunately the Vulkan API doesn't provide any way to not wait or to detect when a
-                // wait would happen. Blocking may be the desired behavior, but if you don't want to
-                // block you should spawn a separate thread dedicated to submissions.
-                break;
+                    // Note that in more complex programs it is likely that one of `acquire_next_image`,
+                    // `command_buffer::submit`, or `present` will block for some time. This happens when the
+                    // GPU's queue is full and the driver has to wait until the GPU finished some work.
+                    //
+                    // Unfortunately the Vulkan API doesn't provide any way to not wait or to detect when a
+                    // wait would happen. Blocking may be the desired behavior, but if you don't want to
+                    // block you should spawn a separate thread dedicated to submissions.
+                    break;
+                }
             }
         }
+
+        // TODO: do not reallocate the vec every time render is called
+        let view_swapchains = self.view_swapchains.inner.iter()
+            .map(|view_swapchain| view_swapchain.read().unwrap())
+            .collect::<Vec<_>>();
+        let swapchains = view_swapchains.iter()
+            .map(|view_swapchain| &view_swapchain.swapchain)
+            .collect::<Vec<_>>();
+        let composition_layers: Vec<openxr::CompositionLayerProjectionView<_>> = {
+            let mut composition_layers = Vec::with_capacity(self.view_swapchains.inner.len());
+
+            for (index, swapchain) in swapchains.iter().enumerate() {
+                let dimensions = swapchain.dimensions();
+                composition_layers.push(openxr::CompositionLayerProjectionView::new()
+                    .pose(views[index].pose)
+                    .fov(views[index].fov)
+                    .sub_image(
+                        openxr::SwapchainSubImage::new()
+                        .swapchain(swapchain.downcast_xr().unwrap().inner())
+                        .image_array_index(0)
+                        .image_rect(openxr::Rect2Di {
+                            offset: openxr::Offset2Di { x: 0, y: 0 },
+                            extent: openxr::Extent2Di { // FIXME
+                                width: dimensions[0].get() as i32,
+                                height: dimensions[1].get() as i32,
+                            },
+                        })
+                    )
+                )
+            }
+
+            composition_layers
+        };
 
         // println!("END");
 
@@ -719,48 +798,22 @@ impl Ammolite {
             openxr::EnvironmentBlendMode::OPAQUE,
             &[&openxr::CompositionLayerProjection::new()
                 .space(&self.xr_reference_space_stage)
-                .views(&[
-                    openxr::CompositionLayerProjectionView::new()
-                        .pose(views[0].pose)
-                        .fov(views[0].fov)
-                        .sub_image(
-                            openxr::SwapchainSubImage::new()
-                                .swapchain(self.window_swapchain.downcast_xr().unwrap().inner())
-                                .image_array_index(0)
-                                .image_rect(openxr::Rect2Di {
-                                    offset: openxr::Offset2Di { x: 0, y: 0 },
-                                    extent: openxr::Extent2Di { // FIXME
-                                        width: self.window_dimensions[0].get() as i32,
-                                        height: self.window_dimensions[1].get() as i32,
-                                    },
-                                })
-                        ),
-                    openxr::CompositionLayerProjectionView::new()
-                        .pose(views[1].pose)
-                        .fov(views[1].fov)
-                        .sub_image(
-                            openxr::SwapchainSubImage::new()
-                                .swapchain(self.window_swapchain.downcast_xr().unwrap().inner())
-                                .image_array_index(1)
-                                .image_rect(openxr::Rect2Di {
-                                    offset: openxr::Offset2Di { x: 0, y: 0 },
-                                    extent: openxr::Extent2Di { // FIXME
-                                        width: self.window_dimensions[0].get() as i32,
-                                        height: self.window_dimensions[1].get() as i32,
-                                    },
-                                })
-                        ),
-                ])]
+                .views(&composition_layers[..])]
         ).unwrap();
 
         // println!("POST END");
+
+        for view_swapchain in &self.view_swapchains.inner[..] {
+            let mut view_swapchain = view_swapchain.write().unwrap();
+
+            view_swapchain.swapchain.finish_rendering();
+        }
     }
 
     fn render_instances<'a>(&mut self,
                             current_framebuffer: Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>,
-                            // clear_values: Vec<ClearValue>,
-                            // context: &'a DrawContext<'a>,
-                            world_space_models: &'a [WorldSpaceModel<'a>]) {
+                            world_space_models: &'a [WorldSpaceModel<'a>],
+                            view_swapchain: &'a ViewSwapchain) {
         let clear_values = vec![
             [0.0, 0.0, 0.0, 1.0].into(),
             1.0.into(),
@@ -786,6 +839,7 @@ impl Ammolite {
             pipeline_cache: &self.pipeline_cache,
             dynamic: &dynamic_state,
             helper_resources: &self.helper_resources,
+            view_swapchain,
         };
 
         let instances = world_space_models.iter()
@@ -995,7 +1049,13 @@ fn main() {
                 Event::WindowEvent {
                     event: WindowEvent::Resized(_),
                     ..
-                } => ammolite.window_swapchain_recreate = true,
+                } => {
+                    // TODO: recreate only actual window swapchains, not HMD ones?
+                    for view_swapchain in &ammolite.view_swapchains.inner[..] {
+                        let mut view_swapchain = view_swapchain.write().unwrap();
+                        view_swapchain.recreate = true;
+                    }
+                }
 
                 _ => ()
             }

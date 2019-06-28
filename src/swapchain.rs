@@ -53,10 +53,12 @@ pub trait Swapchain: DeviceOwned {
         Ok((image, future))
     }
     fn recreate_with_dimension(&mut self, dimensions: [NonZeroU32; 2]) -> Result<(), SwapchainCreationError>;
+    fn dimensions(&self) -> [NonZeroU32; 2];
     fn format(&self) -> Format;
     // TODO: remove Box
     fn present(&self, sync: Box<dyn GpuFuture>, queue: Arc<Queue>, index: usize) -> Box<dyn GpuFuture>;
     fn downcast_xr(&self) -> Option<&XrSwapchain> { None }
+    fn finish_rendering(&mut self) {}
 }
 
 pub struct VkSwapchain<W: 'static> {
@@ -89,6 +91,10 @@ impl<W: 'static + Send + Sync> Swapchain for VkSwapchain<W> {
         Ok(())
     }
 
+    fn dimensions(&self) -> [NonZeroU32; 2] {
+        self.vk_swapchain.dimensions()
+    }
+
     fn format(&self) -> Format {
         self.vk_swapchain.format()
     }
@@ -108,8 +114,10 @@ pub struct XrSwapchain {
     vk_device: Arc<Device>,
     inner: openxr::Swapchain<openxr::Vulkan>,
     format: Format,
+    dimensions: [NonZeroU32; 2],
     images: Arc<Vec<Arc<dyn SwapchainImage>>>,
     undefined_layouts: Arc<Vec<AtomicBool>>,
+    image_acquired: AtomicBool,
 }
 
 impl XrSwapchain {
@@ -161,8 +169,10 @@ impl XrSwapchain {
             vk_device,
             inner: xr_swapchain,
             format: format.format(),
+            dimensions,
             images: Arc::new(images),
             undefined_layouts: Arc::new(undefined_layouts),
+            image_acquired: AtomicBool::new(false),
         }
     }
 
@@ -173,8 +183,14 @@ impl XrSwapchain {
 
 impl Swapchain for XrSwapchain {
     fn acquire_next_image_index(&mut self) -> Result<(usize, Box<dyn GpuFuture>), AcquireError> {
+        if self.image_acquired.swap(true, Ordering::SeqCst) {
+            panic!("Swapchain image already acquired, call `finish_rendering` first.");
+        }
+
         // FIXME: Error handling
         let index = self.inner.acquire_image().unwrap() as usize;
+        // FIXME: Error handling & remove blocking
+        self.inner.wait_image(openxr::Duration::INFINITE).unwrap();
         // let future = vulkano::sync::now(self.vk_device.clone());
         let future = XrSwapchainAcquireFuture {
             device: self.vk_device.clone(),
@@ -189,8 +205,17 @@ impl Swapchain for XrSwapchain {
             fence: None,
             finished: AtomicBool::new(false),
         };
+
         // Ok((index as usize, SwapchainAcquireNextImageFuture::Now(future)))
         Ok((index, Box::new(future)))
+    }
+
+    fn finish_rendering(&mut self) {
+        if !self.image_acquired.swap(false, Ordering::SeqCst) {
+            panic!("Swapchain image already released.");
+        }
+
+        self.inner.release_image().unwrap();
     }
 
     fn images(&self) -> &[Arc<dyn SwapchainImage>] { &self.images[..] }
@@ -198,6 +223,10 @@ impl Swapchain for XrSwapchain {
     fn recreate_with_dimension(&mut self, dimensions: [NonZeroU32; 2]) -> Result<(), SwapchainCreationError> {
         // no-op
         Ok(())
+    }
+
+    fn dimensions(&self) -> [NonZeroU32; 2] {
+        self.dimensions
     }
 
     fn format(&self) -> Format {

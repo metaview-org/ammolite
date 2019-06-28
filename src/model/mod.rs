@@ -46,7 +46,8 @@ use gltf::Node;
 use gltf::accessor::DataType;
 use failure::Error;
 use safe_transmute::PodTransmutable;
-use crate::shaders::{PushConstants};
+use crate::ViewSwapchain;
+use crate::shaders::PushConstants;
 use crate::vertex::*;
 use crate::pipeline::GraphicsPipelineProperties;
 use crate::pipeline::GraphicsPipelineSetCache;
@@ -75,6 +76,7 @@ pub struct DrawContext<'a> {
     pub pipeline_cache: &'a GraphicsPipelineSetCache,
     pub dynamic: &'a DynamicState,
     pub helper_resources: &'a HelperResources,
+    pub view_swapchain: &'a ViewSwapchain,
 }
 
 #[derive(Clone)]
@@ -712,8 +714,8 @@ impl Model {
 
                     if let (AlphaMode::Blend, 3) = (alpha_mode, subpass) {
                         incomplete_descriptor_sets.descriptor_set_blend
-                            = Some(pipeline.layout_dependent_resources.descriptor_set_blend.as_ref()
-                                   .unwrap().clone());
+                            = Some(pipeline.layout_dependent_resources.descriptor_sets_blend.as_ref()
+                                   .unwrap()[draw_context.view_swapchain.index].as_ref().unwrap().clone());
                     }
 
                     let draw_call = self.create_draw_call_primitive(

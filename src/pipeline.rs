@@ -48,6 +48,8 @@ use gltf::material::Material;
 use gltf::mesh::Primitive;
 use failure::Error;
 use fnv::FnvBuildHasher;
+use crate::ViewSwapchain;
+use crate::ViewSwapchains;
 use crate::vertex::{GltfVertexBufferDefinition, VertexAttributePropertiesSet};
 use crate::model::{FramebufferWithClearValues, HelperResources};
 use crate::model::resource::{InitializationTask, UninitializedResource, SimpleUninitializedResource};
@@ -138,19 +140,23 @@ impl GraphicsPipelineProperties {
 }
 
 #[derive(Clone)]
+pub struct SwapchainDependentResources {
+    pub depth_image: Arc<dyn ImageViewAccess + Send + Sync>,
+    pub blend_accumulation_image: Arc<dyn ImageViewAccess + Send + Sync>,
+    pub blend_revealage_image: Arc<dyn ImageViewAccess + Send + Sync>,
+}
+
+#[derive(Clone)]
 pub struct SharedGltfGraphicsPipelineResources {
     device: Arc<Device>,
     pub helper_resources: HelperResources,
     pub scene_ubo_buffer: StagedBuffer<SceneUBO>,
     pub default_material_ubo_buffer: Arc<ImmutableBuffer<MaterialUBO>>,
-    // TODO: Probaby add another type to group dimensions dependent resources into a single Option
-    pub depth_image: Option<Arc<dyn ImageViewAccess + Send + Sync>>,
-    pub blend_accumulation_image: Option<Arc<dyn ImageViewAccess + Send + Sync>>,
-    pub blend_revealage_image: Option<Arc<dyn ImageViewAccess + Send + Sync>>,
+    pub swapchain_dependent_resources: Vec<Option<SwapchainDependentResources>>,
 }
 
 impl SharedGltfGraphicsPipelineResources {
-    pub fn new(device: Arc<Device>, helper_resources: HelperResources, queue_family: QueueFamily)
+    pub fn new(device: Arc<Device>, helper_resources: HelperResources, queue_family: QueueFamily, view_swapchains: &ViewSwapchains)
             -> Result<SimpleUninitializedResource<Self>, Error> {
         let scene_ubo = SceneUBO::default();
         let scene_ubo_buffer = StagedBuffer::from_data(
@@ -177,49 +183,24 @@ impl SharedGltfGraphicsPipelineResources {
             helper_resources,
             scene_ubo_buffer,
             default_material_ubo_buffer: device_default_material_ubo_buffer,
-            depth_image: None,
-            blend_accumulation_image: None,
-            blend_revealage_image: None,
+            swapchain_dependent_resources: vec![None; view_swapchains.inner.len()],
         }, tasks))
     }
 
     pub fn construct_swapchain_framebuffers(&mut self,
                                             render_pass: Arc<dyn RenderPassAbstract + Send + Sync>,
-                                            swapchain_images: &[Arc<dyn SwapchainImage>])
-            -> Vec<Vec<Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>>> {
+                                            view_swapchain: &ViewSwapchain)
+            -> Vec<Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>> {
         let render_pass = &render_pass;
-        swapchain_images.iter().map(|multilayer_image| {
-            let layers = match ImageAccess::dimensions(&multilayer_image) {
-                ImageDimensions::Dim2D { .. } => 1,
-                ImageDimensions::Dim2DArray { array_layers, .. } => array_layers.get(),
-                _ => panic!("Unsupported swapchain dimensions."),
-            } as usize;
-            let mut result = Vec::with_capacity(layers);
-
-            println!("constructing with layers: {}", layers);
-
-            for layer in 0..layers {
-                let image = ImageView::new_attachment::<Format>(
-                    multilayer_image.clone(),
-                    None,
-                    Some(ImageSubresourceRange {
-                        array_layers: crate::NONZERO_ONE,
-                        array_layers_offset: layer as u32,
-                        mipmap_levels: multilayer_image.mipmap_levels(),
-                        mipmap_levels_offset: 0,
-                    }),
-                ).unwrap();
-                result.push(
-                    Arc::new(Framebuffer::start(render_pass.clone())
-                             .add(image).unwrap()
-                             .add(self.depth_image.as_ref().unwrap().clone()).unwrap()
-                             .add(self.blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
-                             .add(self.blend_revealage_image.as_ref().unwrap().clone()).unwrap()
-                             .build().unwrap()) as Arc<dyn FramebufferWithClearValues<_>>
-                );
-            }
-
-            result
+        let resources = self.swapchain_dependent_resources[view_swapchain.index]
+            .as_ref().expect("Framebuffer swapchain dependent images not initialized.");
+        view_swapchain.swapchain.images().iter().map(|image| {
+            Arc::new(Framebuffer::start(render_pass.clone())
+                     .add(image.clone()).unwrap()
+                     .add(resources.depth_image.clone()).unwrap()
+                     .add(resources.blend_accumulation_image.clone()).unwrap()
+                     .add(resources.blend_revealage_image.clone()).unwrap()
+                     .build().unwrap()) as Arc<dyn FramebufferWithClearValues<_>>
         }).collect()
     }
 
@@ -256,35 +237,41 @@ impl SharedGltfGraphicsPipelineResources {
         )?))
     }
 
-    pub fn reconstruct_dimensions_dependent_images(&mut self, dimensions: [NonZeroU32; 2]) -> Result<(), Error> {
-        self.depth_image = Some(self.construct_attachment_image_view(
-            dimensions.clone(),
-            D32Sfloat,
-            ImageUsage {
-                depth_stencil_attachment: true,
-                .. ImageUsage::none()
-            },
-        )?);
-        self.blend_accumulation_image = Some(self.construct_attachment_image_view(
-            dimensions.clone(),
-            R32G32B32A32Sfloat,
-            ImageUsage {
-                color_attachment: true,
-                input_attachment: true,
-                transient_attachment: true,
-                .. ImageUsage::none()
-            }
-        )?);
-        self.blend_revealage_image = Some(self.construct_attachment_image_view(
-            dimensions.clone(),
-            R32G32B32A32Sfloat, //FIXME
-            ImageUsage {
-                color_attachment: true,
-                input_attachment: true,
-                transient_attachment: true,
-                .. ImageUsage::none()
-            },
-        )?);
+    pub fn reconstruct_dimensions_dependent_images(
+        &mut self,
+        view_swapchain: &ViewSwapchain,
+    ) -> Result<(), Error> {
+        let dimensions = view_swapchain.swapchain.dimensions();
+        self.swapchain_dependent_resources[view_swapchain.index] = Some(SwapchainDependentResources {
+            depth_image: self.construct_attachment_image_view(
+                dimensions.clone(),
+                D32Sfloat,
+                ImageUsage {
+                    depth_stencil_attachment: true,
+                    .. ImageUsage::none()
+                },
+            )?,
+            blend_accumulation_image: self.construct_attachment_image_view(
+                dimensions.clone(),
+                R32G32B32A32Sfloat,
+                ImageUsage {
+                    color_attachment: true,
+                    input_attachment: true,
+                    transient_attachment: true,
+                    .. ImageUsage::none()
+                }
+            )?,
+            blend_revealage_image: self.construct_attachment_image_view(
+                dimensions.clone(),
+                R32G32B32A32Sfloat, //FIXME
+                ImageUsage {
+                    color_attachment: true,
+                    input_attachment: true,
+                    transient_attachment: true,
+                    .. ImageUsage::none()
+                },
+            )?,
+        });
 
         Ok(())
     }
@@ -363,7 +350,7 @@ pub struct GltfPipelineLayoutDependentResources {
     pub layout: Arc<PipelineLayout>,
     pub descriptor_set_scene: Arc<dyn DescriptorSet + Send + Sync>,
     pub descriptor_set_pool_instance: Arc<Mutex<FixedSizeDescriptorSetsPool>>,
-    pub descriptor_set_blend: Option<Arc<dyn DescriptorSet + Send + Sync>>,
+    pub descriptor_sets_blend: Option<Vec<Option<Arc<dyn DescriptorSet + Send + Sync>>>>,
     pub default_material_descriptor_set: Arc<dyn DescriptorSet + Send + Sync>,
 }
 
@@ -378,19 +365,6 @@ impl GltfPipelineLayoutDependentResources {
         let descriptor_set_pool_instance = Arc::new(Mutex::new(
             FixedSizeDescriptorSetsPool::new(layout.clone(), 1)
         ));
-        let descriptor_set_blend = layout.descriptor_set_layout(4).map(|_|
-            Arc::new(PersistentDescriptorSet::start(layout.clone(), 4)
-                .add_image(shared_resources.blend_accumulation_image.as_ref()
-                    .map(|image| image.clone() as Arc<dyn ImageViewAccess + Send + Sync>)
-                    .unwrap_or_else(|| {
-                        shared_resources.helper_resources.empty_image.clone()
-                    })).unwrap()
-                .add_image(shared_resources.blend_revealage_image.as_ref()
-                    .map(|image| image.clone() as Arc<dyn ImageViewAccess + Send + Sync>)
-                    .unwrap_or_else(|| {
-                        shared_resources.helper_resources.empty_image.clone()
-                    })).unwrap()
-                .build().unwrap()) as Arc<dyn DescriptorSet + Send + Sync>);
         let default_material_descriptor_set: Arc<dyn DescriptorSet + Send + Sync> = Arc::new(
             PersistentDescriptorSet::start(layout.clone(), 3)
                 .add_buffer(shared_resources.default_material_ubo_buffer.clone()).unwrap()
@@ -411,22 +385,32 @@ impl GltfPipelineLayoutDependentResources {
             layout,
             descriptor_set_scene,
             descriptor_set_pool_instance,
-            descriptor_set_blend,
+            descriptor_sets_blend: None, // late init with `reconstruct_descriptor_sets`
             default_material_descriptor_set,
         }
     }
 
-    pub fn reconstruct_descriptor_sets(&mut self, shared_resources: &SharedGltfGraphicsPipelineResources) {
+    pub fn reconstruct_descriptor_sets(&mut self, shared_resources: &SharedGltfGraphicsPipelineResources, view_swapchains: &ViewSwapchains, view_swapchain: &ViewSwapchain) {
         self.descriptor_set_scene = Arc::new(
             PersistentDescriptorSet::start(self.layout.clone(), 0)
                 .add_buffer(shared_resources.scene_ubo_buffer.device_buffer().clone()).unwrap()
                 .build().unwrap()
         );
-        self.descriptor_set_blend = self.descriptor_set_blend.as_ref().map(|_|
+
+        if self.descriptor_sets_blend.is_none() {
+            self.descriptor_sets_blend = Some(vec![None; view_swapchains.inner.len()]);
+        }
+
+        self.descriptor_sets_blend.as_mut().unwrap()[view_swapchain.index] = self.layout.descriptor_set_layout(4).map(|_| {
+            let swapchain_resources = shared_resources
+                .swapchain_dependent_resources[view_swapchain.index]
+                .as_ref().expect("Swapchain dependent resources not initialized.");
+
             Arc::new(PersistentDescriptorSet::start(self.layout.clone(), 4)
-                .add_image(shared_resources.blend_accumulation_image.as_ref().unwrap().clone()).unwrap()
-                .add_image(shared_resources.blend_revealage_image.as_ref().unwrap().clone()).unwrap()
-                .build().unwrap()) as Arc<dyn DescriptorSet + Send + Sync>);
+                .add_image(swapchain_resources.blend_accumulation_image.clone()).unwrap()
+                .add_image(swapchain_resources.blend_revealage_image.clone()).unwrap()
+                .build().unwrap()) as Arc<dyn DescriptorSet + Send + Sync>
+        });
     }
 }
 
@@ -463,7 +447,7 @@ pub struct GraphicsPipelineSetCache {
     //                                              GltfPipelineLayoutDependentResources
     //                                          >>>,
     pub device: Arc<Device>,
-    pub render_pass: Arc<RenderPassAbstract + Send + Sync>,
+    pub render_pass: Arc<dyn RenderPassAbstract + Send + Sync>,
     pub vertex_shader: gltf_vert::Shader, // Stored here to avoid unnecessary reloading
 }
 
@@ -479,7 +463,7 @@ macro_rules! cache_layout {
                 .build($cache.device.clone()).unwrap();
             let resources = GltfPipelineLayoutDependentResources::from(
                 layout.clone(),
-                &$cache.shared_resources
+                &$cache.shared_resources,
             );
 
             resources_map.insert(layout_desc, resources.clone());
@@ -497,7 +481,7 @@ macro_rules! cache_layout {
 }
 
 macro_rules! construct_pipeline_opaque {
-    ($cache:expr, $graphics_pipeline_builder:expr, $shared_resources:expr) => {{
+    ($cache:expr, $graphics_pipeline_builder:expr) => {{
         let fs = gltf_opaque_frag::Shader::load($cache.device.clone()).expect("Failed to create shader module.");
         let builder = $graphics_pipeline_builder.clone()
             .depth_stencil(DepthStencil::simple_depth_test())
@@ -513,7 +497,7 @@ macro_rules! construct_pipeline_opaque {
 }
 
 macro_rules! construct_pipeline_mask {
-    ($cache:expr, $graphics_pipeline_builder:expr, $shared_resources:expr) => {{
+    ($cache:expr, $graphics_pipeline_builder:expr) => {{
         let fs = gltf_mask_frag::Shader::load($cache.device.clone()).expect("Failed to create shader module.");
         let builder = $graphics_pipeline_builder.clone()
             .depth_stencil(DepthStencil::simple_depth_test())
@@ -529,7 +513,7 @@ macro_rules! construct_pipeline_mask {
 }
 
 macro_rules! construct_pipeline_blend_preprocess {
-    ($cache:expr, $graphics_pipeline_builder:expr, $shared_resources:expr) => {{
+    ($cache:expr, $graphics_pipeline_builder:expr) => {{
         let fs = gltf_blend_preprocess_frag::Shader::load($cache.device.clone()).expect("Failed to create shader module.");
         let builder = $graphics_pipeline_builder.clone()
             .depth_stencil(DepthStencil {
@@ -579,7 +563,7 @@ macro_rules! construct_pipeline_blend_preprocess {
 }
 
 macro_rules! construct_pipeline_blend_finalize {
-    ($cache:expr, $graphics_pipeline_builder:expr, $shared_resources:expr) => {{
+    ($cache:expr, $graphics_pipeline_builder:expr) => {{
         let fs = gltf_blend_finalize_frag::Shader::load($cache.device.clone()).expect("Failed to create shader module.");
         let builder = $graphics_pipeline_builder.clone()
             .depth_stencil(DepthStencil {
@@ -616,9 +600,9 @@ macro_rules! construct_pipeline_blend_finalize {
 }
 
 impl GraphicsPipelineSetCache {
-    pub fn create(device: Arc<Device>, swapchain: &dyn Swapchain, helper_resources: HelperResources, queue_family: QueueFamily) -> impl UninitializedResource<Self> {
-        let swapchain_format = swapchain.format();
-        SharedGltfGraphicsPipelineResources::new(device.clone(), helper_resources, queue_family)
+    pub fn create(device: Arc<Device>, view_swapchains: &ViewSwapchains, helper_resources: HelperResources, queue_family: QueueFamily) -> impl UninitializedResource<Self> {
+        let swapchain_format = view_swapchains.format;
+        SharedGltfGraphicsPipelineResources::new(device.clone(), helper_resources, queue_family, view_swapchains)
             .unwrap()
             .map(move |shared_resources| {
                 let result = GraphicsPipelineSetCache {
@@ -640,7 +624,7 @@ impl GraphicsPipelineSetCache {
             })
     }
 
-    fn create_render_pass(device: &Arc<Device>, swapchain_format: Format) -> Arc<RenderPassAbstract + Send + Sync> {
+    fn create_render_pass(device: &Arc<Device>, swapchain_format: Format) -> Arc<dyn RenderPassAbstract + Send + Sync> {
         Arc::new(ordered_passes_renderpass! {
             device.clone(),
             attachments: {
@@ -762,10 +746,10 @@ impl GraphicsPipelineSetCache {
             .viewports_dynamic_scissors_irrelevant(1);
 
         let pipeline_set = GraphicsPipelineSet {
-            opaque: construct_pipeline_opaque!(self, builder, &self.shared_resources),
-            mask: construct_pipeline_mask!(self, builder, &self.shared_resources),
-            blend_preprocess: construct_pipeline_blend_preprocess!(self, builder, &self.shared_resources),
-            blend_finalize: construct_pipeline_blend_finalize!(self, builder, &self.shared_resources),
+            opaque: construct_pipeline_opaque!(self, builder),
+            mask: construct_pipeline_mask!(self, builder),
+            blend_preprocess: construct_pipeline_blend_preprocess!(self, builder),
+            blend_finalize: construct_pipeline_blend_finalize!(self, builder),
         };
 
         pipeline_map.insert(properties.clone(), pipeline_set.clone());

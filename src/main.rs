@@ -1,7 +1,7 @@
 //! TODO:
+//! * Window/HMD event handling separation
 //! * Use secondary command buffers to parallelize their creation
 //! * Mip Mapping
-//! * VR rendering
 //! * Instancing
 //! * Animations
 //! * Morph primitives
@@ -676,16 +676,8 @@ impl Ammolite {
 
                     let secs_elapsed = ((elapsed.as_secs() as f64) + (elapsed.as_nanos() as f64) / (1_000_000_000f64)) as f32;
 
-                    let layers = match ImageAccess::dimensions(&multilayer_image) {
-                        ImageDimensions::Dim2D { .. } => 1,
-                        ImageDimensions::Dim2DArray { array_layers, .. } => array_layers.get(),
-                        _ => panic!("Unsupported swapchain dimensions."),
-                    } as usize;
-
                     self.synchronization = Some(Box::new(self.synchronization.take().unwrap()
                         .join(acquire_future)));
-
-                    println!("Layers: {}", layers);
 
                     let scene_ubo = SceneUBO::new(
                         secs_elapsed,
@@ -756,6 +748,12 @@ impl Ammolite {
                     break;
                 }
             }
+
+            for view_swapchain in &self.view_swapchains.inner[..] {
+                let mut view_swapchain = view_swapchain.write().unwrap();
+
+                view_swapchain.swapchain.finish_rendering();
+            }
         }
 
         // TODO: do not reallocate the vec every time render is called
@@ -791,8 +789,6 @@ impl Ammolite {
             composition_layers
         };
 
-        // println!("END");
-
         self.xr_frame_stream.end(
             state.predicted_display_time,
             openxr::EnvironmentBlendMode::OPAQUE,
@@ -800,14 +796,6 @@ impl Ammolite {
                 .space(&self.xr_reference_space_stage)
                 .views(&composition_layers[..])]
         ).unwrap();
-
-        // println!("POST END");
-
-        for view_swapchain in &self.view_swapchains.inner[..] {
-            let mut view_swapchain = view_swapchain.write().unwrap();
-
-            view_swapchain.swapchain.finish_rendering();
-        }
     }
 
     fn render_instances<'a>(&mut self,
@@ -827,7 +815,10 @@ impl Ammolite {
             line_width: None,
             viewports: Some(vec![Viewport {
                 origin: [0.0, 0.0],
-                dimensions: [self.window_dimensions[0].get() as f32, self.window_dimensions[1].get() as f32],
+                dimensions: {
+                    let dimensions = view_swapchain.swapchain.dimensions();
+                    [dimensions[0].get() as f32, dimensions[1].get() as f32]
+                },
                 depth_range: 0.0 .. 1.0,
             }]),
             scissors: None,

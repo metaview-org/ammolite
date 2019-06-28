@@ -61,6 +61,9 @@ pub trait Swapchain: DeviceOwned {
     fn finish_rendering(&mut self) {}
 }
 
+/**
+ * A swapchain bound to a regular desktop window `W`.
+ */
 pub struct VkSwapchain<W: 'static> {
     vk_swapchain: Arc<swapchain::Swapchain<W>>,
     images: Vec<Arc<dyn SwapchainImage>>,
@@ -110,6 +113,9 @@ unsafe impl<W> DeviceOwned for VkSwapchain<W> {
     }
 }
 
+/**
+ * A swapchain bound to an OpenXR device screen (e.g. the screen for the left eye).
+ */
 pub struct XrSwapchain {
     vk_device: Arc<Device>,
     inner: openxr::Swapchain<openxr::Vulkan>,

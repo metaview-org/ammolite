@@ -129,7 +129,7 @@ pub struct XrSwapchain {
 impl XrSwapchain {
     pub fn new<F: FormatDesc + Clone>(
         vk_device: Arc<Device>,
-        xr_session: Arc<XrVkSession>,
+        xr_session: XrVkSession,
         dimensions: [NonZeroU32; 2],
         layers: NonZeroU32,
         format: F,

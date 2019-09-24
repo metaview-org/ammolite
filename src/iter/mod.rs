@@ -4,6 +4,7 @@ use generic_array::{GenericArray, ArrayLength};
 use safe_transmute::PodTransmutable;
 use gltf::accessor::Accessor;
 
+#[derive(Clone)]
 pub struct ArrayIterator<T: Clone, U: ArrayLength<T>> {
     next_index: usize,
     data: GenericArray<T, U>,

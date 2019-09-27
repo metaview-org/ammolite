@@ -20,6 +20,7 @@ pub mod shaders;
 pub mod swapchain;
 pub mod vertex;
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::path::Path;
@@ -27,11 +28,10 @@ use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 use std::time::{Instant, Duration};
 use std::rc::Rc;
-use std::cell::RefCell;
+use std::cell::{RefCell, Ref, RefMut};
 use std::ffi::{self, CString};
 use core::num::NonZeroU32;
 use arrayvec::ArrayVec;
-use openxr::Instance as XrInstance;
 use vulkano;
 use vulkano::VulkanObject;
 use vulkano::swapchain::ColorSpace;
@@ -49,6 +49,7 @@ use vulkano::swapchain::{PresentMode, SurfaceTransform, AcquireError, SwapchainC
 use vulkano_win::VkSurfaceBuild;
 use winit::{ElementState, MouseButton, Event, DeviceEvent, WindowEvent, KeyboardInput, VirtualKeyCode, EventsLoop, WindowBuilder, Window};
 use winit::dpi::PhysicalSize;
+use smallvec::SmallVec;
 
 use crate::math::matrix::*;
 use crate::math::vector::*;
@@ -66,6 +67,7 @@ use crate::iter::ArrayIterator;
 use crate::swapchain::{Swapchain, VkSwapchain, XrSwapchain};
 
 pub use crate::shaders::gltf_opaque_frag::ty::*;
+pub use openxr::Instance as XrInstance;
 
 pub type XrVkSession = openxr::Session<openxr::Vulkan>;
 pub type XrVkFrameStream = openxr::FrameStream<openxr::Vulkan>;
@@ -156,97 +158,129 @@ pub struct WorldSpaceModel<'a> {
     pub matrix: Mat4,
 }
 
-pub struct ViewSwapchain<S: Swapchain> {
-    pub swapchain: S,
-    pub index: usize,
-    pub medium_index: usize,
-    pub index_within_medium: usize,
+pub struct ViewSwapchain {
+    pub swapchain: Box<dyn Swapchain>,
+    // pub index: usize,
+    // pub medium_index: usize,
+    // pub index_within_medium: usize,
     /// Swapchain images, those that get presented in a window or in an HMD
     pub framebuffers: Option<Vec<Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>>>,
     pub recreate: bool, // TODO: consider representing as Option<ViewSwapchain>
 }
 
-impl<S: Swapchain> ViewSwapchain<S> {
+impl ViewSwapchain {
     fn new(
-        swapchain: S,
-        index: usize,
-        medium_index: usize,
-        index_within_medium: usize
+        swapchain: Box<dyn Swapchain>,
+        // index: usize,
+        // medium_index: usize,
+        // index_within_medium: usize
     ) -> Self {
         Self {
             swapchain,
-            index,
-            medium_index,
-            index_within_medium,
+            // index,
+            // medium_index,
+            // index_within_medium,
             framebuffers: None,
             recreate: false,
         }
     }
 }
 
-pub struct ViewSwapchains {
-    pub inner: Vec<Arc<RwLock<ViewSwapchain>>>,
-    pub format: Format,
+// pub struct ViewSwapchains {
+//     pub inner: Vec<Arc<RwLock<ViewSwapchain>>>,
+//     pub format: Format,
+// }
+
+// impl<'a, T> From<T> for ViewSwapchains
+//         where T: IntoIterator<Item=&'a dyn Medium> {
+//     fn from(into_iter: T) -> Self {
+//         let inner: Vec<Arc<RwLock<ViewSwapchain>>> = {
+//             let mut inner = Vec::new();
+//             let mut index = 0;
+
+//             for (medium_index, medium) in into_iter.into_iter().enumerate() {
+//                 for (index_within_medium, swapchain) in medium.swapchains().iter().enumerate() {
+//                     inner.push(Arc::new(RwLock::new(ViewSwapchain::new(
+//                         swapchain,
+//                         index,
+//                         medium_index,
+//                         index_within_medium,
+//                     ))));
+//                 }
+
+//                 index += 1;
+//             }
+
+//             inner
+//         };
+
+//         let format = {
+//             let format = inner[0].read().unwrap().swapchain.format();
+
+//             for view_swapchain in inner.iter().skip(1) {
+//                 assert_eq!(format, view_swapchain.read().unwrap().swapchain.format(), "All swapchains must use the same format.");
+//             }
+
+//             format
+//         };
+
+//         ViewSwapchains { inner, format }
+//     }
+// }
+
+pub enum HandleEventsCommand {
+    Quit,
+    CenterCursor,
+    RecreateSwapchains,
 }
 
-impl<'a, T> From<T> for ViewSwapchains
-        where T: IntoIterator<Item=&'a dyn Medium> {
-    fn from(into_iter: T) -> Self {
-        let inner: Vec<Arc<RwLock<ViewSwapchain>>> = {
-            let mut inner = Vec::new();
-            let mut index = 0;
-
-            for (medium_index, medium) in into_iter.into_iter().enumerate() {
-                for (index_within_medium, swapchain) in medium.swapchains().iter().enumerate() {
-                    inner.push(Arc::new(RwLock::new(ViewSwapchain::new(
-                        swapchain,
-                        index,
-                        medium_index,
-                        index_within_medium,
-                    ))));
-                }
-
-                index += 1;
-            }
-
-            inner
-        };
-
-        let format = {
-            let format = inner[0].read().unwrap().swapchain.format();
-
-            for view_swapchain in inner.iter().skip(1) {
-                assert_eq!(format, view_swapchain.read().unwrap().swapchain.format(), "All swapchains must use the same format.");
-            }
-
-            format
-        };
-
-        ViewSwapchains { inner, format }
-    }
+pub trait MediumData: Sized {
+    fn handle_events(&mut self) -> SmallVec<[HandleEventsCommand; 8]>;
 }
 
 /**
  * An internal type to represent a viewing medium, e.g. a Window or a stereo HMD.
  */
-pub trait Medium {
+pub trait Medium<MD: MediumData> {
     // type Event;
-    fn swapchains(&self) -> &[Box<dyn Swapchain>];
+    fn swapchains(&self) -> &[ViewSwapchain];
+    fn swapchains_mut(&mut self) -> &mut [ViewSwapchain];
+    fn data(&self) -> &MD;
+    fn data_mut(&mut self) -> &mut MD;
+    // fn swapchains(&self) -> &[Box<dyn Swapchain>];
     // fn poll_events<T>(&mut self, event_handler: T) where T: FnMut(Self::Event);
 }
 
-pub struct WindowMedium {
+pub struct WindowMedium<MD: MediumData> {
+    pub data: MD,
     pub window: Arc<Surface<Window>>,
     // pub window_events_loop: Rc<RefCell<EventsLoop>>,
-    swapchain: Box<dyn Swapchain>,
+    swapchain: ViewSwapchain,
+    // swapchain: Box<dyn Swapchain>,
 }
 
-impl Medium for WindowMedium {
+impl<MD: MediumData> Medium<MD> for WindowMedium<MD> {
     // type Event = winit::Event;
 
-    fn swapchains(&self) -> &[Box<dyn Swapchain>] {
+    fn swapchains(&self) -> &[ViewSwapchain] {
         std::slice::from_ref(&self.swapchain)
     }
+
+    fn swapchains_mut(&mut self) -> &mut [ViewSwapchain] {
+        std::slice::from_mut(&mut self.swapchain)
+    }
+
+    fn data(&self) -> &MD {
+        &self.data
+    }
+
+    fn data_mut(&mut self) -> &mut MD {
+        &mut self.data
+    }
+
+    // fn swapchains(&self) -> &[Box<dyn Swapchain>] {
+    //     std::slice::from_ref(&self.swapchain)
+    // }
 
     // fn poll_events<T>(&mut self, event_handler: T) where T: FnMut(Self::Event) {
     //     self.window_events_loop.clone().as_ref().borrow_mut().poll_events(|event| {
@@ -256,22 +290,40 @@ impl Medium for WindowMedium {
     // }
 }
 
-pub struct XrMedium {
+pub struct XrMedium<MD: MediumData> {
+    pub data: MD,
     // TODO: Remove Arc
     pub xr_instance: Arc<XrInstance>,
     pub xr_session: XrVkSession,
     pub xr_reference_space_stage: openxr::Space,
-    pub xr_frame_stream: XrVkFrameStream,
+    pub xr_frame_stream: RefCell<XrVkFrameStream>,
     // HMD devices typically have 2 screens, one for each eye
-    swapchains: ArrayVec<[Box<dyn Swapchain>; 2]>,
+    swapchains: ArrayVec<[ViewSwapchain; 2]>,
+    // swapchains: ArrayVec<[Box<dyn Swapchain>; 2]>,
 }
 
-impl<'a> Medium for XrMedium {
+impl<'a, MD: MediumData> Medium<MD> for XrMedium<MD> {
     // type Event = openxr::Event<'a>;
 
-    fn swapchains(&self) -> &[Box<dyn Swapchain>] {
+    fn swapchains(&self) -> &[ViewSwapchain] {
         &self.swapchains[..]
     }
+
+    fn swapchains_mut(&mut self) -> &mut [ViewSwapchain] {
+        &mut self.swapchains[..]
+    }
+
+    fn data(&self) -> &MD {
+        &self.data
+    }
+
+    fn data_mut(&mut self) -> &mut MD {
+        &mut self.data
+    }
+
+    // fn swapchains(&self) -> &[Box<dyn Swapchain>] {
+    //     &self.swapchains[..]
+    // }
 
     // fn poll_events<T>(&mut self, event_handler: T) where T: FnMut(Self::Event) {
     //     let mut event_data_buffer = openxr::EventDataBuffer::new();
@@ -313,26 +365,26 @@ macro_rules! type_level_enum {
 type_level_enum!(OpenXrInitialized; True, False);
 type_level_enum!(VulkanInitialized; True, False);
 
-pub struct XrContext {
+pub struct XrContext<MD: MediumData> {
     // TODO: Remove Arc
     instance: Arc<XrInstance>,
     system: openxr::SystemId,
-    stereo_hmd_mediums: ArrayVec<[XrMedium; 1]>,
+    stereo_hmd_mediums: ArrayVec<[XrMedium<MD>; 1]>,
 }
 
-pub struct AmmoliteBuilder<'a, A: OpenXrInitializedTrait, B: VulkanInitializedTrait> {
+pub struct AmmoliteBuilder<'a, MD: MediumData, A: OpenXrInitializedTrait, B: VulkanInitializedTrait> {
     application_name: &'a str,
     application_version: (u16, u16, u16),
-    xr: Option<XrContext>,
+    xr: Option<XrContext<MD>>,
     // TODO: Transform into a single `vk: Option<VkContext>`
     vk_instance: Option<Arc<VkInstance>>,
     vk_device: Option<Arc<Device>>,
     vk_queues: Option<ChosenQueues>,
-    window_mediums: ArrayVec<[WindowMedium; 1]>,
+    window_mediums: ArrayVec<[WindowMedium<MD>; 1]>,
     _marker: PhantomData<(A, B)>,
 }
 
-impl<'a> AmmoliteBuilder<'a, OpenXrInitialized::False, VulkanInitialized::False> {
+impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::False, VulkanInitialized::False> {
     pub fn new(
         application_name: &'a str,
         application_version: (u16, u16, u16),
@@ -351,14 +403,14 @@ impl<'a> AmmoliteBuilder<'a, OpenXrInitialized::False, VulkanInitialized::False>
 }
 
 // TODO: refactor to use `Self` and remove generic parameters?
-impl<'a, A: OpenXrInitializedTrait, B: VulkanInitializedTrait> AmmoliteBuilder<'a, A, B> {
+impl<'a, MD: MediumData, A: OpenXrInitializedTrait, B: VulkanInitializedTrait> AmmoliteBuilder<'a, MD, A, B> {
     /**
      * A helper function to be only used within the builder pattern implementation
      */
     unsafe fn coerce<
         OA: OpenXrInitializedTrait,
         OB: VulkanInitializedTrait,
-    >(self) -> AmmoliteBuilder<'a, OA, OB> {
+    >(self) -> AmmoliteBuilder<'a, MD, OA, OB> {
         AmmoliteBuilder {
             application_name: self.application_name,
             application_version: self.application_version,
@@ -372,7 +424,7 @@ impl<'a, A: OpenXrInitializedTrait, B: VulkanInitializedTrait> AmmoliteBuilder<'
     }
 }
 
-impl<'a, B: VulkanInitializedTrait> AmmoliteBuilder<'a, OpenXrInitialized::False, B> {
+impl<'a, MD: MediumData, B: VulkanInitializedTrait> AmmoliteBuilder<'a, MD, OpenXrInitialized::False, B> {
     // FIXME: Should return a Result and fail modifying the builder, if the
     //        OpenXR instance could not have been created.
     //
@@ -380,9 +432,7 @@ impl<'a, B: VulkanInitializedTrait> AmmoliteBuilder<'a, OpenXrInitialized::False
     // Result<AmmoliteBuilder<'a, OpenXrInitialized::True, B>, (Error, AmmoliteBuilder<'a, OpenXrInitialized::False, B>)>
     pub fn initialize_openxr(
         self,
-        application_name: impl AsRef<str>,
-        application_version: impl Into<openxr::Version>,
-    ) -> AmmoliteBuilder<'a, OpenXrInitialized::True, B> {
+    ) -> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, B> {
         let entry = openxr::Entry::linked();
         let available_extensions = entry.enumerate_extensions().unwrap(); // FIXME: unwrap
 
@@ -420,8 +470,8 @@ impl<'a, B: VulkanInitializedTrait> AmmoliteBuilder<'a, OpenXrInitialized::False
         let app_info = openxr::ApplicationInfo {
             engine_name: env!("CARGO_PKG_NAME"),
             engine_version: engine_version.into_raw(),
-            application_name: application_name.as_ref(),
-            application_version: application_version.into().into_raw(),
+            application_name: self.application_name.as_ref(),
+            application_version: openxr::Version::from(self.application_version).into_raw(),
         };
 
         let xr_instance = Arc::new(entry.create_instance(&app_info, &used_extensions).unwrap());
@@ -438,15 +488,12 @@ impl<'a, B: VulkanInitializedTrait> AmmoliteBuilder<'a, OpenXrInitialized::False
     }
 }
 
-impl<'a> AmmoliteBuilder<'a, OpenXrInitialized::True, VulkanInitialized::False> {
+impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, VulkanInitialized::False> {
     pub fn initialize_vulkan<'b, 'c>(
-        self,
-        application_name: impl AsRef<str>,
-        application_version: impl Into<vulkano::instance::Version>,
-        xr_instance: &'b Arc<XrInstance>,
-        xr_system: openxr::SystemId,
+        mut self,
         window_builders: impl IntoIterator<Item=(&'c EventsLoop, WindowBuilder)>,
-    ) -> AmmoliteBuilder<'a, OpenXrInitialized::True, VulkanInitialized::True> {
+    ) -> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, VulkanInitialized::True> {
+        let xr = self.xr.take().unwrap();
         let app_info = {
             let engine_name = env!("CARGO_PKG_NAME");
             let engine_version = vulkano::instance::Version {
@@ -456,14 +503,14 @@ impl<'a> AmmoliteBuilder<'a, OpenXrInitialized::True, VulkanInitialized::False> 
             };
 
             ApplicationInfo {
-                application_name: Some(application_name.as_ref().into()),
-                application_version: Some(application_version.into()),
+                application_name: Some(Cow::Borrowed(self.application_name.as_ref())),
+                application_version: Some(self.application_version.into()),
                 engine_name: Some(engine_name.into()),
                 engine_version: Some(engine_version.into()),
             }
         };
         let win_extensions = vulkano_win::required_extensions();
-        let xr_extensions: Vec<_> = xr_instance.vulkan_instance_extensions(xr_system)
+        let xr_extensions: Vec<_> = xr.instance.vulkan_instance_extensions(xr.system)
             .unwrap().split_ascii_whitespace()
             .map(|str_slice| CString::new(str_slice).unwrap()).collect();
         let raw_extensions = [/*CString::new("VK_EXT_debug_marker").unwrap()*/];
@@ -477,7 +524,7 @@ impl<'a> AmmoliteBuilder<'a, OpenXrInitialized::True, VulkanInitialized::False> 
         let openxr::vulkan::Requirements {
             min_api_version_supported: min_api_version,
             max_api_version_supported: max_api_version,
-        } = xr_instance.graphics_requirements::<openxr::Vulkan>(xr_system).unwrap();
+        } = xr.instance.graphics_requirements::<openxr::Vulkan>(xr.system).unwrap();
         let min_api_version = min_api_version.into_raw();
         let max_api_version = max_api_version.into_raw();
         // TODO: Better device selection & SLI support
@@ -579,7 +626,7 @@ impl<'a> AmmoliteBuilder<'a, OpenXrInitialized::True, VulkanInitialized::False> 
                 // ext_debug_marker: true,
                 .. DeviceExtensions::none()
             };
-            let xr_extensions: Vec<_> = xr_instance.vulkan_device_extensions(xr_system)
+            let xr_extensions: Vec<_> = xr.instance.vulkan_device_extensions(xr.system)
                 .unwrap().split_ascii_whitespace()
                 .map(|str_slice| CString::new(str_slice).unwrap()).collect();
             let raw_device_extensions = [/*CString::new("VK_EXT_debug_utils").unwrap()*/];
@@ -612,15 +659,17 @@ impl<'a> AmmoliteBuilder<'a, OpenXrInitialized::True, VulkanInitialized::False> 
             vk_instance: Some(vk_instance),
             vk_device: Some(vk_device),
             vk_queues: Some(vk_queues),
+            xr: Some(xr),
             .. unsafe { self.coerce() }
         }
     }
 }
 
-impl<'a, A: OpenXrInitializedTrait> AmmoliteBuilder<'a, A, VulkanInitialized::True> {
+impl<'a, MD: MediumData, A: OpenXrInitializedTrait> AmmoliteBuilder<'a, MD, A, VulkanInitialized::True> {
     pub fn add_medium_window(
         mut self,
         window: Arc<Surface<Window>>,
+        data: MD,
     ) -> Self {
         let mut dimensions: [NonZeroU32; 2] = {
             let (width, height) = window.window().get_inner_size().unwrap().into();
@@ -666,9 +715,13 @@ impl<'a, A: OpenXrInitializedTrait> AmmoliteBuilder<'a, A, VulkanInitialized::Tr
             None,
         ).expect("failed to create swapchain").into();
 
+        let view_swapchain = ViewSwapchain::new(Box::new(swapchain) as Box<dyn Swapchain>);
+
         let window_medium = WindowMedium {
+            data,
             window,
-            swapchain: Box::new(swapchain) as Box<dyn Swapchain>,
+            swapchain: view_swapchain,
+            // swapchain: Box::new(swapchain) as Box<dyn Swapchain>,
         };
 
         self.window_mediums.push(window_medium);
@@ -677,9 +730,10 @@ impl<'a, A: OpenXrInitializedTrait> AmmoliteBuilder<'a, A, VulkanInitialized::Tr
     }
 }
 
-impl<'a> AmmoliteBuilder<'a, OpenXrInitialized::True, VulkanInitialized::True> {
+impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, VulkanInitialized::True> {
     pub fn add_medium_stereo_hmd(
         mut self,
+        data: MD,
     ) -> (Self, XrVkSession) {
         let XrContext {
             instance: xr_instance,
@@ -721,7 +775,7 @@ impl<'a> AmmoliteBuilder<'a, OpenXrInitialized::True, VulkanInitialized::True> {
             self.vk_device.as_ref().unwrap(), &self.vk_queues.as_ref().unwrap().graphics,
         );
 
-        let swapchains: ArrayVec<[Box<dyn Swapchain>; 2]> = {
+        let view_swapchains: ArrayVec<[ViewSwapchain; 2]> = {
             let mut swapchains = ArrayVec::new();
 
             for (_index, view) in view_config_views.into_iter().enumerate() {
@@ -740,7 +794,7 @@ impl<'a> AmmoliteBuilder<'a, OpenXrInitialized::True, VulkanInitialized::True> {
                     NonZeroU32::new(view.recommended_swapchain_sample_count).unwrap(),
                 );
 
-                swapchains.push(Box::new(swapchain) as Box<dyn Swapchain>);
+                swapchains.push(ViewSwapchain::new(Box::new(swapchain) as Box<dyn Swapchain>));
             }
 
             swapchains
@@ -758,11 +812,12 @@ impl<'a> AmmoliteBuilder<'a, OpenXrInitialized::True, VulkanInitialized::True> {
         ).unwrap();
 
         let xr_medium = XrMedium {
+            data,
             xr_instance: xr_instance.clone(),
             xr_session: xr_session.clone(),
             xr_reference_space_stage,
-            xr_frame_stream,
-            swapchains,
+            xr_frame_stream: RefCell::new(xr_frame_stream),
+            swapchains: view_swapchains,
         };
 
         stereo_hmd_mediums.push(xr_medium);
@@ -778,8 +833,8 @@ impl<'a> AmmoliteBuilder<'a, OpenXrInitialized::True, VulkanInitialized::True> {
     }
 }
 
-impl<'a> AmmoliteBuilder<'a, OpenXrInitialized::True, VulkanInitialized::True> {
-    pub fn build(self) -> Ammolite {
+impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, VulkanInitialized::True> {
+    pub fn build(self) -> Ammolite<MD> {
         let AmmoliteBuilder {
             xr,
             vk_instance,
@@ -797,9 +852,15 @@ impl<'a> AmmoliteBuilder<'a, OpenXrInitialized::True, VulkanInitialized::True> {
         let vk_device = vk_device.unwrap();
         let vk_queues = vk_queues.unwrap();
 
-        let view_swapchains = Arc::new(stereo_hmd_mediums.iter().map(|medium| medium as &dyn Medium)
-            .chain(window_mediums.iter().map(|medium| medium as &dyn Medium))
-            .into());
+        let medium_count = stereo_hmd_mediums.iter()
+            .flat_map(|medium| medium.swapchains().into_iter())
+            .chain(window_mediums.iter()
+                   .flat_map(|medium| medium.swapchains().into_iter()))
+            .count();
+
+        if medium_count <= 0 {
+            panic!("No mediums were specified during the creation of the Ammolite instance.");
+        }
 
         let init_command_buffer_builder = AutoCommandBufferBuilder::primary_one_time_submit(vk_device.clone(), vk_queues.graphics.family()).unwrap();
         let (init_command_buffer_builder, helper_resources) = HelperResources::new(
@@ -807,7 +868,15 @@ impl<'a> AmmoliteBuilder<'a, OpenXrInitialized::True, VulkanInitialized::True> {
             vk_queues.families(),
         ).unwrap()
             .initialize_resource(&vk_device, vk_queues.graphics.family(), init_command_buffer_builder).unwrap();
-        let (init_command_buffer_builder, pipeline_cache) = GraphicsPipelineSetCache::create(vk_device.clone(), &view_swapchains, helper_resources.clone(), vk_queues.graphics.family())
+        let pipeline_cache = {
+            let view_swapchains = stereo_hmd_mediums.iter()
+                .flat_map(|medium| medium.swapchains().into_iter())
+                .chain(window_mediums.iter()
+                       .flat_map(|medium| medium.swapchains().into_iter()))
+                .collect::<Vec<_>>();
+            GraphicsPipelineSetCache::create(vk_device.clone(), &view_swapchains, helper_resources.clone(), vk_queues.graphics.family())
+        };
+        let (init_command_buffer_builder, pipeline_cache) = pipeline_cache
             .initialize_resource(&vk_device, vk_queues.graphics.family(), init_command_buffer_builder).unwrap();
         let init_command_buffer = init_command_buffer_builder.build().unwrap();
 
@@ -831,7 +900,7 @@ impl<'a> AmmoliteBuilder<'a, OpenXrInitialized::True, VulkanInitialized::True> {
             pipeline_cache,
             helper_resources,
             window_mediums,
-            view_swapchains,
+            // view_swapchains,
             synchronization: Some(synchronization),
             buffer_pool_uniform_instance: CpuBufferPool::uniform_buffer(vk_device),
             camera_position: Vec3::zero(),
@@ -841,10 +910,10 @@ impl<'a> AmmoliteBuilder<'a, OpenXrInitialized::True, VulkanInitialized::True> {
     }
 }
 
-pub struct Ammolite {
+pub struct Ammolite<MD: MediumData> {
     /// The Vulkan runtime implementation
     pub vk_instance: Arc<VkInstance>,
-    pub xr: XrContext,
+    pub xr: XrContext<MD>,
     pub device: Arc<Device>,
     pub vk_queues: ChosenQueues,
     pub pipeline_cache: GraphicsPipelineSetCache,
@@ -852,8 +921,8 @@ pub struct Ammolite {
     // pub window: Arc<Surface<Window>>,
     // pub window_events_loop: Rc<RefCell<EventsLoop>>,
     // pub window_dimensions: [NonZeroU32; 2],
-    pub window_mediums: ArrayVec<[WindowMedium; 1]>,
-    pub view_swapchains: Arc<ViewSwapchains>,
+    pub window_mediums: ArrayVec<[WindowMedium<MD>; 1]>,
+    // pub view_swapchains: Arc<ViewSwapchains>,
     pub synchronization: Option<Box<dyn GpuFuture>>,
     // TODO Consider moving to SharedGltfGraphicsPipelineResources
     pub buffer_pool_uniform_instance: CpuBufferPool<InstanceUBO>,
@@ -862,22 +931,55 @@ pub struct Ammolite {
     pub camera_projection_matrix: Mat4,
 }
 
-impl Ammolite {
+impl<MD: MediumData> Ammolite<MD> {
     pub fn builder<'a>(
         application_name: &'a str,
         application_version: (u16, u16, u16),
-    ) -> AmmoliteBuilder<'a, OpenXrInitialized::False, VulkanInitialized::False> {
+    ) -> AmmoliteBuilder<'a, MD, OpenXrInitialized::False, VulkanInitialized::False> {
         AmmoliteBuilder::new(application_name, application_version)
     }
 
-    pub fn mediums(&self) -> impl Iterator<Item=&dyn Medium> {
-        self.xr.stereo_hmd_mediums.iter().map(|m| m as &dyn Medium)
-            .chain(self.window_mediums.iter().map(|m| m as &dyn Medium))
+    /// returns `true`, to indicate to quit the application
+    pub fn handle_events(&mut self) -> bool {
+        let mut quit = false;
+
+        'outer_loop:
+        for medium in self.mediums_mut() {
+            for command in medium.data_mut().handle_events() {
+                match command {
+                    HandleEventsCommand::Quit => {
+                        quit = true;
+                        break 'outer_loop;
+                    },
+                    HandleEventsCommand::CenterCursor => {
+                        // TODO
+                    },
+                    HandleEventsCommand::RecreateSwapchains => {
+                        // TODO
+                    }
+                }
+            }
+        }
+
+        quit
     }
 
-    pub fn mediums_mut(&mut self) -> impl Iterator<Item=&mut dyn Medium> {
-        self.xr.stereo_hmd_mediums.iter_mut().map(|m| m as &mut dyn Medium)
-            .chain(self.window_mediums.iter_mut().map(|m| m as &mut dyn Medium))
+    pub fn mediums<'a>(&'a self) -> impl Iterator<Item=&dyn Medium<MD>> {
+        self.xr.stereo_hmd_mediums.iter().map(|m| m as &dyn Medium<MD>)
+            .chain(self.window_mediums.iter().map(|m| m as &dyn Medium<MD>))
+    }
+
+    pub fn mediums_mut(&mut self) -> impl Iterator<Item=&mut dyn Medium<MD>> {
+        self.xr.stereo_hmd_mediums.iter_mut().map(|m| m as &mut dyn Medium<MD>)
+            .chain(self.window_mediums.iter_mut().map(|m| m as &mut dyn Medium<MD>))
+    }
+
+    pub fn view_swapchains(&self) -> impl Iterator<Item=&ViewSwapchain> {
+        self.mediums().flat_map(|m| m.swapchains().into_iter().collect::<Vec<_>>())
+    }
+
+    pub fn view_swapchains_mut(&mut self) -> impl Iterator<Item=&mut ViewSwapchain> {
+        self.mediums_mut().flat_map(|m| m.swapchains_mut().into_iter().collect::<Vec<_>>())
     }
 
     pub fn load_model<S: AsRef<Path>>(&mut self, path: S) -> Model {
@@ -914,17 +1016,20 @@ impl Ammolite {
         self.synchronization.as_mut().unwrap().cleanup_finished();
 
         let world_space_models = model_provider();
+        let view_swapchains_len = self.view_swapchains().count();
 
-        for stereo_hmd_medium in &mut self.xr.stereo_hmd_mediums {
-            let state = stereo_hmd_medium.xr_frame_stream.wait().unwrap();
+        for stereo_hmd_medium in self.xr.stereo_hmd_mediums.iter_mut() {
+            let state = stereo_hmd_medium.xr_frame_stream.borrow_mut().wait().unwrap();
             let (_view_flags, views) = stereo_hmd_medium.xr_session
                 .locate_views(state.predicted_display_time, &stereo_hmd_medium.xr_reference_space_stage)
                 .unwrap();
-            let status = stereo_hmd_medium.xr_frame_stream.begin().unwrap();
+            let status = stereo_hmd_medium.xr_frame_stream.borrow_mut().begin().unwrap();
 
             if status != openxr::sys::Result::SESSION_VISIBILITY_UNAVAILABLE {
-                for view_swapchain in &self.view_swapchains.clone().inner[..] {
-                    let mut view_swapchain = view_swapchain.write().unwrap();
+                // let view_swapchains = self.view_swapchains().collect::<Vec<_>>();
+
+                for (view_swapchain_index, view_swapchain) in stereo_hmd_medium.swapchains_mut().iter_mut().enumerate() {
+                // for (view_swapchain_index, view_swapchain) in view_swapchains.iter().enumerate() {
                     // A loop is used as a way to reset the rendering using `continue` if something goes wrong,
                     // there is a `break` statement at the end.
                     loop {
@@ -957,12 +1062,13 @@ impl Ammolite {
                         // recreate framebuffers as well.
                         if view_swapchain.framebuffers.is_none() {
                             self.pipeline_cache.shared_resources
-                                .reconstruct_dimensions_dependent_images(&view_swapchain)
+                                .reconstruct_dimensions_dependent_images(view_swapchain_index, &view_swapchain)
                                 .expect("Could not reconstruct dimension dependent resources.");
 
                             view_swapchain.framebuffers = Some(
                                 self.pipeline_cache.shared_resources.construct_swapchain_framebuffers(
                                     self.pipeline_cache.render_pass.clone(),
+                                    view_swapchain_index,
                                     &view_swapchain,
                                 )
                             );
@@ -971,7 +1077,7 @@ impl Ammolite {
                                 macro_rules! per_pipeline {
                                     ($pipeline:expr) => {
                                         $pipeline.layout_dependent_resources
-                                            .reconstruct_descriptor_sets(&self.pipeline_cache.shared_resources, &self.view_swapchains, &view_swapchain);
+                                            .reconstruct_descriptor_sets(&self.pipeline_cache.shared_resources, view_swapchains_len, view_swapchain_index, &view_swapchain);
                                     }
                                 }
 
@@ -1040,7 +1146,30 @@ impl Ammolite {
                         let current_framebuffer: Arc<dyn FramebufferWithClearValues<_>> = view_swapchain.framebuffers
                             .as_ref().unwrap()[multilayer_image.index()].clone();
 
-                        self.render_instances(current_framebuffer, world_space_models, &view_swapchain);
+                        let draw_context = DrawContext {
+                            device: &self.device.clone(),
+                            queue_family: &self.vk_queues.graphics.family(),
+                            pipeline_cache: &self.pipeline_cache,
+                            dynamic: DynamicState {
+                                line_width: None,
+                                viewports: None,
+                                scissors: None,
+                            },
+                            helper_resources: &self.helper_resources,
+                            view_swapchain_index,
+                            view_swapchain,
+                            vk_queues: &self.vk_queues,
+                            buffer_pool_uniform_instance: &self.buffer_pool_uniform_instance,
+                        };
+
+                        self.synchronization = Some(Self::render_instances(
+                            draw_context,
+                            self.synchronization.take().unwrap(),
+                            current_framebuffer,
+                            world_space_models,
+                            view_swapchain_index,
+                            &view_swapchain
+                        ));
 
                         let result = self.synchronization.take().unwrap()
                             .then_signal_fence();
@@ -1076,22 +1205,18 @@ impl Ammolite {
                     }
                 }
 
-                for view_swapchain in &self.view_swapchains.inner[..] {
-                    let mut view_swapchain = view_swapchain.write().unwrap();
-
+                for view_swapchain in stereo_hmd_medium.swapchains_mut().iter_mut() {
                     view_swapchain.swapchain.finish_rendering();
                 }
             }
 
             // TODO: do not reallocate the vec every time render is called
-            let view_swapchains = self.view_swapchains.inner.iter()
-                .map(|view_swapchain| view_swapchain.read().unwrap())
-                .collect::<Vec<_>>();
-            let swapchains = view_swapchains.iter()
-                .map(|view_swapchain| &view_swapchain.swapchain)
-                .collect::<Vec<_>>();
             let composition_layers: Vec<openxr::CompositionLayerProjectionView<_>> = {
-                let mut composition_layers = Vec::with_capacity(self.view_swapchains.inner.len());
+                let view_swapchains = stereo_hmd_medium.swapchains();
+                let swapchains = view_swapchains.iter()
+                    .map(|view_swapchain| &view_swapchain.swapchain)
+                    .collect::<Vec<_>>();
+                let mut composition_layers = Vec::with_capacity(stereo_hmd_medium.swapchains().len());
 
                 for (index, swapchain) in swapchains.iter().enumerate() {
                     let dimensions = swapchain.dimensions();
@@ -1116,7 +1241,7 @@ impl Ammolite {
                 composition_layers
             };
 
-            stereo_hmd_medium.xr_frame_stream.end(
+            stereo_hmd_medium.xr_frame_stream.borrow_mut().end(
                 state.predicted_display_time,
                 openxr::EnvironmentBlendMode::OPAQUE,
                 &[&openxr::CompositionLayerProjection::new()
@@ -1126,10 +1251,12 @@ impl Ammolite {
         }
     }
 
-    fn render_instances<'a>(&mut self,
+    fn render_instances<'a>(mut draw_context: DrawContext,
+                            synchronization: Box<dyn GpuFuture>,
                             current_framebuffer: Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>,
                             world_space_models: &'a [WorldSpaceModel<'a>],
-                            view_swapchain: &'a ViewSwapchain) {
+                            view_swapchain_index: usize,
+                            view_swapchain: &'a ViewSwapchain) -> Box<dyn GpuFuture> {
         let clear_values = vec![
             [0.0, 0.0, 0.0, 1.0].into(),
             1.0.into(),
@@ -1139,7 +1266,7 @@ impl Ammolite {
             [1.0, 1.0, 1.0, 1.0].into(),
         ];
         // TODO: Recreate only when screen dimensions change
-        let dynamic_state = DynamicState {
+        draw_context.dynamic = DynamicState {
             line_width: None,
             viewports: Some(vec![Viewport {
                 origin: [0.0, 0.0],
@@ -1152,21 +1279,22 @@ impl Ammolite {
             scissors: None,
         };
 
-        let draw_context = DrawContext {
-            device: &self.device.clone(),
-            queue_family: &self.vk_queues.graphics.family(),
-            pipeline_cache: &self.pipeline_cache,
-            dynamic: &dynamic_state,
-            helper_resources: &self.helper_resources,
-            view_swapchain,
-        };
+        // let draw_context = DrawContext {
+        //     device: &self.device.clone(),
+        //     queue_family: &self.vk_queues.graphics.family(),
+        //     pipeline_cache: &self.pipeline_cache,
+        //     dynamic: &dynamic_state,
+        //     helper_resources: &self.helper_resources,
+        //     view_swapchain_index,
+        //     view_swapchain,
+        // };
 
         let instances = world_space_models.iter()
             .map(|WorldSpaceModel { model, matrix }| {
                 let instance_ubo = InstanceUBO::new(matrix.clone());
                 let instance_buffer: Arc<dyn TypedBufferAccess<Content=InstanceUBO> + Send + Sync>
-                    = Arc::new(self.buffer_pool_uniform_instance.next(instance_ubo).unwrap());
-                let used_layouts = model.get_used_pipelines_layouts(&self.pipeline_cache);
+                    = Arc::new(draw_context.buffer_pool_uniform_instance.next(instance_ubo).unwrap());
+                let used_layouts = model.get_used_pipelines_layouts(&draw_context.pipeline_cache);
                 let descriptor_set_map = DescriptorSetMap::new(
                     &used_layouts[..],
                     |layout_dependent_resources| {
@@ -1189,8 +1317,8 @@ impl Ammolite {
             .collect::<Vec<_>>();
 
         let mut command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(
-            self.device.clone(),
-            self.vk_queues.graphics.family(),
+            draw_context.device.clone(),
+            draw_context.vk_queues.graphics.family(),
         ).unwrap()
             .begin_render_pass(
                 current_framebuffer,
@@ -1222,9 +1350,9 @@ impl Ammolite {
 
         let command_buffer = command_buffer.end_render_pass().unwrap();
 
-        self.synchronization = Some(Box::new(self.synchronization.take().unwrap()
-            .then_signal_semaphore()
-            .then_execute_same_queue(command_buffer.build().unwrap()).unwrap()));
+        Box::new(synchronization
+                 .then_signal_semaphore()
+                 .then_execute_same_queue(command_buffer.build().unwrap()).unwrap())
     }
 }
 

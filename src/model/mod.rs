@@ -13,6 +13,7 @@ use vulkano::buffer::BufferSlice;
 use vulkano::buffer::BufferUsage;
 use vulkano::buffer::TypedBufferAccess;
 use vulkano::buffer::immutable::ImmutableBuffer;
+use vulkano::buffer::cpu_pool::CpuBufferPool;
 use vulkano::command_buffer::{DynamicState, AutoCommandBufferBuilder, DrawIndirectCommand, DrawIndexedIndirectCommand};
 use vulkano::descriptor::descriptor_set::DescriptorSet;
 use vulkano::descriptor::pipeline_layout::PipelineLayout;
@@ -46,8 +47,9 @@ use gltf::Node;
 use gltf::accessor::DataType;
 use failure::Error;
 use safe_transmute::PodTransmutable;
+use crate::ChosenQueues;
 use crate::ViewSwapchain;
-use crate::shaders::PushConstants;
+use crate::shaders::{PushConstants, InstanceUBO};
 use crate::vertex::*;
 use crate::pipeline::GraphicsPipelineProperties;
 use crate::pipeline::GraphicsPipelineSetCache;
@@ -74,9 +76,12 @@ pub struct DrawContext<'a> {
     pub device: &'a Arc<Device>,
     pub queue_family: &'a QueueFamily<'a>,
     pub pipeline_cache: &'a GraphicsPipelineSetCache,
-    pub dynamic: &'a DynamicState,
+    pub dynamic: DynamicState,
     pub helper_resources: &'a HelperResources,
+    pub view_swapchain_index: usize,
     pub view_swapchain: &'a ViewSwapchain,
+    pub vk_queues: &'a ChosenQueues,
+    pub buffer_pool_uniform_instance: &'a CpuBufferPool<InstanceUBO>,
 }
 
 #[derive(Clone)]
@@ -715,7 +720,7 @@ impl Model {
                     if let (AlphaMode::Blend, 3) = (alpha_mode, subpass) {
                         incomplete_descriptor_sets.descriptor_set_blend
                             = Some(pipeline.layout_dependent_resources.descriptor_sets_blend.as_ref()
-                                   .unwrap()[draw_context.view_swapchain.index].as_ref().unwrap().clone());
+                                   .unwrap()[draw_context.view_swapchain_index].as_ref().unwrap().clone());
                     }
 
                     let draw_call = self.create_draw_call_primitive(

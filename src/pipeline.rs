@@ -47,7 +47,6 @@ use gltf::mesh::Primitive;
 use failure::Error;
 use fnv::FnvBuildHasher;
 use crate::ViewSwapchain;
-use crate::ViewSwapchains;
 use crate::vertex::{GltfVertexBufferDefinition, VertexAttributePropertiesSet};
 use crate::model::{FramebufferWithClearValues, HelperResources};
 use crate::model::resource::{InitializationTask, UninitializedResource, SimpleUninitializedResource};
@@ -153,7 +152,7 @@ pub struct SharedGltfGraphicsPipelineResources {
 }
 
 impl SharedGltfGraphicsPipelineResources {
-    pub fn new(device: Arc<Device>, helper_resources: HelperResources, queue_family: QueueFamily, view_swapchains: &ViewSwapchains)
+    pub fn new(device: Arc<Device>, helper_resources: HelperResources, queue_family: QueueFamily, view_swapchains: &[&ViewSwapchain])
             -> Result<SimpleUninitializedResource<Self>, Error> {
         let scene_ubo = SceneUBO::default();
         let scene_ubo_buffer = StagedBuffer::from_data(
@@ -180,16 +179,17 @@ impl SharedGltfGraphicsPipelineResources {
             helper_resources,
             scene_ubo_buffer,
             default_material_ubo_buffer: device_default_material_ubo_buffer,
-            swapchain_dependent_resources: vec![None; view_swapchains.inner.len()],
+            swapchain_dependent_resources: vec![None; view_swapchains.len()],
         }, tasks))
     }
 
     pub fn construct_swapchain_framebuffers(&mut self,
                                             render_pass: Arc<dyn RenderPassAbstract + Send + Sync>,
+                                            view_swapchain_index: usize,
                                             view_swapchain: &ViewSwapchain)
             -> Vec<Arc<dyn FramebufferWithClearValues<Vec<ClearValue>>>> {
         let render_pass = &render_pass;
-        let resources = self.swapchain_dependent_resources[view_swapchain.index]
+        let resources = self.swapchain_dependent_resources[view_swapchain_index]
             .as_ref().expect("Framebuffer swapchain dependent images not initialized.");
         view_swapchain.swapchain.images().iter().map(|image| {
             Arc::new(Framebuffer::start(render_pass.clone())
@@ -236,10 +236,11 @@ impl SharedGltfGraphicsPipelineResources {
 
     pub fn reconstruct_dimensions_dependent_images(
         &mut self,
+        view_swapchain_index: usize,
         view_swapchain: &ViewSwapchain,
     ) -> Result<(), Error> {
         let dimensions = view_swapchain.swapchain.dimensions();
-        self.swapchain_dependent_resources[view_swapchain.index] = Some(SwapchainDependentResources {
+        self.swapchain_dependent_resources[view_swapchain_index] = Some(SwapchainDependentResources {
             depth_image: self.construct_attachment_image_view(
                 dimensions.clone(),
                 D32Sfloat,
@@ -387,7 +388,7 @@ impl GltfPipelineLayoutDependentResources {
         }
     }
 
-    pub fn reconstruct_descriptor_sets(&mut self, shared_resources: &SharedGltfGraphicsPipelineResources, view_swapchains: &ViewSwapchains, view_swapchain: &ViewSwapchain) {
+    pub fn reconstruct_descriptor_sets(&mut self, shared_resources: &SharedGltfGraphicsPipelineResources, view_swapchains_len: usize, view_swapchain_index: usize, view_swapchain: &ViewSwapchain) {
         self.descriptor_set_scene = Arc::new(
             PersistentDescriptorSet::start(self.layout.clone(), 0)
                 .add_buffer(shared_resources.scene_ubo_buffer.device_buffer().clone()).unwrap()
@@ -395,12 +396,12 @@ impl GltfPipelineLayoutDependentResources {
         );
 
         if self.descriptor_sets_blend.is_none() {
-            self.descriptor_sets_blend = Some(vec![None; view_swapchains.inner.len()]);
+            self.descriptor_sets_blend = Some(vec![None; view_swapchains_len]);
         }
 
-        self.descriptor_sets_blend.as_mut().unwrap()[view_swapchain.index] = self.layout.descriptor_set_layout(4).map(|_| {
+        self.descriptor_sets_blend.as_mut().unwrap()[view_swapchain_index] = self.layout.descriptor_set_layout(4).map(|_| {
             let swapchain_resources = shared_resources
-                .swapchain_dependent_resources[view_swapchain.index]
+                .swapchain_dependent_resources[view_swapchain_index]
                 .as_ref().expect("Swapchain dependent resources not initialized.");
 
             Arc::new(PersistentDescriptorSet::start(self.layout.clone(), 4)
@@ -597,8 +598,13 @@ macro_rules! construct_pipeline_blend_finalize {
 }
 
 impl GraphicsPipelineSetCache {
-    pub fn create(device: Arc<Device>, view_swapchains: &ViewSwapchains, helper_resources: HelperResources, queue_family: QueueFamily) -> impl UninitializedResource<Self> {
-        let swapchain_format = view_swapchains.format;
+    pub fn create(device: Arc<Device>, view_swapchains: &[&ViewSwapchain], helper_resources: HelperResources, queue_family: QueueFamily) -> impl UninitializedResource<Self> {
+        let swapchain_format = view_swapchains[0].swapchain.format();
+
+        for view_swapchain in view_swapchains.iter().skip(1) {
+            assert_eq!(swapchain_format, view_swapchain.swapchain.format(), "All swapchains must use the same format.");
+        }
+
         SharedGltfGraphicsPipelineResources::new(device.clone(), helper_resources, queue_family, view_swapchains)
             .unwrap()
             .map(move |shared_resources| {

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::sync::{Arc, RwLock, Mutex};
 use std::ops::{BitOr, BitOrAssign, Not};
@@ -152,7 +153,7 @@ pub struct SharedGltfGraphicsPipelineResources {
 }
 
 impl SharedGltfGraphicsPipelineResources {
-    pub fn new(device: Arc<Device>, helper_resources: HelperResources, queue_family: QueueFamily, view_swapchains: &[&ViewSwapchain])
+    pub fn new(device: Arc<Device>, helper_resources: HelperResources, queue_family: QueueFamily, view_swapchains: &[&RefCell<ViewSwapchain>])
             -> Result<SimpleUninitializedResource<Self>, Error> {
         let scene_ubo = SceneUBO::default();
         let scene_ubo_buffer = StagedBuffer::from_data(
@@ -598,11 +599,11 @@ macro_rules! construct_pipeline_blend_finalize {
 }
 
 impl GraphicsPipelineSetCache {
-    pub fn create(device: Arc<Device>, view_swapchains: &[&ViewSwapchain], helper_resources: HelperResources, queue_family: QueueFamily) -> impl UninitializedResource<Self> {
-        let swapchain_format = view_swapchains[0].swapchain.format();
+    pub fn create(device: Arc<Device>, view_swapchains: &[&RefCell<ViewSwapchain>], helper_resources: HelperResources, queue_family: QueueFamily) -> impl UninitializedResource<Self> {
+        let swapchain_format = view_swapchains[0].borrow().swapchain.format();
 
         for view_swapchain in view_swapchains.iter().skip(1) {
-            assert_eq!(swapchain_format, view_swapchain.swapchain.format(), "All swapchains must use the same format.");
+            assert_eq!(swapchain_format, view_swapchain.borrow().swapchain.format(), "All swapchains must use the same format.");
         }
 
         SharedGltfGraphicsPipelineResources::new(device.clone(), helper_resources, queue_family, view_swapchains)

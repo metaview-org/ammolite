@@ -50,6 +50,7 @@ use vulkano_win::VkSurfaceBuild;
 use winit::{ElementState, MouseButton, Event, DeviceEvent, WindowEvent, KeyboardInput, VirtualKeyCode, EventsLoop, WindowBuilder, Window};
 use winit::dpi::PhysicalSize;
 use smallvec::SmallVec;
+use openxr::{View as XrView, FrameState as XrFrameState};
 
 use crate::math::matrix::*;
 use crate::math::vector::*;
@@ -89,69 +90,6 @@ fn swapchain_format_compare(a: &Format, b: &Format) -> std::cmp::Ordering {
 //     // TODO: Querying available formats is not implemented (exposed) in vulkano.
 //     unimplemented!()
 // }
-
-fn construct_model_matrix(scale: f32, translation: &Vec3, rotation: &Vec3) -> Mat4 {
-    Mat4::translation(translation)
-        * Mat4::rotation_roll(rotation[2])
-        * Mat4::rotation_yaw(rotation[1])
-        * Mat4::rotation_pitch(rotation[0])
-        * Mat4::scale(scale)
-}
-
-pub fn construct_view_matrix(translation: &Vec3, rotation: &Vec3) -> Mat4 {
-    // construct_model_matrix(1.0, &-translation, &Vec3::zero())
-    construct_model_matrix(1.0, &-translation, &-rotation)
-}
-
-#[allow(unused)]
-fn construct_orthographic_projection_matrix(near_plane: f32, far_plane: f32, dimensions: Vec2) -> Mat4 {
-    let z_n = near_plane;
-    let z_f = far_plane;
-
-    // Scale the X/Y-coordinates according to the dimensions. Translate and scale the Z-coordinate.
-    mat4!([1.0 / dimensions[0],                 0.0,               0.0,                0.0,
-                           0.0, 1.0 / dimensions[1],               0.0,                0.0,
-                           0.0,                 0.0, 1.0 / (z_f - z_n), -z_n / (z_f - z_n),
-                           0.0,                 0.0,               0.0,                1.0])
-}
-
-#[allow(unused)]
-fn construct_perspective_projection_matrix(near_plane: f32, far_plane: f32, aspect_ratio: f32, fov_rad: f32) -> Mat4 {
-    // The resulting `(x, y, z, w)` vector gets normalized following the execution of the vertex
-    // shader to `(x/w, y/w, z/w)` (W-division). This makes it possible to create a perspective
-    // projection matrix.
-    // We copy the Z coordinate to the W coordinate so as to divide all coordinates by Z.
-    let z_n = near_plane;
-    let z_f = far_plane;
-    // With normalization, it is actually `1 / (z * tan(FOV / 2))`, which is the width of the
-    // screen at that point in space of the vector.
-    // The X coordinate needs to be divided by the aspect ratio to make it independent of the
-    // window size.
-    // Even though we could negate the Y coordinate so as to adjust the vectors to the Vulkan
-    // coordinate system, which has the Y axis pointing downwards, contrary to OpenGL, we need to
-    // apply the same transformation to other vertex attributes such as normal and tangent vectors,
-    // but those are not projected.
-    let f = 1.0 / (fov_rad / 2.0).tan();
-
-    // We derive the coefficients for the Z coordinate from the following equation:
-    // `f(z) = A*z + B`, because we know we need to translate and scale the Z coordinate.
-    // The equation changes to the following, after the W-division:
-    // `f(z) = A + B/z`
-    // And must satisfy the following conditions:
-    // `f(z_near) = 0`
-    // `f(z_far) = 1`
-    // Solving for A and B gives us the necessary coefficients to construct the matrix.
-    // mat4!([f / aspect_ratio, 0.0,                0.0,                       0.0,
-    //                     0.0,  -f,                0.0,                       0.0,
-    //                     0.0, 0.0, -z_f / (z_n - z_f), (z_n * z_f) / (z_n - z_f),
-    //                     0.0, 0.0,                1.0,                       0.0])
-
-    // TODO: Investigate the mysterious requirement of flipping the X coordinate
-    mat4!([-f / aspect_ratio, 0.0,                0.0,                       0.0,
-                         0.0,   f,                0.0,                       0.0,
-                         0.0, 0.0, -z_f / (z_n - z_f), (z_n * z_f) / (z_n - z_f),
-                         0.0, 0.0,                1.0,                       0.0])
-}
 
 pub struct WorldSpaceModel<'a> {
     pub model: &'a Model,
@@ -228,14 +166,16 @@ impl ViewSwapchain {
 //     }
 // }
 
+#[derive(Debug)]
 pub enum HandleEventsCommand {
     Quit,
     CenterCursor,
-    RecreateSwapchains,
+    RecreateSwapchain(usize),
 }
 
 pub trait MediumData: Sized {
-    fn handle_events(&mut self) -> SmallVec<[HandleEventsCommand; 8]>;
+    fn get_camera_transforms(&self, view_index: usize, dimensions: [NonZeroU32; 2]) -> CameraTransforms;
+    fn handle_events(&mut self, delta_time: &Duration) -> SmallVec<[HandleEventsCommand; 8]>;
 }
 
 /**
@@ -243,32 +183,50 @@ pub trait MediumData: Sized {
  */
 pub trait Medium<MD: MediumData> {
     // type Event;
-    fn swapchains(&self) -> &[ViewSwapchain];
-    fn swapchains_mut(&mut self) -> &mut [ViewSwapchain];
+    fn swapchains(&self) -> &[RefCell<ViewSwapchain>];
+    // fn swapchains_mut(&mut self) -> &mut [ViewSwapchain];
     fn data(&self) -> &MD;
     fn data_mut(&mut self) -> &mut MD;
     // fn swapchains(&self) -> &[Box<dyn Swapchain>];
     // fn poll_events<T>(&mut self, event_handler: T) where T: FnMut(Self::Event);
+
+    /**
+     * Waits for a frame to become available. Returns `true`, if rendering for
+     * this medium should commence. Otherwise, returns `false`, then rendering
+     * for this medium should be skipped.
+     */
+    fn wait_for_frame(&mut self) -> bool;
+
+    /**
+     * Gets called at the end of every frame, even when `wait_for_frame`
+     * returned `false`.
+     */
+    fn finalize_frame(&mut self);
+
+    /**
+     * Returns the recommended render dimensions of the medium.
+     */
+    fn get_dimensions(&self) -> [NonZeroU32; 2];
 }
 
 pub struct WindowMedium<MD: MediumData> {
     pub data: MD,
     pub window: Arc<Surface<Window>>,
     // pub window_events_loop: Rc<RefCell<EventsLoop>>,
-    swapchain: ViewSwapchain,
+    swapchain: RefCell<ViewSwapchain>,
     // swapchain: Box<dyn Swapchain>,
 }
 
 impl<MD: MediumData> Medium<MD> for WindowMedium<MD> {
     // type Event = winit::Event;
 
-    fn swapchains(&self) -> &[ViewSwapchain] {
+    fn swapchains(&self) -> &[RefCell<ViewSwapchain>] {
         std::slice::from_ref(&self.swapchain)
     }
 
-    fn swapchains_mut(&mut self) -> &mut [ViewSwapchain] {
-        std::slice::from_mut(&mut self.swapchain)
-    }
+    // fn swapchains_mut(&mut self) -> &mut [ViewSwapchain] {
+    //     std::slice::from_mut(&mut self.swapchain)
+    // }
 
     fn data(&self) -> &MD {
         &self.data
@@ -288,6 +246,23 @@ impl<MD: MediumData> Medium<MD> for WindowMedium<MD> {
     //         event_handler(event);
     //     })
     // }
+
+    fn wait_for_frame(&mut self) -> bool {
+        true
+    }
+
+    fn finalize_frame(&mut self) {}
+
+    fn get_dimensions(&self) -> [NonZeroU32; 2] {
+        let dpi = self.window.window().get_hidpi_factor();
+        let (width, height): (u32, u32) = self.window.window().get_inner_size()
+            .unwrap().to_physical(dpi).into();
+
+        [
+            NonZeroU32::new(width).expect("The width of the window must not be 0."),
+            NonZeroU32::new(height).expect("The height of the window must not be 0."),
+        ]
+    }
 }
 
 pub struct XrMedium<MD: MediumData> {
@@ -298,20 +273,22 @@ pub struct XrMedium<MD: MediumData> {
     pub xr_reference_space_stage: openxr::Space,
     pub xr_frame_stream: RefCell<XrVkFrameStream>,
     // HMD devices typically have 2 screens, one for each eye
-    swapchains: ArrayVec<[ViewSwapchain; 2]>,
+    swapchains: ArrayVec<[RefCell<ViewSwapchain>; 2]>,
+    frame_state: Option<XrFrameState>,
+    frame_views: Option<Vec<XrView>>,
     // swapchains: ArrayVec<[Box<dyn Swapchain>; 2]>,
 }
 
 impl<'a, MD: MediumData> Medium<MD> for XrMedium<MD> {
     // type Event = openxr::Event<'a>;
 
-    fn swapchains(&self) -> &[ViewSwapchain] {
+    fn swapchains(&self) -> &[RefCell<ViewSwapchain>] {
         &self.swapchains[..]
     }
 
-    fn swapchains_mut(&mut self) -> &mut [ViewSwapchain] {
-        &mut self.swapchains[..]
-    }
+    // fn swapchains_mut(&mut self) -> &mut [ViewSwapchain] {
+    //     &mut self.swapchains[..]
+    // }
 
     fn data(&self) -> &MD {
         &self.data
@@ -333,6 +310,66 @@ impl<'a, MD: MediumData> Medium<MD> for XrMedium<MD> {
     //         event_handler(event);
     //     }
     // }
+
+    fn wait_for_frame(&mut self) -> bool {
+        let state = self.xr_frame_stream.borrow_mut().wait().unwrap();
+        let (_view_flags, views) = self.xr_session
+            .locate_views(state.predicted_display_time, &self.xr_reference_space_stage)
+            .unwrap();
+        self.frame_state = Some(state);
+        self.frame_views = Some(views);
+        let status = self.xr_frame_stream.borrow_mut().begin().unwrap();
+
+        status != openxr::sys::Result::SESSION_VISIBILITY_UNAVAILABLE
+    }
+
+    fn finalize_frame(&mut self) {
+        let views = self.frame_views.take().unwrap();
+        let predicted_display_time = self.frame_state.take().unwrap().predicted_display_time;
+
+        let view_swapchains = self.swapchains().iter()
+            .map(|view_swapchain| view_swapchain.borrow())
+            .collect::<Vec<_>>();
+
+        let composition_layers: Vec<openxr::CompositionLayerProjectionView<_>> = {
+            let mut composition_layers = Vec::with_capacity(self.swapchains().len());
+
+            for (index, view_swapchain) in view_swapchains.iter().enumerate() {
+                let swapchain = &view_swapchain.swapchain;
+                let dimensions = swapchain.dimensions();
+                composition_layers.push(openxr::CompositionLayerProjectionView::new()
+                    .pose(views[index].pose)
+                    .fov(views[index].fov)
+                    .sub_image(
+                        openxr::SwapchainSubImage::new()
+                        .swapchain(swapchain.downcast_xr().unwrap().inner())
+                        .image_array_index(0)
+                        .image_rect(openxr::Rect2Di {
+                            offset: openxr::Offset2Di { x: 0, y: 0 },
+                            extent: openxr::Extent2Di { // FIXME
+                                width: dimensions[0].get() as i32,
+                                height: dimensions[1].get() as i32,
+                            },
+                        })
+                    )
+                )
+            }
+
+            composition_layers
+        };
+
+        self.xr_frame_stream.borrow_mut().end(
+            predicted_display_time,
+            openxr::EnvironmentBlendMode::OPAQUE,
+            &[&openxr::CompositionLayerProjection::new()
+                .space(&self.xr_reference_space_stage)
+                .views(&composition_layers[..])]
+        ).unwrap();
+    }
+
+    fn get_dimensions(&self) -> [NonZeroU32; 2] {
+        unimplemented!()
+    }
 }
 
 
@@ -364,6 +401,8 @@ macro_rules! type_level_enum {
 
 type_level_enum!(OpenXrInitialized; True, False);
 type_level_enum!(VulkanInitialized; True, False);
+type_level_enum!(WindowsAdded; True, False);
+type_level_enum!(HmdsAdded; True, False);
 
 pub struct XrContext<MD: MediumData> {
     // TODO: Remove Arc
@@ -372,7 +411,13 @@ pub struct XrContext<MD: MediumData> {
     stereo_hmd_mediums: ArrayVec<[XrMedium<MD>; 1]>,
 }
 
-pub struct AmmoliteBuilder<'a, MD: MediumData, A: OpenXrInitializedTrait, B: VulkanInitializedTrait> {
+pub struct UninitializedWindowMedium<MD> {
+    pub events_loop: Rc<RefCell<EventsLoop>>,
+    pub window_builder: WindowBuilder,
+    pub data: MD,
+}
+
+pub struct AmmoliteBuilder<'a, MD: MediumData, A: OpenXrInitializedTrait, B: VulkanInitializedTrait, C: WindowsAddedTrait, D: HmdsAddedTrait> {
     application_name: &'a str,
     application_version: (u16, u16, u16),
     xr: Option<XrContext<MD>>,
@@ -380,11 +425,12 @@ pub struct AmmoliteBuilder<'a, MD: MediumData, A: OpenXrInitializedTrait, B: Vul
     vk_instance: Option<Arc<VkInstance>>,
     vk_device: Option<Arc<Device>>,
     vk_queues: Option<ChosenQueues>,
+    uninitialized_window_mediums: Option<ArrayVec<[UninitializedWindowMedium<MD>; 1]>>,
     window_mediums: ArrayVec<[WindowMedium<MD>; 1]>,
-    _marker: PhantomData<(A, B)>,
+    _marker: PhantomData<(A, B, C, D)>,
 }
 
-impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::False, VulkanInitialized::False> {
+impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::False, VulkanInitialized::False, WindowsAdded::False, HmdsAdded::False> {
     pub fn new(
         application_name: &'a str,
         application_version: (u16, u16, u16),
@@ -396,6 +442,7 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::False, Vulka
             vk_instance: None,
             vk_device: None,
             vk_queues: None,
+            uninitialized_window_mediums: None,
             window_mediums: ArrayVec::new(),
             _marker: PhantomData,
         }
@@ -403,14 +450,16 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::False, Vulka
 }
 
 // TODO: refactor to use `Self` and remove generic parameters?
-impl<'a, MD: MediumData, A: OpenXrInitializedTrait, B: VulkanInitializedTrait> AmmoliteBuilder<'a, MD, A, B> {
+impl<'a, MD: MediumData, A: OpenXrInitializedTrait, B: VulkanInitializedTrait, C: WindowsAddedTrait, D: HmdsAddedTrait> AmmoliteBuilder<'a, MD, A, B, C, D> {
     /**
      * A helper function to be only used within the builder pattern implementation
      */
     unsafe fn coerce<
         OA: OpenXrInitializedTrait,
         OB: VulkanInitializedTrait,
-    >(self) -> AmmoliteBuilder<'a, MD, OA, OB> {
+        OC: WindowsAddedTrait,
+        OD: HmdsAddedTrait,
+    >(self) -> AmmoliteBuilder<'a, MD, OA, OB, OC, OD> {
         AmmoliteBuilder {
             application_name: self.application_name,
             application_version: self.application_version,
@@ -418,13 +467,14 @@ impl<'a, MD: MediumData, A: OpenXrInitializedTrait, B: VulkanInitializedTrait> A
             vk_instance: self.vk_instance,
             vk_device: self.vk_device,
             vk_queues: self.vk_queues,
+            uninitialized_window_mediums: self.uninitialized_window_mediums,
             window_mediums: self.window_mediums,
             _marker: PhantomData,
         }
     }
 }
 
-impl<'a, MD: MediumData, B: VulkanInitializedTrait> AmmoliteBuilder<'a, MD, OpenXrInitialized::False, B> {
+impl<'a, MD: MediumData, B: VulkanInitializedTrait> AmmoliteBuilder<'a, MD, OpenXrInitialized::False, B, WindowsAdded::False, HmdsAdded::False> {
     // FIXME: Should return a Result and fail modifying the builder, if the
     //        OpenXR instance could not have been created.
     //
@@ -432,7 +482,7 @@ impl<'a, MD: MediumData, B: VulkanInitializedTrait> AmmoliteBuilder<'a, MD, Open
     // Result<AmmoliteBuilder<'a, OpenXrInitialized::True, B>, (Error, AmmoliteBuilder<'a, OpenXrInitialized::False, B>)>
     pub fn initialize_openxr(
         self,
-    ) -> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, B> {
+    ) -> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, B, WindowsAdded::False, HmdsAdded::False> {
         let entry = openxr::Entry::linked();
         let available_extensions = entry.enumerate_extensions().unwrap(); // FIXME: unwrap
 
@@ -488,11 +538,10 @@ impl<'a, MD: MediumData, B: VulkanInitializedTrait> AmmoliteBuilder<'a, MD, Open
     }
 }
 
-impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, VulkanInitialized::False> {
+impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, VulkanInitialized::False, WindowsAdded::False, HmdsAdded::False> {
     pub fn initialize_vulkan<'b, 'c>(
         mut self,
-        window_builders: impl IntoIterator<Item=(&'c EventsLoop, WindowBuilder)>,
-    ) -> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, VulkanInitialized::True> {
+    ) -> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, VulkanInitialized::True, WindowsAdded::False, HmdsAdded::False> {
         let xr = self.xr.take().unwrap();
         let app_info = {
             let engine_name = env!("CARGO_PKG_NAME");
@@ -521,14 +570,114 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, Vulkan
         let vk_instance: Arc<VkInstance> = VkInstance::new(Some(&app_info), extensions, layers.into_iter().cloned())
             .expect("Failed to create a Vulkan instance.");
 
+        AmmoliteBuilder {
+            vk_instance: Some(vk_instance),
+            xr: Some(xr),
+            uninitialized_window_mediums: Some(ArrayVec::new()),
+            .. unsafe { self.coerce() }
+        }
+    }
+}
+
+impl<'a, MD: MediumData, A: OpenXrInitializedTrait> AmmoliteBuilder<'a, MD, A, VulkanInitialized::True, WindowsAdded::False, HmdsAdded::False> {
+    pub fn add_medium_window(
+        mut self,
+        uninitialized_window_medium: UninitializedWindowMedium<MD>,
+    ) -> Self {
+        self.uninitialized_window_mediums.as_mut().unwrap().push(uninitialized_window_medium);
+        self
+    }
+
+    fn register_medium_window(
+        vk_device: &Arc<Device>,
+        vk_queues: &ChosenQueues,
+        window_mediums: &mut ArrayVec<[WindowMedium<MD>; 1]>,
+        window: Arc<Surface<Window>>,
+        data: MD,
+    ) {
+        let mut dimensions: [NonZeroU32; 2] = {
+            let (width, height) = window.window().get_inner_size().unwrap().into();
+            [
+                NonZeroU32::new(width).expect("The width of the window must not be 0."),
+                NonZeroU32::new(height).expect("The height of the window must not be 0."),
+            ]
+        };
+        let vk_physical_device = vk_device.physical_device();
+        let capabilities = window.capabilities(vk_physical_device)
+            .expect("Failed to retrieve surface capabilities.");
+
+        // Determines the behaviour of the alpha channel
+        let alpha = capabilities.supported_composite_alpha.iter().next().unwrap();
+        dimensions = capabilities.current_extent.map(|extent| [
+            NonZeroU32::new(extent[0]).unwrap(),
+            NonZeroU32::new(extent[1]).unwrap(),
+        ]).unwrap_or(dimensions);
+
+        // Order supported swapchain formats by priority and choose the most preferred one.
+        // The swapchain format must be in SRGB space.
+        let mut supported_formats: Vec<Format> = capabilities.supported_formats.iter()
+            .map(|(current_format, _)| *current_format)
+            .collect();
+        supported_formats.sort_by(swapchain_format_compare);
+        let format = supported_formats[0];
+
+        // Please take a look at the docs for the meaning of the parameters we didn't mention.
+        let swapchain: VkSwapchain<Window> = vulkano::swapchain::Swapchain::new::<_, &Arc<Queue>>(
+            vk_device.clone(),
+            window.clone(),
+            (&vk_queues.graphics).into(),
+            dimensions,
+            NonZeroU32::new(1).unwrap(),
+            NonZeroU32::new(capabilities.min_image_count).expect("Invalid swapchaing image count."),
+            format,
+            ColorSpace::SrgbNonLinear,
+            capabilities.supported_usage_flags,
+            SurfaceTransform::Identity,
+            alpha,
+            PresentMode::Immediate, /* PresentMode::Relaxed TODO: Getting only ~60 FPS in a window */
+            true,
+            None,
+        ).expect("failed to create swapchain").into();
+
+        let view_swapchain = ViewSwapchain::new(Box::new(swapchain) as Box<dyn Swapchain>);
+
+        let window_medium = WindowMedium {
+            data,
+            window,
+            swapchain: RefCell::new(view_swapchain),
+            // swapchain: Box::new(swapchain) as Box<dyn Swapchain>,
+        };
+
+        window_mediums.push(window_medium);
+    }
+
+    pub fn finish_adding_mediums_window(
+        mut self
+    ) -> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, VulkanInitialized::True, WindowsAdded::True, HmdsAdded::False> {
+        let windows: Vec<(_, MD)> = self.uninitialized_window_mediums.take().unwrap().into_iter()
+            .map(|uninitialized_window_medium| {
+                let UninitializedWindowMedium {
+                    events_loop,
+                    window_builder,
+                    data,
+                } = uninitialized_window_medium;
+                let events_loop = events_loop.as_ref().borrow();
+
+                (
+                    window_builder.build_vk_surface(&events_loop, self.vk_instance.as_ref().unwrap().clone()).unwrap(),
+                    data,
+                )
+            })
+            .collect();
+
         let openxr::vulkan::Requirements {
             min_api_version_supported: min_api_version,
             max_api_version_supported: max_api_version,
-        } = xr.instance.graphics_requirements::<openxr::Vulkan>(xr.system).unwrap();
+        } = self.xr.as_ref().unwrap().instance.graphics_requirements::<openxr::Vulkan>(self.xr.as_ref().unwrap().system).unwrap();
         let min_api_version = min_api_version.into_raw();
         let max_api_version = max_api_version.into_raw();
         // TODO: Better device selection & SLI support
-        let physical_device = PhysicalDevice::enumerate(&vk_instance)
+        let physical_device = PhysicalDevice::enumerate(self.vk_instance.as_ref().unwrap())
             .filter(|physical_device| {
                 let api_version = physical_device.api_version().into_vulkan_version();
 
@@ -536,9 +685,6 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, Vulkan
             })
             .next().expect("No physical device available.");
 
-        let windows: Vec<_> = window_builders.into_iter()
-            .map(|(events_loop, window_builder)| window_builder.build_vk_surface(events_loop, vk_instance.clone()).unwrap())
-            .collect();
 
         struct ChosenQueueFamilies<'a> {
             graphics: QueueFamily<'a>,
@@ -546,11 +692,11 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, Vulkan
             compute: QueueFamily<'a>,
         }
 
-        fn choose_queue_families<'a, 'b>(windows: &'b [Arc<Surface<Window>>], physical_device: PhysicalDevice<'a>) -> ChosenQueueFamilies<'a> {
-            fn allow_graphics<'b>(windows: &'b [Arc<Surface<Window>>]) -> impl for<'a, 'c> FnMut(&'a QueueFamily<'c>) -> bool + 'b {
+        fn choose_queue_families<'a, 'b, MD>(windows: &'b [(Arc<Surface<Window>>, MD)], physical_device: PhysicalDevice<'a>) -> ChosenQueueFamilies<'a> {
+            fn allow_graphics<'b, MD>(windows: &'b [(Arc<Surface<Window>>, MD)]) -> impl for<'a, 'c> FnMut(&'a QueueFamily<'c>) -> bool + 'b {
                 move |queue_family: &QueueFamily| {
                     queue_family.supports_graphics()
-                        && windows.iter().all(|window| window.is_supported(queue_family.clone()).unwrap_or(false))
+                        && windows.iter().all(|(window, _)| window.is_supported(queue_family.clone()).unwrap_or(false))
                 }
             }
 
@@ -626,7 +772,7 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, Vulkan
                 // ext_debug_marker: true,
                 .. DeviceExtensions::none()
             };
-            let xr_extensions: Vec<_> = xr.instance.vulkan_device_extensions(xr.system)
+            let xr_extensions: Vec<_> = self.xr.as_ref().unwrap().instance.vulkan_device_extensions(self.xr.as_ref().unwrap().system)
                 .unwrap().split_ascii_whitespace()
                 .map(|str_slice| CString::new(str_slice).unwrap()).collect();
             let raw_device_extensions = [/*CString::new("VK_EXT_debug_utils").unwrap()*/];
@@ -655,82 +801,25 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, Vulkan
             transfer: queue_iter.next().unwrap(),
         };
 
+        for (window, data) in windows.into_iter() {
+            Self::register_medium_window(
+                &vk_device,
+                &vk_queues,
+                &mut self.window_mediums,
+                window,
+                data,
+            );
+        }
+
         AmmoliteBuilder {
-            vk_instance: Some(vk_instance),
             vk_device: Some(vk_device),
             vk_queues: Some(vk_queues),
-            xr: Some(xr),
             .. unsafe { self.coerce() }
         }
     }
 }
 
-impl<'a, MD: MediumData, A: OpenXrInitializedTrait> AmmoliteBuilder<'a, MD, A, VulkanInitialized::True> {
-    pub fn add_medium_window(
-        mut self,
-        window: Arc<Surface<Window>>,
-        data: MD,
-    ) -> Self {
-        let mut dimensions: [NonZeroU32; 2] = {
-            let (width, height) = window.window().get_inner_size().unwrap().into();
-            [
-                NonZeroU32::new(width).expect("The width of the window must not be 0."),
-                NonZeroU32::new(height).expect("The height of the window must not be 0."),
-            ]
-        };
-        let vk_physical_device = self.vk_device.as_ref().unwrap().physical_device();
-        let capabilities = window.capabilities(vk_physical_device)
-            .expect("Failed to retrieve surface capabilities.");
-
-        // Determines the behaviour of the alpha channel
-        let alpha = capabilities.supported_composite_alpha.iter().next().unwrap();
-        dimensions = capabilities.current_extent.map(|extent| [
-            NonZeroU32::new(extent[0]).unwrap(),
-            NonZeroU32::new(extent[1]).unwrap(),
-        ]).unwrap_or(dimensions);
-
-        // Order supported swapchain formats by priority and choose the most preferred one.
-        // The swapchain format must be in SRGB space.
-        let mut supported_formats: Vec<Format> = capabilities.supported_formats.iter()
-            .map(|(current_format, _)| *current_format)
-            .collect();
-        supported_formats.sort_by(swapchain_format_compare);
-        let format = supported_formats[0];
-
-        // Please take a look at the docs for the meaning of the parameters we didn't mention.
-        let swapchain: VkSwapchain<Window> = vulkano::swapchain::Swapchain::new::<_, &Arc<Queue>>(
-            self.vk_device.as_ref().unwrap().clone(),
-            window.clone(),
-            (&self.vk_queues.as_ref().unwrap().graphics).into(),
-            dimensions,
-            NonZeroU32::new(1).unwrap(),
-            NonZeroU32::new(capabilities.min_image_count).expect("Invalid swapchaing image count."),
-            format,
-            ColorSpace::SrgbNonLinear,
-            capabilities.supported_usage_flags,
-            SurfaceTransform::Identity,
-            alpha,
-            PresentMode::Immediate, /* PresentMode::Relaxed TODO: Getting only ~60 FPS in a window */
-            true,
-            None,
-        ).expect("failed to create swapchain").into();
-
-        let view_swapchain = ViewSwapchain::new(Box::new(swapchain) as Box<dyn Swapchain>);
-
-        let window_medium = WindowMedium {
-            data,
-            window,
-            swapchain: view_swapchain,
-            // swapchain: Box::new(swapchain) as Box<dyn Swapchain>,
-        };
-
-        self.window_mediums.push(window_medium);
-
-        self
-    }
-}
-
-impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, VulkanInitialized::True> {
+impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, VulkanInitialized::True, WindowsAdded::True, HmdsAdded::False> {
     pub fn add_medium_stereo_hmd(
         mut self,
         data: MD,
@@ -775,7 +864,7 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, Vulkan
             self.vk_device.as_ref().unwrap(), &self.vk_queues.as_ref().unwrap().graphics,
         );
 
-        let view_swapchains: ArrayVec<[ViewSwapchain; 2]> = {
+        let view_swapchains: ArrayVec<[RefCell<ViewSwapchain>; 2]> = {
             let mut swapchains = ArrayVec::new();
 
             for (_index, view) in view_config_views.into_iter().enumerate() {
@@ -794,7 +883,7 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, Vulkan
                     NonZeroU32::new(view.recommended_swapchain_sample_count).unwrap(),
                 );
 
-                swapchains.push(ViewSwapchain::new(Box::new(swapchain) as Box<dyn Swapchain>));
+                swapchains.push(RefCell::new(ViewSwapchain::new(Box::new(swapchain) as Box<dyn Swapchain>)));
             }
 
             swapchains
@@ -818,6 +907,8 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, Vulkan
             xr_reference_space_stage,
             xr_frame_stream: RefCell::new(xr_frame_stream),
             swapchains: view_swapchains,
+            frame_state: None,
+            frame_views: None,
         };
 
         stereo_hmd_mediums.push(xr_medium);
@@ -831,9 +922,15 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, Vulkan
             .. self
         }, xr_session)
     }
+
+    pub fn finish_adding_mediums_stereo_hmd(
+        mut self
+    ) -> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, VulkanInitialized::True, WindowsAdded::True, HmdsAdded::True> {
+        unsafe { self.coerce() }
+    }
 }
 
-impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, VulkanInitialized::True> {
+impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, VulkanInitialized::True, WindowsAdded::True, HmdsAdded::True> {
     pub fn build(self) -> Ammolite<MD> {
         let AmmoliteBuilder {
             xr,
@@ -903,9 +1000,22 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, Vulkan
             // view_swapchains,
             synchronization: Some(synchronization),
             buffer_pool_uniform_instance: CpuBufferPool::uniform_buffer(vk_device),
-            camera_position: Vec3::zero(),
-            camera_view_matrix: Mat4::identity(),
-            camera_projection_matrix: Mat4::identity(),
+        }
+    }
+}
+
+pub struct CameraTransforms {
+    pub position: Vec3,
+    pub view_matrix: Mat4,
+    pub projection_matrix: Mat4,
+}
+
+impl Default for CameraTransforms {
+    fn default() -> Self {
+        Self {
+            position: Vec3::zero(),
+            view_matrix: Mat4::identity(),
+            projection_matrix: Mat4::identity(),
         }
     }
 }
@@ -926,26 +1036,26 @@ pub struct Ammolite<MD: MediumData> {
     pub synchronization: Option<Box<dyn GpuFuture>>,
     // TODO Consider moving to SharedGltfGraphicsPipelineResources
     pub buffer_pool_uniform_instance: CpuBufferPool<InstanceUBO>,
-    pub camera_position: Vec3,
-    pub camera_view_matrix: Mat4,
-    pub camera_projection_matrix: Mat4,
 }
 
 impl<MD: MediumData> Ammolite<MD> {
     pub fn builder<'a>(
         application_name: &'a str,
         application_version: (u16, u16, u16),
-    ) -> AmmoliteBuilder<'a, MD, OpenXrInitialized::False, VulkanInitialized::False> {
+    ) -> AmmoliteBuilder<'a, MD, OpenXrInitialized::False, VulkanInitialized::False, WindowsAdded::False, HmdsAdded::False> {
         AmmoliteBuilder::new(application_name, application_version)
     }
 
     /// returns `true`, to indicate to quit the application
-    pub fn handle_events(&mut self) -> bool {
+    pub fn handle_events(&mut self, delta_time: &Duration) -> bool {
         let mut quit = false;
 
         'outer_loop:
-        for medium in self.mediums_mut() {
-            for command in medium.data_mut().handle_events() {
+        for medium in Self::mediums_mut(&mut self.xr.stereo_hmd_mediums,
+                                        &mut self.window_mediums) {
+            for command in medium.data_mut().handle_events(delta_time) {
+                println!("Handling events command: {:?}", command);
+
                 match command {
                     HandleEventsCommand::Quit => {
                         quit = true;
@@ -954,8 +1064,10 @@ impl<MD: MediumData> Ammolite<MD> {
                     HandleEventsCommand::CenterCursor => {
                         // TODO
                     },
-                    HandleEventsCommand::RecreateSwapchains => {
-                        // TODO
+                    HandleEventsCommand::RecreateSwapchain(swapchain_index) => {
+                        let mut view_swapchain = medium.swapchains()[swapchain_index].borrow_mut();
+                        view_swapchain.framebuffers = None;
+                        view_swapchain.recreate = true;
                     }
                 }
             }
@@ -964,23 +1076,37 @@ impl<MD: MediumData> Ammolite<MD> {
         quit
     }
 
-    pub fn mediums<'a>(&'a self) -> impl Iterator<Item=&dyn Medium<MD>> {
-        self.xr.stereo_hmd_mediums.iter().map(|m| m as &dyn Medium<MD>)
-            .chain(self.window_mediums.iter().map(|m| m as &dyn Medium<MD>))
+    pub fn mediums<'a>(stereo_hmd_mediums: &'a ArrayVec<[XrMedium<MD>; 1]>, window_mediums: &'a ArrayVec<[WindowMedium<MD>; 1]>) -> impl Iterator<Item=&'a (dyn Medium<MD> + 'a)> {
+        stereo_hmd_mediums.iter().map(|m| m as &dyn Medium<MD>)
+            .chain(window_mediums.iter().map(|m| m as &dyn Medium<MD>))
     }
 
-    pub fn mediums_mut(&mut self) -> impl Iterator<Item=&mut dyn Medium<MD>> {
-        self.xr.stereo_hmd_mediums.iter_mut().map(|m| m as &mut dyn Medium<MD>)
-            .chain(self.window_mediums.iter_mut().map(|m| m as &mut dyn Medium<MD>))
+    // pub fn mediums<'a>(&'a self) -> impl Iterator<Item=&dyn Medium<MD>> {
+    //     self.xr.stereo_hmd_mediums.iter().map(|m| m as &dyn Medium<MD>)
+    //         .chain(self.window_mediums.iter().map(|m| m as &dyn Medium<MD>))
+    // }
+
+    pub fn mediums_mut<'a>(stereo_hmd_mediums: &'a mut ArrayVec<[XrMedium<MD>; 1]>, window_mediums: &'a mut ArrayVec<[WindowMedium<MD>; 1]>) -> impl Iterator<Item=&'a mut (dyn Medium<MD> + 'a)> {
+        stereo_hmd_mediums.iter_mut().map(|m| m as &mut dyn Medium<MD>)
+            .chain(window_mediums.iter_mut().map(|m| m as &mut dyn Medium<MD>))
     }
 
-    pub fn view_swapchains(&self) -> impl Iterator<Item=&ViewSwapchain> {
-        self.mediums().flat_map(|m| m.swapchains().into_iter().collect::<Vec<_>>())
+    // pub fn mediums_mut(&mut self) -> impl Iterator<Item=&mut dyn Medium<MD>> {
+    //     self.xr.stereo_hmd_mediums.iter_mut().map(|m| m as &mut dyn Medium<MD>)
+    //         .chain(self.window_mediums.iter_mut().map(|m| m as &mut dyn Medium<MD>))
+    // }
+    
+    pub fn view_swapchains<'a>(stereo_hmd_mediums: &'a ArrayVec<[XrMedium<MD>; 1]>, window_mediums: &'a ArrayVec<[WindowMedium<MD>; 1]>) -> impl Iterator<Item=&'a RefCell<ViewSwapchain>> {
+        Self::mediums(stereo_hmd_mediums, window_mediums).flat_map(|m| m.swapchains().into_iter().collect::<Vec<_>>())
     }
 
-    pub fn view_swapchains_mut(&mut self) -> impl Iterator<Item=&mut ViewSwapchain> {
-        self.mediums_mut().flat_map(|m| m.swapchains_mut().into_iter().collect::<Vec<_>>())
-    }
+    // pub fn view_swapchains(&self) -> impl Iterator<Item=&RefCell<ViewSwapchain>> {
+    //     self.mediums().flat_map(|m| m.swapchains().into_iter().collect::<Vec<_>>())
+    // }
+
+    // pub fn view_swapchains_mut(&mut self) -> impl Iterator<Item=&mut ViewSwapchain> {
+    //     self.mediums_mut().flat_map(|m| m.swapchains_mut().into_iter().collect::<Vec<_>>())
+    // }
 
     pub fn load_model<S: AsRef<Path>>(&mut self, path: S) -> Model {
         let init_command_buffer_builder = AutoCommandBufferBuilder::primary_one_time_submit(self.device.clone(), self.vk_queues.graphics.family()).unwrap();
@@ -1016,47 +1142,41 @@ impl<MD: MediumData> Ammolite<MD> {
         self.synchronization.as_mut().unwrap().cleanup_finished();
 
         let world_space_models = model_provider();
-        let view_swapchains_len = self.view_swapchains().count();
+        let view_swapchains_len = Self::view_swapchains(&mut self.xr.stereo_hmd_mediums,
+                                                       &mut self.window_mediums).count();
 
-        for stereo_hmd_medium in self.xr.stereo_hmd_mediums.iter_mut() {
-            let state = stereo_hmd_medium.xr_frame_stream.borrow_mut().wait().unwrap();
-            let (_view_flags, views) = stereo_hmd_medium.xr_session
-                .locate_views(state.predicted_display_time, &stereo_hmd_medium.xr_reference_space_stage)
-                .unwrap();
-            let status = stereo_hmd_medium.xr_frame_stream.borrow_mut().begin().unwrap();
-
-            if status != openxr::sys::Result::SESSION_VISIBILITY_UNAVAILABLE {
+        // for stereo_hmd_medium in self.xr.stereo_hmd_mediums.iter_mut() {
+        for medium in Self::mediums_mut(&mut self.xr.stereo_hmd_mediums,
+                                        &mut self.window_mediums) {
+            if medium.wait_for_frame() {
                 // let view_swapchains = self.view_swapchains().collect::<Vec<_>>();
 
-                for (view_swapchain_index, view_swapchain) in stereo_hmd_medium.swapchains_mut().iter_mut().enumerate() {
+                for (view_swapchain_index, view_swapchain) in medium.swapchains().iter().enumerate() {
                 // for (view_swapchain_index, view_swapchain) in view_swapchains.iter().enumerate() {
+                    let mut view_swapchain = view_swapchain.borrow_mut();
+
                     // A loop is used as a way to reset the rendering using `continue` if something goes wrong,
                     // there is a `break` statement at the end.
                     loop {
-                        // if view_swapchain.recreate {
-                        //     // FIXME: uncomment, but enable only for window swapchains
-                        //     // self.window_dimensions = {
-                        //     //     let dpi = self.window.window().get_hidpi_factor();
-                        //     //     let (width, height): (u32, u32) = self.window.window().get_inner_size().unwrap().to_physical(dpi)
-                        //     //         .into();
-                        //     //     [
-                        //     //         NonZeroU32::new(width).expect("The width of the window must not be 0."),
-                        //     //         NonZeroU32::new(height).expect("The height of the window must not be 0."),
-                        //     //     ]
-                        //     // };
-                        //     match view_swapchain.swapchain.recreate_with_dimension(self.window_dimensions) {
-                        //         Ok(()) => (),
-                        //         // This error tends to happen when the user is manually resizing the window.
-                        //         // Simply restarting the loop is the easiest way to fix this issue.
-                        //         Err(SwapchainCreationError::UnsupportedDimensions) => {
-                        //             continue;
-                        //         },
-                        //         Err(err) => panic!("{:?}", err)
-                        //     };
+                        if view_swapchain.recreate {
+                            let dimensions = medium.get_dimensions();
 
-                        //     view_swapchain.framebuffers = None;
-                        //     view_swapchain.recreate = false;
-                        // }
+                            println!("Resizing to: [{}; {}]", dimensions[0], dimensions[1]);
+
+                            match view_swapchain.swapchain.recreate_with_dimension(dimensions) {
+                                Ok(()) => (),
+                                // This error tends to happen when the user is manually resizing the window.
+                                // Simply restarting the loop is the easiest way to fix this issue.
+                                Err(SwapchainCreationError::UnsupportedDimensions) => {
+                                    println!("Unsupported dimensions: [{}; {}]", dimensions[0], dimensions[1]);
+                                    continue;
+                                },
+                                Err(err) => panic!("{:?}", err)
+                            };
+
+                            view_swapchain.framebuffers = None;
+                            view_swapchain.recreate = false;
+                        }
 
                         // Because framebuffers contains an Arc on the old swapchain, we need to
                         // recreate framebuffers as well.
@@ -1112,12 +1232,16 @@ impl<MD: MediumData> Ammolite<MD> {
                             .join(acquire_future)));
 
                         let dimensions = view_swapchain.swapchain.dimensions();
+                        let camera_transforms = medium.data().get_camera_transforms(
+                            view_swapchain_index,
+                            dimensions
+                        );
                         let scene_ubo = SceneUBO::new(
                             secs_elapsed,
                             Vec2([dimensions[0].get() as f32, dimensions[1].get() as f32]),
-                            self.camera_position.clone(),
-                            self.camera_view_matrix.clone(),
-                            self.camera_projection_matrix.clone(),
+                            camera_transforms.position.clone(),
+                            camera_transforms.view_matrix.clone(),
+                            camera_transforms.projection_matrix.clone(),
                         );
 
                         let buffer_updates = AutoCommandBufferBuilder::primary_one_time_submit(
@@ -1157,7 +1281,7 @@ impl<MD: MediumData> Ammolite<MD> {
                             },
                             helper_resources: &self.helper_resources,
                             view_swapchain_index,
-                            view_swapchain,
+                            view_swapchain: &view_swapchain,
                             vk_queues: &self.vk_queues,
                             buffer_pool_uniform_instance: &self.buffer_pool_uniform_instance,
                         };
@@ -1205,49 +1329,12 @@ impl<MD: MediumData> Ammolite<MD> {
                     }
                 }
 
-                for view_swapchain in stereo_hmd_medium.swapchains_mut().iter_mut() {
-                    view_swapchain.swapchain.finish_rendering();
+                for view_swapchain in medium.swapchains().iter() {
+                    view_swapchain.borrow_mut().swapchain.finish_rendering();
                 }
             }
 
-            // TODO: do not reallocate the vec every time render is called
-            let composition_layers: Vec<openxr::CompositionLayerProjectionView<_>> = {
-                let view_swapchains = stereo_hmd_medium.swapchains();
-                let swapchains = view_swapchains.iter()
-                    .map(|view_swapchain| &view_swapchain.swapchain)
-                    .collect::<Vec<_>>();
-                let mut composition_layers = Vec::with_capacity(stereo_hmd_medium.swapchains().len());
-
-                for (index, swapchain) in swapchains.iter().enumerate() {
-                    let dimensions = swapchain.dimensions();
-                    composition_layers.push(openxr::CompositionLayerProjectionView::new()
-                        .pose(views[index].pose)
-                        .fov(views[index].fov)
-                        .sub_image(
-                            openxr::SwapchainSubImage::new()
-                            .swapchain(swapchain.downcast_xr().unwrap().inner())
-                            .image_array_index(0)
-                            .image_rect(openxr::Rect2Di {
-                                offset: openxr::Offset2Di { x: 0, y: 0 },
-                                extent: openxr::Extent2Di { // FIXME
-                                    width: dimensions[0].get() as i32,
-                                    height: dimensions[1].get() as i32,
-                                },
-                            })
-                        )
-                    )
-                }
-
-                composition_layers
-            };
-
-            stereo_hmd_medium.xr_frame_stream.borrow_mut().end(
-                state.predicted_display_time,
-                openxr::EnvironmentBlendMode::OPAQUE,
-                &[&openxr::CompositionLayerProjection::new()
-                    .space(&stereo_hmd_medium.xr_reference_space_stage)
-                    .views(&composition_layers[..])]
-            ).unwrap();
+            medium.finalize_frame();
         }
     }
 

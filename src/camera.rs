@@ -206,4 +206,10 @@ pub fn construct_perspective_projection_matrix(near_plane: f32, far_plane: f32, 
                          0.0,   f,                0.0,                       0.0,
                          0.0, 0.0, -z_f / (z_n - z_f), (z_n * z_f) / (z_n - z_f),
                          0.0, 0.0,                1.0,                       0.0])
+
+    // glTF spec formula:
+    // mat4!([1.0 / (aspect_ratio * f), 0.0,     0.0,  0.0,
+    //        0.0,                      1.0 * f, 0.0,  0.0,
+    //        0.0,                      0.0,     -1.0, -2.0 * z_n,
+    //        0.0,                      0.0,     -1.0, 0.0])
 }

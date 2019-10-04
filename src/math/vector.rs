@@ -69,6 +69,12 @@ macro_rules! impl_vec {
             }
         }
 
+        impl Default for $ty_name {
+            fn default() -> Self {
+                Self::zero()
+            }
+        }
+
         impl_unary_operator! {
             operator_type: [Neg];
             inline: [true];

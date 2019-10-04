@@ -1,11 +1,12 @@
 macro_rules! impl_mat_macro {
     ($ty_name:ident, $dims:expr, $macro_name:ident, $vector_ty_name:ident) => {
         #[allow(unused)]
+        #[macro_export]
         macro_rules! $macro_name {
             {
                 $component_array:expr
             } => {{
-                use crate::math::matrix::{Matrix, $ty_name};
+                use $crate::math::{Matrix, $ty_name};
                 let components: [f32; $dims * $dims] = $component_array;
                 let mut result = <$ty_name as Matrix>::zero();
 

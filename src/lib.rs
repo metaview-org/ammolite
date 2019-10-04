@@ -42,7 +42,7 @@ use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
 use vulkano::device::{Device, RawDeviceExtensions, DeviceExtensions, Queue, Features};
 use vulkano::instance::{ApplicationInfo, Instance as VkInstance, PhysicalDevice, QueueFamily};
 use vulkano::sync::{FlushError, GpuFuture};
-use vulkano::format::{Format, ClearValue, R8G8B8A8Srgb};
+use vulkano::format::*;
 use vulkano::image::ImageUsage;
 use vulkano::pipeline::viewport::Viewport;
 use vulkano::swapchain::{PresentMode, SurfaceTransform, AcquireError, SwapchainCreationError, Surface};
@@ -77,8 +77,9 @@ pub const NONZERO_ONE: NonZeroU32 = unsafe { NonZeroU32::new_unchecked(1) };
 
 fn swapchain_format_priority(format: &Format) -> u32 {
     match *format {
-        Format::R8G8B8Srgb | Format::B8G8R8Srgb | Format::R8G8B8A8Srgb | Format::B8G8R8A8Srgb => 0,
-        _ => 1,
+        Format::R8G8B8Srgb | Format::R8G8B8A8Srgb => 0,
+        Format::B8G8R8Srgb | Format::B8G8R8A8Srgb => 1,
+        _ => 2,
     }
 }
 
@@ -113,6 +114,7 @@ impl ViewSwapchain {
         // medium_index: usize,
         // index_within_medium: usize
     ) -> Self {
+        println!("format: {:?}", swapchain.format());
         Self {
             swapchain,
             // index,
@@ -166,15 +168,102 @@ impl ViewSwapchain {
 //     }
 // }
 
+#[derive(Clone, Default)]
+pub struct ViewPose {
+    pub orientation: Mat3,
+    pub position: Vec3,
+}
+
+impl From<openxr::Posef> for ViewPose {
+    fn from(other: openxr::Posef) -> Self {
+        Self {
+            orientation: Mat3::from_quaternion([
+                other.orientation.x,
+                other.orientation.y,
+                other.orientation.z,
+                other.orientation.w,
+            ]),
+            position: [
+                other.position.x,
+                other.position.y,
+                other.position.z,
+            ].into(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ViewFov {
+    pub angle_left: f32,
+    pub angle_right: f32,
+    pub angle_up: f32,
+    pub angle_down: f32,
+}
+
+impl ViewFov {
+    pub fn symmetric(horizontal: f32, vertical: f32) -> Self {
+        Self {
+            angle_left:  -horizontal / 2.0,
+            angle_right:  horizontal / 2.0,
+            angle_up:     vertical   / 2.0,
+            angle_down:  -vertical   / 2.0,
+        }
+    }
+}
+
+impl From<openxr::Fovf> for ViewFov {
+    fn from(other: openxr::Fovf) -> Self {
+        Self {
+            angle_left: other.angle_left,
+            angle_right: other.angle_right,
+            angle_up: other.angle_up,
+            angle_down: other.angle_down,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct View {
+    pub pose: ViewPose,
+    pub fov: ViewFov,
+}
+
+impl View {
+    pub fn with_symmetric_fov(horizontal: f32, vertical: f32) -> Self {
+        Self {
+            pose: Default::default(),
+            fov: ViewFov::symmetric(horizontal, vertical),
+        }
+    }
+}
+
+impl From<openxr::View> for View {
+    fn from(other: openxr::View) -> Self {
+        Self {
+            pose: other.pose.into(),
+            fov: other.fov.into(),
+        }
+    }
+}
+
+/**
+ * A command, which may not be implemented by all medium types.
+ */
+#[derive(Debug)]
+pub enum MediumSpecificHandleEventsCommand {
+    CenterCursorToWindow,
+}
+
 #[derive(Debug)]
 pub enum HandleEventsCommand {
     Quit,
-    CenterCursor,
+    MediumSpecific(MediumSpecificHandleEventsCommand),
     RecreateSwapchain(usize),
 }
 
 pub trait MediumData: Sized {
-    fn get_camera_transforms(&self, view_index: usize, dimensions: [NonZeroU32; 2]) -> CameraTransforms;
+    // TODO: unify dimensions and view
+    fn get_camera_transforms(&self, view_index: usize, view: &View, dimensions: [NonZeroU32; 2]) -> CameraTransforms;
     fn handle_events(&mut self, delta_time: &Duration) -> SmallVec<[HandleEventsCommand; 8]>;
 }
 
@@ -191,11 +280,13 @@ pub trait Medium<MD: MediumData> {
     // fn poll_events<T>(&mut self, event_handler: T) where T: FnMut(Self::Event);
 
     /**
-     * Waits for a frame to become available. Returns `true`, if rendering for
-     * this medium should commence. Otherwise, returns `false`, then rendering
-     * for this medium should be skipped.
+     * Waits for a frame to become available. Returns `Some(vec)`, if rendering
+     * for this medium should commence. Otherwise, returns `None`, then
+     * rendering for this medium should be skipped.
+     *
+     * TODO: Remove allocation of Vec
      */
-    fn wait_for_frame(&mut self) -> bool;
+    fn wait_for_frame(&mut self) -> Option<Vec<View>>;
 
     /**
      * Gets called at the end of every frame, even when `wait_for_frame`
@@ -207,7 +298,16 @@ pub trait Medium<MD: MediumData> {
      * Returns the recommended render dimensions of the medium.
      */
     fn get_dimensions(&self) -> [NonZeroU32; 2];
+
+    /**
+     * Handle a medium-specific event command.
+     * Returns `true`, when the command was handled, otherwise `false`, if this
+     * medium does not handle this command.
+     */
+    fn handle_events_command(&mut self, command: MediumSpecificHandleEventsCommand) -> bool;
 }
+
+
 
 pub struct WindowMedium<MD: MediumData> {
     pub data: MD,
@@ -247,8 +347,8 @@ impl<MD: MediumData> Medium<MD> for WindowMedium<MD> {
     //     })
     // }
 
-    fn wait_for_frame(&mut self) -> bool {
-        true
+    fn wait_for_frame(&mut self) -> Option<Vec<View>> {
+        Some(vec![View::with_symmetric_fov(90.0, 90.0)])
     }
 
     fn finalize_frame(&mut self) {}
@@ -262,6 +362,20 @@ impl<MD: MediumData> Medium<MD> for WindowMedium<MD> {
             NonZeroU32::new(width).expect("The width of the window must not be 0."),
             NonZeroU32::new(height).expect("The height of the window must not be 0."),
         ]
+    }
+
+    fn handle_events_command(&mut self, command: MediumSpecificHandleEventsCommand) -> bool {
+        match command {
+            CenterCursor => {
+                let dimensions = self.get_dimensions();
+                self.window.window().set_cursor_position(
+                    (dimensions[0].get() as f64 / 2.0, dimensions[1].get() as f64 / 2.0).into()
+                ).expect("Could not center the cursor position.");
+            }
+            _ => return false
+        }
+
+        true
     }
 }
 
@@ -311,16 +425,22 @@ impl<'a, MD: MediumData> Medium<MD> for XrMedium<MD> {
     //     }
     // }
 
-    fn wait_for_frame(&mut self) -> bool {
+    fn wait_for_frame(&mut self) -> Option<Vec<View>> {
         let state = self.xr_frame_stream.borrow_mut().wait().unwrap();
         let (_view_flags, views) = self.xr_session
             .locate_views(state.predicted_display_time, &self.xr_reference_space_stage)
             .unwrap();
         self.frame_state = Some(state);
-        self.frame_views = Some(views);
+        self.frame_views = Some(views.clone());
         let status = self.xr_frame_stream.borrow_mut().begin().unwrap();
 
-        status != openxr::sys::Result::SESSION_VISIBILITY_UNAVAILABLE
+        if status == openxr::sys::Result::SESSION_VISIBILITY_UNAVAILABLE {
+            return None;
+        }
+
+        Some(views.into_iter()
+            .map(|view| view.into())
+            .collect())
     }
 
     fn finalize_frame(&mut self) {
@@ -370,6 +490,14 @@ impl<'a, MD: MediumData> Medium<MD> for XrMedium<MD> {
     fn get_dimensions(&self) -> [NonZeroU32; 2] {
         unimplemented!()
     }
+
+    fn handle_events_command(&mut self, command: MediumSpecificHandleEventsCommand) -> bool {
+        match command {
+            _ => return false
+        }
+
+        true
+    }
 }
 
 
@@ -414,6 +542,12 @@ pub struct XrContext<MD: MediumData> {
 pub struct UninitializedWindowMedium<MD> {
     pub events_loop: Rc<RefCell<EventsLoop>>,
     pub window_builder: WindowBuilder,
+    pub window_handler: Option<Box<dyn FnOnce(&Arc<Surface<Window>>, &mut MD)>>,
+    pub data: MD,
+}
+
+pub struct UninitializedStereoHmdMedium<MD> {
+    pub instance_handler: Option<Box<dyn FnOnce(&Arc<XrInstance>, &XrVkSession, &mut MD)>>,
     pub data: MD,
 }
 
@@ -618,6 +752,7 @@ impl<'a, MD: MediumData, A: OpenXrInitializedTrait> AmmoliteBuilder<'a, MD, A, V
         let mut supported_formats: Vec<Format> = capabilities.supported_formats.iter()
             .map(|(current_format, _)| *current_format)
             .collect();
+        println!("Supported formats: {:?}", &supported_formats);
         supported_formats.sort_by(swapchain_format_compare);
         let format = supported_formats[0];
 
@@ -659,14 +794,17 @@ impl<'a, MD: MediumData, A: OpenXrInitializedTrait> AmmoliteBuilder<'a, MD, A, V
                 let UninitializedWindowMedium {
                     events_loop,
                     window_builder,
-                    data,
+                    window_handler,
+                    mut data,
                 } = uninitialized_window_medium;
                 let events_loop = events_loop.as_ref().borrow();
+                let window = window_builder.build_vk_surface(&events_loop, self.vk_instance.as_ref().unwrap().clone()).unwrap();
 
-                (
-                    window_builder.build_vk_surface(&events_loop, self.vk_instance.as_ref().unwrap().clone()).unwrap(),
-                    data,
-                )
+                if let Some(window_handler) = window_handler {
+                    (window_handler)(&window, &mut data)
+                }
+
+                (window, data)
             })
             .collect();
 
@@ -822,8 +960,13 @@ impl<'a, MD: MediumData, A: OpenXrInitializedTrait> AmmoliteBuilder<'a, MD, A, V
 impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, VulkanInitialized::True, WindowsAdded::True, HmdsAdded::False> {
     pub fn add_medium_stereo_hmd(
         mut self,
-        data: MD,
-    ) -> (Self, XrVkSession) {
+        uninitialized_stereo_hmd_medium: UninitializedStereoHmdMedium<MD>,
+    ) -> Self {
+        let UninitializedStereoHmdMedium {
+            instance_handler,
+            mut data,
+        } = uninitialized_stereo_hmd_medium;
+
         let XrContext {
             instance: xr_instance,
             system: xr_system,
@@ -878,7 +1021,8 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, Vulkan
                     xr_session.clone(),
                     dimensions,
                     crate::NONZERO_ONE,
-                    R8G8B8A8Srgb,
+                    // R8G8B8A8Srgb,
+                    B8G8R8A8Srgb,
                     ImageUsage::all(), // FIXME
                     NonZeroU32::new(view.recommended_swapchain_sample_count).unwrap(),
                 );
@@ -900,10 +1044,14 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, Vulkan
             },
         ).unwrap();
 
+        if let Some(instance_handler) = instance_handler {
+            (instance_handler)(&xr_instance, &xr_session, &mut data);
+        }
+
         let xr_medium = XrMedium {
             data,
             xr_instance: xr_instance.clone(),
-            xr_session: xr_session.clone(),
+            xr_session: xr_session,
             xr_reference_space_stage,
             xr_frame_stream: RefCell::new(xr_frame_stream),
             swapchains: view_swapchains,
@@ -913,14 +1061,14 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, Vulkan
 
         stereo_hmd_mediums.push(xr_medium);
 
-        (AmmoliteBuilder {
+        AmmoliteBuilder {
             xr: Some(XrContext {
                 instance: xr_instance,
                 system: xr_system,
                 stereo_hmd_mediums,
             }),
             .. self
-        }, xr_session)
+        }
     }
 
     pub fn finish_adding_mediums_stereo_hmd(
@@ -1061,8 +1209,8 @@ impl<MD: MediumData> Ammolite<MD> {
                         quit = true;
                         break 'outer_loop;
                     },
-                    HandleEventsCommand::CenterCursor => {
-                        // TODO
+                    HandleEventsCommand::MediumSpecific(command) => {
+                        medium.handle_events_command(command);
                     },
                     HandleEventsCommand::RecreateSwapchain(swapchain_index) => {
                         let mut view_swapchain = medium.swapchains()[swapchain_index].borrow_mut();
@@ -1148,11 +1296,12 @@ impl<MD: MediumData> Ammolite<MD> {
         // for stereo_hmd_medium in self.xr.stereo_hmd_mediums.iter_mut() {
         for medium in Self::mediums_mut(&mut self.xr.stereo_hmd_mediums,
                                         &mut self.window_mediums) {
-            if medium.wait_for_frame() {
+            if let Some(views) = medium.wait_for_frame() {
                 // let view_swapchains = self.view_swapchains().collect::<Vec<_>>();
 
                 for (view_swapchain_index, view_swapchain) in medium.swapchains().iter().enumerate() {
                 // for (view_swapchain_index, view_swapchain) in view_swapchains.iter().enumerate() {
+                    let view = &views[view_swapchain_index];
                     let mut view_swapchain = view_swapchain.borrow_mut();
 
                     // A loop is used as a way to reset the rendering using `continue` if something goes wrong,
@@ -1234,6 +1383,7 @@ impl<MD: MediumData> Ammolite<MD> {
                         let dimensions = view_swapchain.swapchain.dimensions();
                         let camera_transforms = medium.data().get_camera_transforms(
                             view_swapchain_index,
+                            view,
                             dimensions
                         );
                         let scene_ubo = SceneUBO::new(
@@ -1442,157 +1592,3 @@ impl<MD: MediumData> Ammolite<MD> {
                  .then_execute_same_queue(command_buffer.build().unwrap()).unwrap())
     }
 }
-
-// fn main() {
-//     let mut ammolite = Ammolite::new();
-
-//     let model_path = std::env::args().nth(1).unwrap_or_else(|| {
-//         eprintln!("No model path provided.");
-//         std::process::exit(1);
-//     });
-
-//     let model = ammolite.load_model(model_path);
-
-//     // Timing and camera controls are not handled by the renderer
-//     let mut mouse_delta: (f64, f64) = (0.0, 0.0);
-//     let mut camera = PitchYawCamera3::new();
-//     let mut pressed_keys: HashSet<VirtualKeyCode> = HashSet::new();
-//     let mut pressed_mouse_buttons: HashSet<MouseButton> = HashSet::new();
-//     let mut cursor_capture = true;
-
-//     let init_instant = Instant::now();
-//     let mut previous_frame_instant = init_instant.clone();
-//     let mut quit = false;
-
-//     while !quit {
-//         let now = Instant::now();
-//         let elapsed = now.duration_since(init_instant);
-//         let delta_time = now.duration_since(previous_frame_instant);
-//         previous_frame_instant = now;
-
-//         camera.update(&delta_time, &mouse_delta, &pressed_keys, &pressed_mouse_buttons);
-//         mouse_delta = (0.0, 0.0);
-
-//         ammolite.camera_position = camera.get_position();
-//         ammolite.camera_view_matrix = camera.get_view_matrix();
-//         ammolite.camera_projection_matrix = construct_perspective_projection_matrix(
-//             0.001,
-//             1000.0,
-//             ammolite.window_dimensions[0].get() as f32 / ammolite.window_dimensions[1].get() as f32,
-//             std::f32::consts::FRAC_PI_2,
-//         );
-//         // construct_orthographic_projection_matrix(0.1, 1000.0, [ammolite.window_dimensions[0] as f32 / ammolite.window_dimensions[1] as f32, 1.0].into()),
-
-//         let secs_elapsed = ((elapsed.as_secs() as f64) + (elapsed.as_nanos() as f64) / (1_000_000_000f64)) as f32;
-//         let model_matrices = [
-//             construct_model_matrix(1.0,
-//                                    &[1.0, 0.0, 2.0].into(),
-//                                    &[secs_elapsed.sin() * 0.0 * 1.0, secs_elapsed.cos() * 0.0 * 3.0 / 2.0, 0.0].into()),
-//             construct_model_matrix(1.0,
-//                                    &[1.0, 1.0, 2.0].into(),
-//                                    &[secs_elapsed.sin() * 0.0 * 1.0, secs_elapsed.cos() * 0.0 * 3.0 / 2.0, 0.0].into()),
-//         ];
-
-//         let world_space_models = [
-//             WorldSpaceModel { model: &model, matrix: model_matrices[0].clone() },
-//             // WorldSpaceModel { model: &model, matrix: model_matrices[1].clone() },
-//         ];
-
-//         ammolite.render(&elapsed, || &world_space_models[..]);
-
-//         ammolite.window_events_loop.clone().as_ref().borrow_mut().poll_events(|ev| {
-//             match ev {
-//                 Event::WindowEvent {
-//                     event: WindowEvent::KeyboardInput {
-//                         input: KeyboardInput {
-//                             virtual_keycode: Some(VirtualKeyCode::Escape),
-//                             ..
-//                         },
-//                         ..
-//                     },
-//                     ..
-//                 } |
-//                 Event::WindowEvent {
-//                     event: WindowEvent::CloseRequested,
-//                     ..
-//                 } => quit = true,
-
-//                 Event::WindowEvent {
-//                     event: WindowEvent::KeyboardInput {
-//                         input: KeyboardInput {
-//                             state: ElementState::Released,
-//                             virtual_keycode: Some(VirtualKeyCode::LAlt),
-//                             ..
-//                         },
-//                         ..
-//                     },
-//                     ..
-//                 } => cursor_capture ^= true,
-
-//                 Event::DeviceEvent {
-//                     event: DeviceEvent::Motion { axis, value },
-//                     ..
-//                 } if cursor_capture => {
-//                     match axis {
-//                         0 => mouse_delta.0 += value,
-//                         1 => mouse_delta.1 += value,
-//                         _ => (),
-//                     }
-//                 },
-
-//                 Event::DeviceEvent {
-//                     event: DeviceEvent::MouseMotion { .. },
-//                     ..
-//                 } if cursor_capture => {
-//                     ammolite.window.window().set_cursor_position(
-//                         (ammolite.window_dimensions[0].get() as f64 / 2.0, ammolite.window_dimensions[1].get() as f64 / 2.0).into()
-//                     ).expect("Could not center the cursor position.");
-//                 }
-
-//                 Event::WindowEvent {
-//                     event: WindowEvent::KeyboardInput {
-//                         input: KeyboardInput {
-//                             state,
-//                             virtual_keycode: Some(virtual_code),
-//                             ..
-//                         },
-//                         ..
-//                     },
-//                     ..
-//                 } => {
-//                     match state {
-//                         ElementState::Pressed => { pressed_keys.insert(virtual_code); }
-//                         ElementState::Released => { pressed_keys.remove(&virtual_code); }
-//                     }
-//                 },
-
-//                 Event::WindowEvent {
-//                     event: WindowEvent::MouseInput {
-//                         state,
-//                         button,
-//                         ..
-//                     },
-//                     ..
-//                 } => {
-//                     match state {
-//                         ElementState::Pressed => { pressed_mouse_buttons.insert(button); }
-//                         ElementState::Released => { pressed_mouse_buttons.remove(&button); }
-//                     }
-//                 }
-
-//                 Event::WindowEvent {
-//                     event: WindowEvent::Resized(_),
-//                     ..
-//                 } => {
-//                     // TODO: recreate only actual window swapchains, not HMD ones?
-//                     for view_swapchain in &ammolite.view_swapchains.inner[..] {
-//                         let mut view_swapchain = view_swapchain.write().unwrap();
-//                         view_swapchain.recreate = true;
-//                     }
-//                 }
-
-//                 _ => ()
-//             }
-//         });
-//     }
-// }

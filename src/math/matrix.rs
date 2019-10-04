@@ -61,6 +61,12 @@ macro_rules! impl_mat {
             }
         }
 
+        impl Default for $ty_name {
+            fn default() -> Self {
+                Self::identity()
+            }
+        }
+
         impl Neg for $ty_name {
             type Output = Self;
 
@@ -235,14 +241,47 @@ macro_rules! impl_affine_transformation {
     }
 }
 
+macro_rules! impl_conversion_to_homogeneous_space {
+    ($ty_name_from:ident[$dim_from:expr] -> $ty_name_to:ident) => {
+        impl $ty_name_from {
+            pub fn to_homogeneous(self) -> $ty_name_to {
+                let mut result = $ty_name_to::identity();
+
+                for row in 0..$dim_from {
+                    for column in 0..$dim_from {
+                        result[column][row] = self[column][row];
+                    }
+                }
+
+                result
+            }
+        }
+    }
+}
+
 impl_mat!(Mat1, 1, mat1, Vec1);
 impl_mat!(Mat2, 2, mat2, Vec2);
 impl_mat!(Mat3, 3, mat3, Vec3);
 impl_mat!(Mat4, 4, mat4, Vec4);
 
+impl_conversion_to_homogeneous_space!(Mat1[1] -> Mat2);
+impl_conversion_to_homogeneous_space!(Mat2[2] -> Mat3);
+impl_conversion_to_homogeneous_space!(Mat3[3] -> Mat4);
+
 impl_affine_transformation!(Mat2, Vec2);
 impl_affine_transformation!(Mat3, Vec3);
 impl_affine_transformation!(Mat4, Vec4);
+
+impl Mat3 {
+    pub fn from_quaternion(quaternion: [f32; 4]) -> Self {
+        let [qx, qy, qz, qw] = quaternion;
+
+        // source: https://www.euclideanspace.com/maths/geometry/rotations/conversions/quaternionToMatrix/index.htm
+        mat3!([1.0 - 2.0 * (qy*qy + qz*qz), 2.0 * (qx*qy - qz*qw),       2.0 * (qx*qz + qy*qw),
+               2.0 * (qx*qy + qz*qw),       1.0 - 2.0 * (qx*qx + qz*qz), 2.0 * (qy*qz - qx*qw),
+               2.0 * (qx*qz - qy*qw),       2.0 * (qy*qz + qx*qw),       1.0 - 2.0 * (qx*qx + qy*qy)])
+    }
+}
 
 impl Rotation3<Vec4> for Mat4 {
     #[inline]

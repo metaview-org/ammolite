@@ -32,7 +32,7 @@ impl PitchYawCamera3 {
     pub fn new() -> PitchYawCamera3 {
         Self {
             position: [0.0, 0.0, 0.0].into(),
-            yaw: 0.0,
+            yaw: std::f64::consts::PI,
             pitch: 0.0,
             mouse_sensitivity: 0.002,
             speed: 4.0,
@@ -65,7 +65,7 @@ impl PitchYawCamera3 {
     }
 
     fn get_rotation_axis_angles(&self) -> Vec3 {
-        [-self.pitch as f32, self.yaw as f32, 0.0].into()
+        [self.pitch as f32, self.yaw as f32, 0.0].into()
     }
 }
 
@@ -122,13 +122,13 @@ impl Camera for PitchYawCamera3 {
         let mut direction: Vec3 = Vec3::zero();
 
         pressed_keys.contains(&VirtualKeyCode::W).as_option()
-            .map(|()| direction += &forward);
-        pressed_keys.contains(&VirtualKeyCode::S).as_option()
             .map(|()| direction -= &forward);
+        pressed_keys.contains(&VirtualKeyCode::S).as_option()
+            .map(|()| direction += &forward);
         pressed_keys.contains(&VirtualKeyCode::A).as_option()
-            .map(|()| direction += &left);
-        pressed_keys.contains(&VirtualKeyCode::D).as_option()
             .map(|()| direction -= &left);
+        pressed_keys.contains(&VirtualKeyCode::D).as_option()
+            .map(|()| direction += &left);
         pressed_keys.contains(&VirtualKeyCode::LShift).as_option()
             .map(|()| direction += Vec3::from([0.0, 1.0, 0.0]));
         pressed_keys.contains(&VirtualKeyCode::LControl).as_option()
@@ -172,6 +172,9 @@ pub fn construct_orthographic_projection_matrix(near_plane: f32, far_plane: f32,
 }
 
 pub fn construct_perspective_projection_matrix(near_plane: f32, far_plane: f32, aspect_ratio: f32, fov_rad: f32) -> Mat4 {
+    // This function generates matrix that transforms the view frustum to normalized device
+    // coordinates, which is, in case of Vulkan, the set [-1; 1]x[-1; 1]x[0; 1].
+
     // The resulting `(x, y, z, w)` vector gets normalized following the execution of the vertex
     // shader to `(x/w, y/w, z/w)` (W-division). This makes it possible to create a perspective
     // projection matrix.
@@ -188,28 +191,67 @@ pub fn construct_perspective_projection_matrix(near_plane: f32, far_plane: f32, 
     // but those are not projected.
     let f = 1.0 / (fov_rad / 2.0).tan();
 
-    // We derive the coefficients for the Z coordinate from the following equation:
-    // `f(z) = A*z + B`, because we know we need to translate and scale the Z coordinate.
+    // Because we know, from the nature of the perspective projection, that the
+    // Z coordinate must be scaled and translated, we will be deriving A, B from
+    // the equation:
+    // `f(z) = A*z + B`,
+    // where A and B are the 3rd, respectively 4th column coefficients of the 3rd row.
     // The equation changes to the following, after the W-division:
     // `f(z) = A + B/z`
     // And must satisfy the following conditions:
-    // `f(z_near) = 0`
-    // `f(z_far) = 1`
-    // Solving for A and B gives us the necessary coefficients to construct the matrix.
+    // `f(z_n) = 0`
+    // `f(z_f) = 1`
+    // Solving for A and B gives us the necessary coefficients to construct the matrix:
+    // A = (z_n * z_f) / (z_n - z_f)
+    // B = -z_f / (z_n - z_f)
     // mat4!([f / aspect_ratio, 0.0,                0.0,                       0.0,
     //                     0.0,  -f,                0.0,                       0.0,
     //                     0.0, 0.0, -z_f / (z_n - z_f), (z_n * z_f) / (z_n - z_f),
     //                     0.0, 0.0,                1.0,                       0.0])
 
     // TODO: Investigate the mysterious requirement of flipping the X coordinate
-    mat4!([-f / aspect_ratio, 0.0,                0.0,                       0.0,
-                         0.0,   f,                0.0,                       0.0,
-                         0.0, 0.0, -z_f / (z_n - z_f), (z_n * z_f) / (z_n - z_f),
-                         0.0, 0.0,                1.0,                       0.0])
+    // mat4!([-f / aspect_ratio, 0.0,                0.0,                       0.0,
+    //                      0.0,   f,                0.0,                       0.0,
+    //                      0.0, 0.0, -z_f / (z_n - z_f), (z_n * z_f) / (z_n - z_f),
+    //                      0.0, 0.0,                1.0,                       0.0])
 
     // glTF spec formula:
-    // mat4!([1.0 / (aspect_ratio * f), 0.0,     0.0,  0.0,
-    //        0.0,                      1.0 * f, 0.0,  0.0,
-    //        0.0,                      0.0,     -1.0, -2.0 * z_n,
-    //        0.0,                      0.0,     -1.0, 0.0])
+    mat4!([f / aspect_ratio, 0.0,     0.0,  0.0,
+           0.0,              1.0 * f, 0.0,  0.0,
+           0.0,              0.0,     -1.0, -2.0 * z_n,
+           0.0,              0.0,     -1.0, 0.0])
+}
+
+pub fn construct_perspective_projection_matrix_asymmetric(near_plane: f32, far_plane: f32, angle_right: f32, angle_up: f32, angle_left: f32, angle_down: f32) -> Mat4 {
+    // See http://www.songho.ca/opengl/gl_projectionmatrix.html
+    // for a brilliant derivation of the projection matrix.
+
+    // The resulting `(x, y, z, w)` vector gets normalized following the execution of the vertex
+    // shader to `(x/w, y/w, z/w)` (W-division). This makes it possible to create a perspective
+    // projection matrix.
+    // We copy the Z coordinate to the W coordinate so as to divide all coordinates by Z.
+    let z_n = near_plane;
+    let z_f = far_plane;
+    // With normalization, it is actually `1 / (z * tan(FOV / 2))`, which is the width of the
+    // screen at that point in space of the vector.
+    // The X coordinate needs to be divided by the aspect ratio to make it independent of the
+    // window size.
+    // Even though we could negate the Y coordinate so as to adjust the vectors to the Vulkan
+    // coordinate system, which has the Y axis pointing downwards, contrary to OpenGL, we need to
+    // apply the same transformation to other vertex attributes such as normal and tangent vectors,
+    // but those are not projected.
+
+    let l = -angle_left.tan() * z_n;
+    let r = -angle_right.tan() * z_n;
+    let b = -angle_down.tan() * z_n;
+    let t = -angle_up.tan() * z_n;
+
+    // mat4!([-2.0 * idx,       0.0, sx * idx, 0.0,
+    //              0.0, 2.0 * idy, sy * idy, 0.0,
+    //              0.0,       0.0,      0.0, z_n,
+    //              0.0,       0.0,     -1.0, 0.0])
+    mat4!([-(2.0 * z_n) / (r - l),                   0.0,  -(r + l) / (r - l),                       0.0,
+                             0.0, (2.0 * z_n) / (t - b),  (t + b) / (t - b),                       0.0,
+                             0.0,                   0.0, -z_f / (z_n - z_f), (z_n * z_f) / (z_n - z_f),
+                             0.0,                   0.0,                1.0,                       0.0])
 }

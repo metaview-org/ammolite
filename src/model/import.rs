@@ -571,8 +571,12 @@ pub fn import_device_images<'a, I>(device: &Arc<Device>,
                 (GltfFormat::R8G8, ColorSpace::Srgb) => insert_image_with_format!([R8G8Srgb]),
                 (GltfFormat::R8G8B8, ColorSpace::Linear) => insert_image_with_format!([R8G8B8A8Unorm], Box::new(convert_double_channel_to_triple_channel)),
                 (GltfFormat::R8G8B8, ColorSpace::Srgb) => insert_image_with_format!([R8G8B8A8Srgb], Box::new(convert_double_channel_to_triple_channel)),
+                (GltfFormat::B8G8R8, ColorSpace::Linear) => insert_image_with_format!([B8G8R8A8Unorm], Box::new(convert_double_channel_to_triple_channel)),
+                (GltfFormat::B8G8R8, ColorSpace::Srgb) => insert_image_with_format!([B8G8R8A8Srgb], Box::new(convert_double_channel_to_triple_channel)),
                 (GltfFormat::R8G8B8A8, ColorSpace::Linear) => insert_image_with_format!([R8G8B8A8Unorm]),
                 (GltfFormat::R8G8B8A8, ColorSpace::Srgb) => insert_image_with_format!([R8G8B8A8Srgb]),
+                (GltfFormat::B8G8R8A8, ColorSpace::Linear) => insert_image_with_format!([B8G8R8A8Unorm]),
+                (GltfFormat::B8G8R8A8, ColorSpace::Srgb) => insert_image_with_format!([B8G8R8A8Srgb]),
             }
         }
     }

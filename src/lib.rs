@@ -50,7 +50,7 @@ use vulkano_win::VkSurfaceBuild;
 use winit::{ElementState, MouseButton, Event, DeviceEvent, WindowEvent, KeyboardInput, VirtualKeyCode, EventsLoop, WindowBuilder, Window};
 use winit::dpi::PhysicalSize;
 use smallvec::SmallVec;
-use openxr::{View as XrView, FrameState as XrFrameState};
+use openxr::{View as XrView, FrameState as XrFrameState, FrameWaiter as XrFrameWaiter};
 
 use crate::math::matrix::*;
 use crate::math::vector::*;
@@ -85,6 +85,16 @@ fn swapchain_format_priority(format: &Format) -> u32 {
 
 fn swapchain_format_compare(a: &Format, b: &Format) -> std::cmp::Ordering {
     swapchain_format_priority(a).cmp(&swapchain_format_priority(b))
+}
+
+fn into_raw_u32(version: (u16, u16, u16)) -> u32 {
+    ((version.0 as u32 & 0x3FF) << 22)
+        | ((version.1 as u32 & 0x3FF) << 12)
+        | ((version.2 as u32 & 0xFFF) <<  0)
+}
+
+fn into_raw_u32_xr(version: openxr::Version) -> u32 {
+    into_raw_u32((version.major(), version.minor(), version.patch() as u16))
 }
 
 // fn vulkan_find_supported_format(physical_device: &Arc<PhysicalDevice>, candidates: &[Format]) -> Option<Format> {
@@ -168,10 +178,28 @@ impl ViewSwapchain {
 //     }
 // }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct ViewPose {
     pub orientation: Mat3,
     pub position: Vec3,
+}
+
+impl ViewPose {
+    fn inverse_from(other: openxr::Posef) -> Self {
+        Self {
+            orientation: Mat3::from_quaternion([
+                other.orientation.x,
+                other.orientation.y,
+                other.orientation.z,
+                -other.orientation.w,
+            ]),
+            position: [
+                -other.position.x,
+                -other.position.y,
+                -other.position.z,
+            ].into(),
+        }
+    }
 }
 
 impl From<openxr::Posef> for ViewPose {
@@ -192,7 +220,7 @@ impl From<openxr::Posef> for ViewPose {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ViewFov {
     pub angle_left: f32,
     pub angle_right: f32,
@@ -222,7 +250,7 @@ impl From<openxr::Fovf> for ViewFov {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct View {
     pub pose: ViewPose,
     pub fov: ViewFov,
@@ -233,6 +261,13 @@ impl View {
         Self {
             pose: Default::default(),
             fov: ViewFov::symmetric(horizontal, vertical),
+        }
+    }
+
+    fn inverse_from(other: openxr::View) -> Self {
+        Self {
+            pose: ViewPose::inverse_from(other.pose),
+            fov: other.fov.into(),
         }
     }
 }
@@ -385,6 +420,7 @@ pub struct XrMedium<MD: MediumData> {
     pub xr_instance: Arc<XrInstance>,
     pub xr_session: XrVkSession,
     pub xr_reference_space_stage: openxr::Space,
+    pub xr_frame_waiter: XrFrameWaiter,
     pub xr_frame_stream: RefCell<XrVkFrameStream>,
     // HMD devices typically have 2 screens, one for each eye
     swapchains: ArrayVec<[RefCell<ViewSwapchain>; 2]>,
@@ -426,20 +462,22 @@ impl<'a, MD: MediumData> Medium<MD> for XrMedium<MD> {
     // }
 
     fn wait_for_frame(&mut self) -> Option<Vec<View>> {
-        let state = self.xr_frame_stream.borrow_mut().wait().unwrap();
+        let state = self.xr_frame_waiter.wait().unwrap();
+
+        // Move to after framestream::begin, if necessary
+        if !state.should_render {
+            return None;
+        }
+
         let (_view_flags, views) = self.xr_session
-            .locate_views(state.predicted_display_time, &self.xr_reference_space_stage)
+            .locate_views(openxr::ViewConfigurationType::PRIMARY_STEREO, state.predicted_display_time, &self.xr_reference_space_stage)
             .unwrap();
         self.frame_state = Some(state);
         self.frame_views = Some(views.clone());
         let status = self.xr_frame_stream.borrow_mut().begin().unwrap();
 
-        if status == openxr::sys::Result::SESSION_VISIBILITY_UNAVAILABLE {
-            return None;
-        }
-
         Some(views.into_iter()
-            .map(|view| view.into())
+            .map(|view| View::inverse_from(view))
             .collect())
     }
 
@@ -637,8 +675,8 @@ impl<'a, MD: MediumData, B: VulkanInitializedTrait> AmmoliteBuilder<'a, MD, Open
 
         let used_extensions = openxr::ExtensionSet {
             khr_vulkan_enable: true,
-            khr_visibility_mask: available_extensions.khr_visibility_mask,
-            ext_debug_utils: available_extensions.ext_debug_utils,
+            // khr_visibility_mask: available_extensions.khr_visibility_mask,
+            // ext_debug_utils: available_extensions.ext_debug_utils,
             ..Default::default()
         };
 
@@ -648,14 +686,14 @@ impl<'a, MD: MediumData, B: VulkanInitializedTrait> AmmoliteBuilder<'a, MD, Open
             env!("CARGO_PKG_VERSION_MINOR").parse()
                 .expect("Invalid crate minor version, must be u16."),
             env!("CARGO_PKG_VERSION_PATCH").parse()
-                .expect("Invalid crate patch version, must be u16."),
+                .expect("Invalid crate patch version, must be u32."),
         );
 
         let app_info = openxr::ApplicationInfo {
             engine_name: env!("CARGO_PKG_NAME"),
-            engine_version: engine_version.into_raw(),
+            engine_version: into_raw_u32_xr(engine_version),
             application_name: self.application_name.as_ref(),
-            application_version: openxr::Version::from(self.application_version).into_raw(),
+            application_version: into_raw_u32(self.application_version),
         };
 
         let xr_instance = Arc::new(entry.create_instance(&app_info, &used_extensions).unwrap());
@@ -812,11 +850,12 @@ impl<'a, MD: MediumData, A: OpenXrInitializedTrait> AmmoliteBuilder<'a, MD, A, V
             min_api_version_supported: min_api_version,
             max_api_version_supported: max_api_version,
         } = self.xr.as_ref().unwrap().instance.graphics_requirements::<openxr::Vulkan>(self.xr.as_ref().unwrap().system).unwrap();
-        let min_api_version = min_api_version.into_raw();
-        let max_api_version = max_api_version.into_raw();
+        let min_api_version = into_raw_u32_xr(min_api_version);
+        let max_api_version = into_raw_u32_xr(max_api_version);
         // TODO: Better device selection & SLI support
         let physical_device = PhysicalDevice::enumerate(self.vk_instance.as_ref().unwrap())
             .filter(|physical_device| {
+                println!("physical_device: {:?}", physical_device);
                 let api_version = physical_device.api_version().into_vulkan_version();
 
                 api_version >= min_api_version && api_version <= max_api_version
@@ -988,7 +1027,7 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, Vulkan
             xr_system: openxr::SystemId,
             vk_device: &Arc<Device>,
             vk_queue: &Arc<Queue>,
-        ) -> (XrVkSession, XrVkFrameStream) {
+        ) -> (XrVkSession, XrFrameWaiter, XrVkFrameStream) {
             let create_info = openxr::vulkan::SessionCreateInfo {
                 instance: vk_instance.internal_object() as *const ffi::c_void,
                 physical_device: vk_device.physical_device().internal_object() as *const ffi::c_void,
@@ -1002,7 +1041,7 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, Vulkan
             }.unwrap()
         }
 
-        let (xr_session, xr_frame_stream) = setup_openxr_session(
+        let (xr_session, xr_frame_waiter, xr_frame_stream) = setup_openxr_session(
             &xr_instance, self.vk_instance.as_ref().unwrap(), xr_system,
             self.vk_device.as_ref().unwrap(), &self.vk_queues.as_ref().unwrap().graphics,
         );
@@ -1053,6 +1092,7 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, Vulkan
             xr_instance: xr_instance.clone(),
             xr_session: xr_session,
             xr_reference_space_stage,
+            xr_frame_waiter,
             xr_frame_stream: RefCell::new(xr_frame_stream),
             swapchains: view_swapchains,
             frame_state: None,

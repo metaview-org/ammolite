@@ -383,7 +383,12 @@ impl<MD: MediumData> Medium<MD> for WindowMedium<MD> {
     // }
 
     fn wait_for_frame(&mut self) -> Option<Vec<View>> {
-        Some(vec![View::with_symmetric_fov(90.0, 90.0)])
+        let dimensions = self.get_dimensions();
+        let aspect_ratio = dimensions[0].get() as f32 / dimensions[1].get() as f32;
+        let vertical = std::f32::consts::FRAC_PI_2;
+        let horizontal = 2.0 * (aspect_ratio * (vertical / 2.0).tan()).atan();
+
+        Some(vec![View::with_symmetric_fov(horizontal, vertical)])
     }
 
     fn finalize_frame(&mut self) {}

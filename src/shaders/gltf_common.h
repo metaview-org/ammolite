@@ -6,6 +6,6 @@
 #define PI_4 0.785398163397448309616
 
 #define PROJECT(vector4) (vector4.w == 0 ? vector4.xyz : (vector4.xyz / vector4.w))
-#define GRAM_SCHMIDT(a, b) (a - (b) * dot((a), (b)))
+#define GRAM_SCHMIDT(a, b) ((a) - (b) * dot((a), (b)))
 
 #endif

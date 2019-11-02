@@ -1,0 +1,4 @@
+/resources
+/target
+**/*.rs.bk
+**/*.cap

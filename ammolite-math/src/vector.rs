@@ -15,7 +15,12 @@ pub trait Vector: Neg + Sized + Clone + Debug + PartialEq {
         self.norm_squared().sqrt()
     }
 
-    fn normalize(&mut self);
+    fn normalize_mut(&mut self);
+    fn normalize(&self) -> Self {
+        let mut result = self.clone();
+        result.normalize_mut();
+        result
+    }
 }
 
 pub trait Projected: Vector {
@@ -60,7 +65,7 @@ macro_rules! impl_vec {
                 self.dot(&self)
             }
 
-            fn normalize(&mut self) {
+            fn normalize_mut(&mut self) {
                 let norm = self.norm();
 
                 for coord in &mut self.0 {

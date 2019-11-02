@@ -36,6 +36,7 @@ use gltf::image::Format as GltfFormat;
 use gltf::texture::MagFilter;
 use gltf::texture::MinFilter;
 use failure::Error;
+use ammolite_math::*;
 use crate::NodeUBO;
 use crate::MaterialUBO;
 use crate::iter::ArrayIterator;
@@ -46,7 +47,6 @@ use crate::sampler::IntoVulkanEquivalent;
 use crate::pipeline::DescriptorSetMap;
 use crate::pipeline::GltfGraphicsPipeline;
 use crate::pipeline::GraphicsPipelineSetCache;
-use crate::math::*;
 use crate::model::{Model, HelperResources};
 use crate::model::resource::*;
 
@@ -256,6 +256,7 @@ pub fn precompute_missing_tangent_buffers<'a, I>(device: &Arc<Device>,
                 BufferSlice::from_typed_buffer_access(tangent_buffer_initialization).reinterpret::<[u8]>()
             };
             let mut buffer_data: Vec<GltfVertexTangent> = vec![GltfVertexTangent([0.0; 4]); vertex_count];
+            // TODO
             let vertices_per_face = 3;
             let face_count = index_count / vertices_per_face;
 
@@ -353,7 +354,7 @@ pub fn precompute_missing_tangent_buffers<'a, I>(device: &Arc<Device>,
 pub fn import_device_buffers<'a, I>(device: &Arc<Device>,
                                     queue_families: &I,
                                     document: &Document,
-                                    buffer_data_array: Vec<gltf::buffer::Data>,
+                                    buffer_data_array: &[gltf::buffer::Data],
                                     initialization_tasks: &mut Vec<InitializationTask>)
         -> Result<Vec<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>, Error>
         where I: IntoIterator<Item = QueueFamily<'a>> + Clone {
@@ -407,7 +408,7 @@ pub fn import_device_buffers<'a, I>(device: &Arc<Device>,
     }
 
     // Initialize the buffers with predetermined usages
-    for (index, gltf::buffer::Data(buffer_data)) in buffer_data_array.into_iter().enumerate() {
+    for (index, &gltf::buffer::Data(ref buffer_data)) in buffer_data_array.iter().enumerate() {
         let mut buffer_usage = buffer_usage_vec[index];
 
         if buffer_usage == BufferUsage::none() {
@@ -425,7 +426,8 @@ pub fn import_device_buffers<'a, I>(device: &Arc<Device>,
             )
         }?;
         initialization_tasks.push(InitializationTask::Buffer {
-            data: buffer_data,
+            // TODO: Avoid cloning
+            data: buffer_data.iter().cloned().collect::<Vec<_>>(),
             initialization_buffer: Arc::new(buffer_initialization),
         });
         device_buffers.push(device_buffer);
@@ -591,9 +593,9 @@ fn get_node_matrices_impl(parent: Option<&Node>, node: &Node, results: &mut Vec<
     }
 
     results[node.index()] = Some(if let Some(parent) = parent {
-        results[parent.index()].as_ref().unwrap() * Mat4(node.transform().matrix())
+        results[parent.index()].as_ref().unwrap() * Mat4::new(node.transform().matrix())
     } else {
-        Mat4(node.transform().matrix())
+        Mat4::new(node.transform().matrix())
     });
 
     for child in node.children() {
@@ -622,7 +624,7 @@ pub fn create_node_descriptor_sets<'a>(device: &Arc<Device>,
                                        pipelines: impl IntoIterator<Item=&'a GltfGraphicsPipeline>,
                                        document: &Document,
                                        initialization_tasks: &mut Vec<InitializationTask>)
-        -> Result<Vec<DescriptorSetMap>, Error> {
+        -> Result<(Vec<Mat4>, Vec<DescriptorSetMap>), Error> {
     let pipelines: Vec<_> = pipelines.into_iter().map(Clone::clone).collect();
     let mut node_descriptor_set_maps: Vec<DescriptorSetMap> = Vec::with_capacity(document.nodes().len());
     let transform_matrices = get_node_matrices(&document);
@@ -650,7 +652,7 @@ pub fn create_node_descriptor_sets<'a>(device: &Arc<Device>,
         node_descriptor_set_maps.push(descriptor_set_map);
     }
 
-    Ok(node_descriptor_set_maps)
+    Ok((transform_matrices, node_descriptor_set_maps))
 }
 
 pub fn create_samplers(device: &Arc<Device>, document: &Document) -> Result<Vec<Arc<Sampler>>, Error> {
@@ -837,19 +839,21 @@ pub fn import_model<'a, I, S>(device: &Arc<Device>,
     let converted_index_buffers_by_accessor_index = import_index_buffers_by_accessor_index(device, &queue_families, &document, &buffer_data_array[..], &mut initialization_tasks)?;
     let (normal_buffers, normals) = precompute_missing_normal_buffers(device, &queue_families, &document, &buffer_data_array[..], &mut initialization_tasks)?;
     let tangent_buffers = precompute_missing_tangent_buffers(device, &queue_families, &document, &buffer_data_array[..], &mut initialization_tasks, &normals[..])?;
-    let device_buffers = import_device_buffers(device, &queue_families, &document, buffer_data_array, &mut initialization_tasks)?;
+    let device_buffers = import_device_buffers(device, &queue_families, &document, &buffer_data_array[..], &mut initialization_tasks)?;
     let device_images = import_device_images(device, &queue_families, helper_resources, &document, image_data_array, &mut initialization_tasks)?;
-    let node_descriptor_sets = create_node_descriptor_sets(device, &pipelines[..], &document, &mut initialization_tasks)?;
+    let (node_transform_matrices, node_descriptor_sets) = create_node_descriptor_sets(device, &pipelines[..], &document, &mut initialization_tasks)?;
     let material_descriptor_sets = create_material_descriptor_sets(device, &pipelines[..], helper_resources, &document, &device_images[..], &mut initialization_tasks)?;
     let scene_subpass_context_less_draw_calls = document.scenes().map(|_| arr![RwLock::new(None); 4]).collect();
 
     Ok(SimpleUninitializedResource::new(Model {
         document,
+        buffer_data: buffer_data_array,
         device_buffers,
         device_images,
         converted_index_buffers_by_accessor_index,
         normal_buffers,
         tangent_buffers,
+        node_transform_matrices,
         node_descriptor_sets,
         material_descriptor_sets,
         scene_subpass_context_less_draw_calls,

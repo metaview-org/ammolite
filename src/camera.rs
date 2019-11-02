@@ -3,12 +3,27 @@ use std::collections::HashSet;
 use std::time::Duration;
 use winit::{MouseButton, VirtualKeyCode};
 use boolinator::Boolinator;
-use crate::math::*;
+use ammolite_math::*;
 
 pub trait Camera: std::fmt::Debug {
+    /**
+     * Returns the view matrix intended to be used in the MVP matrix chain.
+     */
     fn get_view_matrix(&self) -> Mat4;
+
+    /**
+     * Returns the position of the camera in the world.
+     */
     fn get_position(&self) -> Vec3;
+
+    /**
+     * Returns the forward unit vector of the camera.
+     */
     fn get_direction(&self) -> Vec3;
+
+    /**
+     * Handle controls.
+     */
     fn update(&mut self,
               delta_time: &Duration,
               cursor_delta: &[f64; 2],
@@ -91,9 +106,9 @@ impl Camera for PitchYawCamera3 {
 
     fn get_direction(&self) -> Vec3 {
         [
-            (self.pitch.cos() * self.yaw.cos()) as f32,
-            self.pitch.sin() as f32,
             (self.pitch.cos() * self.yaw.sin()) as f32,
+            self.pitch.sin() as f32,
+            (self.pitch.cos() * self.yaw.cos()) as f32,
         ].into()
     }
 
@@ -249,8 +264,8 @@ pub fn construct_perspective_projection_matrix_asymmetric(near_plane: f32, far_p
     //              0.0, 2.0 * idy, sy * idy, 0.0,
     //              0.0,       0.0,      0.0, z_n,
     //              0.0,       0.0,     -1.0, 0.0])
-    mat4!([ (2.0 * z_n) / (r - l),                   0.0,   (r + l) / (r - l),                       0.0,
-                             0.0,  (2.0 * z_n) / (t - b),   (t + b) / (t - b),                       0.0,
+    mat4!([(2.0 * z_n) / (r - l),                   0.0,  (r + l) / (r - l),                       0.0,
+                             0.0, (2.0 * z_n) / (t - b),  (t + b) / (t - b),                       0.0,
                              0.0,                   0.0,  z_f / (z_n - z_f), (z_n * z_f) / (z_n - z_f),
                              0.0,                   0.0,               -1.0,                       0.0])
 }

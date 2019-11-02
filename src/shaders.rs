@@ -33,8 +33,8 @@ pub mod gltf_blend_finalize_frag {
     }
 }
 
-use crate::math::matrix::*;
-use crate::math::vector::*;
+use ammolite_math::matrix::*;
+use ammolite_math::vector::*;
 
 pub use crate::shaders::gltf_opaque_frag::ty::*;
 
@@ -44,8 +44,8 @@ impl SceneUBO {
             time_elapsed,
             dimensions: dimensions.0,
             camera_position: camera_position.0,
-            view: view.0,
-            projection: projection.0,
+            view: view.into_inner(),
+            projection: projection.into_inner(),
             _dummy0: Default::default(),
             _dummy1: Default::default(),
         }
@@ -67,7 +67,7 @@ impl Default for SceneUBO {
 impl InstanceUBO {
     pub fn new(model: Mat4) -> InstanceUBO {
         InstanceUBO {
-            model: model.0,
+            model: model.into_inner(),
         }
     }
 }
@@ -83,7 +83,7 @@ impl Default for InstanceUBO {
 impl NodeUBO {
     pub fn new(matrix: Mat4) -> NodeUBO {
         NodeUBO {
-            matrix: matrix.0,
+            matrix: matrix.into_inner(),
         }
     }
 }

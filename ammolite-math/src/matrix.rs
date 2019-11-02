@@ -199,17 +199,17 @@ macro_rules! impl_mat {
             }
 
             fn determinant(&self) -> f32 {
-                dbg!(if $dims == 1 {
+                if $dims == 1 {
                     self.0[0][0]
                 } else {
                     let mut result = 0.0;
 
                     for col in 0..$dims {
-                        result += dbg!(self.0[col][0]) * dbg!(self.cofactor(0, col));
+                        result += self.0[col][0] * self.cofactor(0, col);
                     }
 
                     result
-                })
+                }
             }
 
             fn submatrix(&self, row: usize, col: usize) -> Self::LowerDim {

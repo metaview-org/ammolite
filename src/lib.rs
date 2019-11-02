@@ -8,8 +8,6 @@
 
 #![feature(core_intrinsics)]
 
-#[macro_use]
-pub mod math;
 pub mod buffer;
 pub mod camera;
 pub mod iter;
@@ -32,6 +30,7 @@ use std::cell::{RefCell, Ref, RefMut};
 use std::ffi::{self, CString};
 use core::num::NonZeroU32;
 use arrayvec::ArrayVec;
+use arr_macro::arr;
 use vulkano;
 use vulkano::VulkanObject;
 use vulkano::swapchain::ColorSpace;
@@ -52,8 +51,8 @@ use winit::dpi::PhysicalSize;
 use smallvec::SmallVec;
 use openxr::{View as XrView, FrameState as XrFrameState, FrameWaiter as XrFrameWaiter};
 
-use crate::math::matrix::*;
-use crate::math::vector::*;
+use ammolite_math::matrix::*;
+use ammolite_math::vector::*;
 use crate::model::FramebufferWithClearValues;
 use crate::model::Model;
 use crate::model::DrawContext;
@@ -102,9 +101,129 @@ fn into_raw_u32_xr(version: openxr::Version) -> u32 {
 //     unimplemented!()
 // }
 
+#[derive(Clone)]
 pub struct WorldSpaceModel<'a> {
     pub model: &'a Model,
     pub matrix: Mat4,
+}
+
+#[derive(Clone)]
+pub struct Ray {
+    pub origin: Vec3,
+    pub direction: Vec3,
+}
+
+#[derive(Clone)]
+pub struct HomogeneousRay {
+    pub origin: Vec4,
+    pub direction: Vec4,
+}
+
+impl From<Ray> for HomogeneousRay {
+    fn from(ray: Ray) -> Self {
+        Self {
+            origin: ray.origin.into_homogeneous(),
+            direction: {
+                let mut direction = ray.direction.into_homogeneous();
+                direction.0[3] = 0.0;
+                direction
+            },
+        }
+    }
+}
+
+impl<'a, 'b> std::ops::Mul<&'b Mat4> for &'a HomogeneousRay {
+    type Output = HomogeneousRay;
+
+    fn mul(self, matrix: &'b Mat4) -> HomogeneousRay {
+        HomogeneousRay {
+            origin: matrix * &self.origin,
+            direction: matrix * &self.direction,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RayIntersection {
+    pub distance: f32,
+    pub node_index: usize,
+    pub mesh_index: usize,
+    pub primitive_index: usize,
+}
+
+pub fn intersect_convex_polygon(polygon: &[Vec3], ray: &HomogeneousRay) -> Option<f32> {
+    if polygon.len() < 3 {
+        return None
+    }
+
+    let projected_origin = ray.origin.into_projected();
+    let projected_direction = Vec3([ray.direction.0[0], ray.direction.0[1], ray.direction.0[2]]);
+    let mut sign: Option<bool> = None;
+    let mut intersects_triangle = true;
+    for edge_index in 0..polygon.len() {
+        let vertex_from = &polygon[edge_index];
+        let vertex_to = &polygon[(edge_index + 1) % polygon.len()];
+        let edge = vertex_to - vertex_from;
+
+        let new_origin = &projected_origin - vertex_from;
+        let current_normal = edge.cross(&projected_direction);
+        let current_sign = new_origin.dot(&current_normal);
+
+        if current_sign != 0.0 {
+            let current_sign_bool = current_sign > 0.0;
+            if sign.is_some() && *sign.as_ref().unwrap() != current_sign_bool {
+                intersects_triangle = false;
+            }
+
+            sign = Some(current_sign_bool)
+        }
+    }
+
+    if intersects_triangle {
+        let normal = (&polygon[1] - &polygon[0]).cross(&(&polygon[2] - &polygon[1])).normalize();
+        dbg!(&normal);
+        let distance = -normal.dot(&(projected_origin - &polygon[0])) / normal.dot(&projected_direction);
+        dbg!(&distance);
+
+        if distance >= 0.0 {
+            return Some(distance);
+        }
+    }
+
+    None
+}
+
+pub fn raytrace_distance(wsm: &WorldSpaceModel, ray: &Ray) -> Option<RayIntersection> {
+    let instance_matrix_inverse = wsm.matrix.inverse();
+    let ray: HomogeneousRay = ray.clone().into();
+    let model = wsm.model;
+    let scene = model.document().scenes().nth(0 /*TODO*/).unwrap();
+    let mut closest: Option<RayIntersection> = None;
+
+    for node in scene.nodes() {
+        let node_transform_matrix = &model.node_transform_matrices()[node.index()];
+        let ray_transform_matrix = node_transform_matrix.inverse();
+        let transformed_ray = &(&ray * &ray_transform_matrix) * &instance_matrix_inverse;
+
+        if let Some(mesh) = node.mesh() {
+            for primitive in mesh.primitives() {
+                for face in model.primitive_faces_iter(primitive.clone()) {
+                    if let Some(distance) = intersect_convex_polygon(&face[..], &transformed_ray) {
+                        if closest.is_none() || closest.as_ref().unwrap().distance < distance {
+                            closest = Some(RayIntersection {
+                                distance,
+                                node_index: node.index(),
+                                mesh_index: mesh.index(),
+                                primitive_index: primitive.index(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    closest
 }
 
 pub struct ViewSwapchain {
@@ -1625,7 +1744,7 @@ impl<MD: MediumData> Ammolite<MD> {
                     instance_context,
                     alpha_mode,
                     subpass_index as u8,
-                    0,
+                    0, // TODO
                 ).unwrap();
             }
         }

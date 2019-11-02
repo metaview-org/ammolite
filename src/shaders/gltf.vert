@@ -17,7 +17,6 @@ layout(location = 4) out vec4 f_vertex_color;
 const mat4 y_inversion = mat4(
     1.0,  0.0,  0.0,  0.0,
     0.0, -1.0,  0.0,  0.0,
-    /* 0.0,  1.0,  0.0,  0.0, */
     0.0,  0.0,  1.0,  0.0,
     0.0,  0.0,  0.0,  1.0
 );

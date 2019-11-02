@@ -7,6 +7,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::path::Path;
 use std::mem;
 use std::collections::HashMap;
+use itertools::Itertools;
 use core::num::NonZeroU32;
 use vulkano::buffer::BufferAccess;
 use vulkano::buffer::BufferSlice;
@@ -56,6 +57,7 @@ use crate::pipeline::GraphicsPipelineSetCache;
 use crate::pipeline::GltfGraphicsPipeline;
 use crate::pipeline::DescriptorSetMap;
 use crate::iter::ArrayIterator;
+use ammolite_math::{Vec3, Mat4};
 use self::error::*;
 use self::resource::*;
 
@@ -464,6 +466,7 @@ impl<'a> DrawCallIssuer for GltfDrawCallIssuer<'a> {
 
 pub struct Model {
     document: Document,
+    buffer_data: Vec<gltf::buffer::Data>,
     device_buffers: Vec<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>,
     #[allow(dead_code)]
     device_images: Vec<Arc<dyn ImageViewAccess + Send + Sync>>,
@@ -476,6 +479,7 @@ pub struct Model {
     /// Precomputed tangent buffers, in case they were not specified in the glTF document
     // FIXME: Should probably be of type `GltfVertexTangent` instead of `u8`
     tangent_buffers: Vec<Vec<Option<Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>>>>,
+    node_transform_matrices: Vec<Mat4>,
     // Note: Do not ever try to express the descriptor set explicitly.
     node_descriptor_sets: Vec<DescriptorSetMap>,
     material_descriptor_sets: Vec<DescriptorSetMap>,
@@ -484,6 +488,14 @@ pub struct Model {
 }
 
 impl Model {
+    pub(crate) fn document(&self) -> &Document {
+        &self.document
+    }
+
+    pub(crate) fn node_transform_matrices(&self) -> &[Mat4] {
+        &self.node_transform_matrices[..]
+    }
+
     pub(crate) fn index_byte_slice<'a, T: PodTransmutable>(buffer_data_array: &'a [gltf::buffer::Data], accessor: &Accessor, item_index: usize) -> &'a T {
         let view = accessor.view();
         let stride = view.stride().unwrap_or_else(|| accessor.size());
@@ -497,6 +509,63 @@ impl Model {
 
         // safe_transmute::guarded_transmute_pod::<&'a T>(item_slice).unwrap()
         unsafe { &*(item_ptr as *const T) }
+    }
+
+    pub(crate) fn primitive_positions_iter<'a>(&'a self, primitive: Primitive<'a>) -> impl Iterator<Item=Vec3> + 'a {
+        let index_count = primitive.indices()
+            .map(|index_accessor| index_accessor.count())
+            .unwrap_or_else(|| {
+                let position_accessor = primitive.get(&Semantic::Positions);
+
+                position_accessor.as_ref().unwrap().count()
+            });
+
+        (0..index_count).into_iter()
+            .map(move |index_index| {
+                let position_accessor = primitive.get(&Semantic::Positions);
+                let position_index = if let Some(index_accessor) = primitive.indices() {
+                    match index_accessor.data_type() {
+                        DataType::U8 => {
+                            *Model::index_byte_slice::<u8>(
+                                &self.buffer_data[..],
+                                &index_accessor,
+                                index_index,
+                            ) as usize
+                        },
+                        DataType::U16 => {
+                            *Model::index_byte_slice::<u16>(
+                                &self.buffer_data[..],
+                                &index_accessor,
+                                index_index,
+                            ) as usize
+                        },
+                        DataType::U32 => {
+                            *Model::index_byte_slice::<u32>(
+                                &self.buffer_data[..],
+                                &index_accessor,
+                                index_index,
+                            ) as usize
+                        },
+                        _ => unreachable!(),
+                    }
+                } else {
+                    index_index as usize
+                };
+
+                let vertex = Model::index_byte_slice::<GltfVertexPosition>(
+                    &self.buffer_data[..],
+                    &position_accessor.as_ref().unwrap(),
+                    position_index,
+                );
+
+                Vec3(vertex.0)
+            })
+    }
+
+    pub(crate) fn primitive_faces_iter<'a>(&'a self, primitive: Primitive<'a>) -> impl Iterator<Item=[Vec3; 3]> + 'a {
+        self.primitive_positions_iter(primitive)
+            .tuples()
+            .map(|(x, y, z)| [x, y, z])
     }
 
     pub(crate) fn get_semantic_buffer_view<T>(&self, accessor: &Accessor) -> BufferSlice<[T], Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>> {

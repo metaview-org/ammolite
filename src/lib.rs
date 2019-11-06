@@ -181,9 +181,9 @@ pub fn intersect_convex_polygon(polygon: &[Vec3], ray: &HomogeneousRay) -> Optio
 
     if intersects_triangle {
         let normal = (&polygon[1] - &polygon[0]).cross(&(&polygon[2] - &polygon[1])).normalize();
-        dbg!(&normal);
+        // dbg!(&normal);
         let distance = -normal.dot(&(projected_origin - &polygon[0])) / normal.dot(&projected_direction);
-        dbg!(&distance);
+        // dbg!(&distance);
 
         if distance >= 0.0 {
             return Some(distance);
@@ -601,7 +601,21 @@ impl<'a, MD: MediumData> Medium<MD> for XrMedium<MD> {
         let status = self.xr_frame_stream.borrow_mut().begin().unwrap();
 
         Some(views.into_iter()
-            .map(|view| View::inverse_from(view))
+            .map(|mut view| {
+                // view.pose.orientation.x *=  1.0;
+                // view.pose.orientation.y *=  1.0;
+                // view.pose.orientation.z *=  1.0;
+                // view.pose.orientation.w *= -1.0;
+                let mut v = View::inverse_from(view);
+                v.pose.orientation = v.pose.orientation * {
+                    let mut normalize = Mat3::identity();
+                    // normalize[0][0] = -1.0;
+                    normalize[1][1] = -1.0;
+                    normalize[2][2] = -1.0;
+                    normalize
+                };
+                v
+            })
             .collect())
     }
 
@@ -1366,7 +1380,7 @@ impl<MD: MediumData> Ammolite<MD> {
         for medium in Self::mediums_mut(&mut self.xr.stereo_hmd_mediums,
                                         &mut self.window_mediums) {
             for command in medium.data_mut().handle_events(delta_time) {
-                println!("Handling events command: {:?}", command);
+                // println!("Handling events command: {:?}", command);
 
                 match command {
                     HandleEventsCommand::Quit => {

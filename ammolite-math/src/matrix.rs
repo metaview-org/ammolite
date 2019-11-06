@@ -119,7 +119,7 @@ pub trait AffineTransformation<V>: Matrix<Vector=V> where V: Homogeneous {
     fn translation(translation: &<V as Homogeneous>::ProjectedVector) -> Self;
 }
 
-pub trait Rotation3<V>: AffineTransformation<V> where V: Homogeneous {
+pub trait Rotation3<V> where V: Homogeneous {
     fn rotation_yaw(yaw: f32) -> Self;
     fn rotation_pitch(pitch: f32) -> Self;
     fn rotation_roll(roll: f32) -> Self;
@@ -463,6 +463,29 @@ impl Mat3 {
         mat3!([1.0 - 2.0 * (qy*qy + qz*qz), 2.0 * (qx*qy - qz*qw),       2.0 * (qx*qz + qy*qw),
                2.0 * (qx*qy + qz*qw),       1.0 - 2.0 * (qx*qx + qz*qz), 2.0 * (qy*qz - qx*qw),
                2.0 * (qx*qz - qy*qw),       2.0 * (qy*qz + qx*qw),       1.0 - 2.0 * (qx*qx + qy*qy)])
+    }
+}
+
+impl Rotation3<Vec4> for Mat3 {
+    #[inline]
+    fn rotation_pitch(pitch: f32) -> Self {
+        mat3!([1.0,         0.0,          0.0,
+               0.0, pitch.cos(), -pitch.sin(),
+               0.0, pitch.sin(),  pitch.cos()])
+    }
+
+    #[inline]
+    fn rotation_yaw(yaw: f32) -> Self {
+        mat3!([ yaw.cos(), 0.0, yaw.sin(),
+                      0.0, 1.0,       0.0,
+               -yaw.sin(), 0.0, yaw.cos()])
+    }
+
+    #[inline]
+    fn rotation_roll(roll: f32) -> Self {
+        mat3!([roll.cos(), -roll.sin(), 0.0,
+               roll.sin(),  roll.cos(), 0.0,
+                      0.0,         0.0, 1.0])
     }
 }
 

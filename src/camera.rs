@@ -21,6 +21,8 @@ pub trait Camera: std::fmt::Debug {
      */
     fn get_direction(&self) -> Vec3;
 
+    fn get_rotation_axis_angles(&self) -> Vec3;
+
     /**
      * Handle controls.
      */
@@ -74,14 +76,6 @@ impl PitchYawCamera3 {
             self.pitch = -std::f64::consts::FRAC_PI_2;
         }
     }
-
-    fn get_translation_vector(&self) -> Vec3 {
-        self.position.clone()
-    }
-
-    fn get_rotation_axis_angles(&self) -> Vec3 {
-        [self.pitch as f32, self.yaw as f32, 0.0].into()
-    }
 }
 
 impl Default for PitchYawCamera3 {
@@ -97,7 +91,7 @@ impl Camera for PitchYawCamera3 {
         Mat4::rotation_pitch(rotation[0])
         * Mat4::rotation_yaw(rotation[1])
         * Mat4::rotation_roll(rotation[2])
-        * Mat4::translation(&-self.get_translation_vector())
+        * Mat4::translation(&-self.get_position())
     }
 
     fn get_position(&self) -> Vec3 {
@@ -106,9 +100,9 @@ impl Camera for PitchYawCamera3 {
 
     fn get_direction(&self) -> Vec3 {
         [
-            (self.pitch.cos() * self.yaw.sin()) as f32,
+            -(self.pitch.cos() * self.yaw.sin()) as f32,
             self.pitch.sin() as f32,
-            (self.pitch.cos() * self.yaw.cos()) as f32,
+            -(self.pitch.cos() * self.yaw.cos()) as f32,
         ].into()
     }
 
@@ -158,6 +152,10 @@ impl Camera for PitchYawCamera3 {
 
             self.position += &direction;
         }
+    }
+
+    fn get_rotation_axis_angles(&self) -> Vec3 {
+        [self.pitch as f32, self.yaw as f32, 0.0].into()
     }
 }
 

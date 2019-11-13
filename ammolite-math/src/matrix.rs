@@ -160,6 +160,14 @@ macro_rules! impl_mat {
                 &mut self.as_flat_mut()[..]
             }
 
+            pub fn inner(&self) -> &[[f32; $dims]; $dims] {
+                &self.0
+            }
+
+            pub fn inner_mut(&mut self) -> &mut [[f32; $dims]; $dims] {
+                &mut self.0
+            }
+
             pub fn into_inner(self) -> [[f32; $dims]; $dims] {
                 self.0
             }

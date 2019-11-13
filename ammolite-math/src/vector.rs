@@ -15,6 +15,11 @@ pub trait Vector: Neg + Sized + Clone + Debug + PartialEq {
         self.norm_squared().sqrt()
     }
 
+    fn distance_to_squared(&self, other: &Self) -> f32;
+    fn distance_to(&self, other: &Self) -> f32 {
+        self.distance_to_squared(other).sqrt()
+    }
+
     fn normalize_mut(&mut self);
     fn normalize(&self) -> Self {
         let mut result = self.clone();
@@ -44,6 +49,20 @@ macro_rules! impl_vec {
         #[derive(Clone, PartialEq)]
         pub struct $ty_name(pub [f32; $dims]);
 
+        impl $ty_name {
+            pub fn inner(&self) -> &[f32; $dims] {
+                &self.0
+            }
+
+            pub fn inner_mut(&mut self) -> &mut [f32; $dims] {
+                &mut self.0
+            }
+
+            pub fn into_inner(self) -> [f32; $dims] {
+                self.0
+            }
+        }
+
         impl Vector for $ty_name {
             type Dimensions = $dims_ty;
 
@@ -59,6 +78,10 @@ macro_rules! impl_vec {
                 }
 
                 result
+            }
+
+            fn distance_to_squared(&self, other: &Self) -> f32 {
+                (self - other).norm_squared()
             }
 
             fn norm_squared(&self) -> f32 {

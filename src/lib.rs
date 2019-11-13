@@ -22,7 +22,7 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::path::Path;
-use std::collections::HashSet;
+use std::collections::{VecDeque, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Instant, Duration};
 use std::rc::Rc;
@@ -181,9 +181,7 @@ pub fn intersect_convex_polygon(polygon: &[Vec3], ray: &HomogeneousRay) -> Optio
 
     if intersects_triangle {
         let normal = (&polygon[1] - &polygon[0]).cross(&(&polygon[2] - &polygon[1])).normalize();
-        // dbg!(&normal);
         let distance = -normal.dot(&(projected_origin - &polygon[0])) / normal.dot(&projected_direction);
-        // dbg!(&distance);
 
         if distance >= 0.0 {
             return Some(distance);
@@ -199,17 +197,23 @@ pub fn raytrace_distance(wsm: &WorldSpaceModel, ray: &Ray) -> Option<RayIntersec
     let model = wsm.model;
     let scene = model.document().scenes().nth(0 /*TODO*/).unwrap();
     let mut closest: Option<RayIntersection> = None;
+    let mut node_queue = VecDeque::new();
 
     for node in scene.nodes() {
+        node_queue.push_back(node.index());
+    }
+
+    while let Some(node_index) = node_queue.pop_front() {
+        let node = model.document().nodes().nth(node_index).unwrap();
         let node_transform_matrix = &model.node_transform_matrices()[node.index()];
         let ray_transform_matrix = node_transform_matrix.inverse();
-        let transformed_ray = &(&ray * &ray_transform_matrix) * &instance_matrix_inverse;
+        let transformed_ray = &(&ray * &instance_matrix_inverse) * &ray_transform_matrix;
 
         if let Some(mesh) = node.mesh() {
             for primitive in mesh.primitives() {
                 for face in model.primitive_faces_iter(primitive.clone()) {
                     if let Some(distance) = intersect_convex_polygon(&face[..], &transformed_ray) {
-                        if closest.is_none() || closest.as_ref().unwrap().distance < distance {
+                        if closest.is_none() || distance < closest.as_ref().unwrap().distance {
                             closest = Some(RayIntersection {
                                 distance,
                                 node_index: node.index(),
@@ -220,6 +224,10 @@ pub fn raytrace_distance(wsm: &WorldSpaceModel, ray: &Ray) -> Option<RayIntersec
                     }
                 }
             }
+        }
+
+        for child in node.children() {
+            node_queue.push_back(child.index());
         }
     }
 

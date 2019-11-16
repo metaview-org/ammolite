@@ -6,10 +6,16 @@ use boolinator::Boolinator;
 use ammolite_math::*;
 
 pub trait Camera: std::fmt::Debug {
+    fn get_view_translation_matrix(&self) -> Mat4;
+    fn get_view_rotation_matrix(&self) -> Mat4;
+
     /**
      * Returns the view matrix intended to be used in the MVP matrix chain.
+     * Translation is applied first, then rotation.
      */
-    fn get_view_matrix(&self) -> Mat4;
+    fn get_view_matrix(&self) -> Mat4 {
+        self.get_view_rotation_matrix() * self.get_view_translation_matrix()
+    }
 
     /**
      * Returns the position of the camera in the world.
@@ -85,13 +91,16 @@ impl Default for PitchYawCamera3 {
 }
 
 impl Camera for PitchYawCamera3 {
-    fn get_view_matrix(&self) -> Mat4 {
+    fn get_view_rotation_matrix(&self) -> Mat4 {
         let rotation = -self.get_rotation_axis_angles();
 
         Mat4::rotation_pitch(rotation[0])
         * Mat4::rotation_yaw(rotation[1])
         * Mat4::rotation_roll(rotation[2])
-        * Mat4::translation(&-self.get_position())
+    }
+
+    fn get_view_translation_matrix(&self) -> Mat4 {
+        Mat4::translation(&-self.get_position())
     }
 
     fn get_position(&self) -> Vec3 {
@@ -125,7 +134,7 @@ impl Camera for PitchYawCamera3 {
             * Mat4::rotation_yaw(rotation[1])
             * Mat4::rotation_pitch(rotation[0]);
 
-        let forward: Vec3 = (rotation_matrix * Vec3::from([0.0, 0.0, -1.0]).into_homogeneous()).into_projected();
+        let forward: Vec3 = (rotation_matrix * Vec3::from([0.0, 0.0, -1.0]).into_homogeneous_direction()).into_projected();
         let right = forward.cross(&Vec3::from([0.0, 1.0, 0.0]));
         let mut direction: Vec3 = Vec3::zero();
 

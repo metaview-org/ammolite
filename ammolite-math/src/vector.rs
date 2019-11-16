@@ -31,7 +31,8 @@ pub trait Vector: Neg + Sized + Clone + Debug + PartialEq {
 pub trait Projected: Vector {
     type HomogeneousVector: Vector + Homogeneous<ProjectedVector=Self>;
 
-    fn into_homogeneous(&self) -> Self::HomogeneousVector;
+    fn into_homogeneous_direction(&self) -> Self::HomogeneousVector;
+    fn into_homogeneous_position(&self) -> Self::HomogeneousVector;
 }
 
 pub trait Homogeneous: Vector {
@@ -253,12 +254,18 @@ macro_rules! impl_projected_homogeneous {
         impl Projected for $lower_dim_ty_name {
             type HomogeneousVector = $higher_dim_ty_name;
 
-            fn into_homogeneous(&self) -> Self::HomogeneousVector {
+            fn into_homogeneous_direction(&self) -> Self::HomogeneousVector {
                 let mut result = <Self::HomogeneousVector as Vector>::zero();
 
                 for (result_component, self_component) in result.iter_mut().zip(self.iter()) {
                     *result_component = *self_component;
                 }
+
+                result
+            }
+
+            fn into_homogeneous_position(&self) -> Self::HomogeneousVector {
+                let mut result = self.into_homogeneous_direction();
 
                 if let Some(last_component) = result.last_mut() {
                     *last_component = 1.0;

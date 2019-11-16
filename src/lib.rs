@@ -122,12 +122,8 @@ pub struct HomogeneousRay {
 impl From<Ray> for HomogeneousRay {
     fn from(ray: Ray) -> Self {
         Self {
-            origin: ray.origin.into_homogeneous(),
-            direction: {
-                let mut direction = ray.direction.into_homogeneous();
-                direction.0[3] = 0.0;
-                direction
-            },
+            origin: ray.origin.into_homogeneous_position(),
+            direction: ray.direction.into_homogeneous_direction(),
         }
     }
 }
@@ -610,18 +606,18 @@ impl<'a, MD: MediumData> Medium<MD> for XrMedium<MD> {
 
         Some(views.into_iter()
             .map(|mut view| {
-                // view.pose.orientation.x *=  1.0;
-                // view.pose.orientation.y *=  1.0;
-                // view.pose.orientation.z *=  1.0;
-                // view.pose.orientation.w *= -1.0;
+                // Hacky HTC Vive tracking normalization
+                // FIXME: There must be a way to simplify/fix this
                 let mut v = View::inverse_from(view);
                 v.pose.orientation = v.pose.orientation * {
                     let mut normalize = Mat3::identity();
-                    // normalize[0][0] = -1.0;
                     normalize[1][1] = -1.0;
                     normalize[2][2] = -1.0;
                     normalize
                 };
+                v.pose.position[1] -= 1.6;
+                v.pose.position[0] *= -1.0;
+                v.pose.position = -v.pose.position;
                 v
             })
             .collect())

@@ -419,16 +419,17 @@ macro_rules! impl_affine_transformation {
             }
         }
 
-        impl_binary_operator! {
-            operator_type: [Mul];
-            inline: [false];
-            operator_fn: mul;
-            generics: [];
-            header: ($ty_name, <$vector_ty_name as Homogeneous>::ProjectedVector) -> <$vector_ty_name as Homogeneous>::ProjectedVector;
-            |&lhs, &rhs| {
-                (lhs * rhs.into_homogeneous()).into_projected()
-            }
-        }
+        // Ambiguous transformation from ND to (N+1)D
+        // impl_binary_operator! {
+        //     operator_type: [Mul];
+        //     inline: [false];
+        //     operator_fn: mul;
+        //     generics: [];
+        //     header: ($ty_name, <$vector_ty_name as Homogeneous>::ProjectedVector) -> <$vector_ty_name as Homogeneous>::ProjectedVector;
+        //     |&lhs, &rhs| {
+        //         (lhs * rhs.into_homogeneous{_position,_direction}()).into_projected()
+        //     }
+        // }
     }
 }
 

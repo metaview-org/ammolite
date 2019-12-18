@@ -584,14 +584,26 @@ impl Model {
         unsafe { slice.reinterpret::<[T]>() }
     }
 
-    pub fn import<'a, I, S>(device: &Arc<Device>,
-                            queue_families: I,
-                            pipeline_cache: &GraphicsPipelineSetCache,
-                            helper_resources: &HelperResources,
-                            path: S) -> Result<SimpleUninitializedResource<Model>, Error>
-            where I: IntoIterator<Item = QueueFamily<'a>> + Clone,
-                  S: AsRef<Path> {
-        import::import_model(device, queue_families, pipeline_cache, helper_resources, path)
+    pub fn import_path<'a, I>(
+        device: &Arc<Device>,
+        queue_families: I,
+        pipeline_cache: &GraphicsPipelineSetCache,
+        helper_resources: &HelperResources,
+        path: impl AsRef<Path>,
+    ) -> Result<SimpleUninitializedResource<Model>, Error>
+            where I: IntoIterator<Item = QueueFamily<'a>> + Clone {
+        import::import_model_path(device, queue_families, pipeline_cache, helper_resources, path)
+    }
+
+    pub fn import_slice<'a, I>(
+        device: &Arc<Device>,
+        queue_families: I,
+        pipeline_cache: &GraphicsPipelineSetCache,
+        helper_resources: &HelperResources,
+        slice: impl AsRef<[u8]>,
+    ) -> Result<SimpleUninitializedResource<Model>, Error>
+            where I: IntoIterator<Item = QueueFamily<'a>> + Clone {
+        import::import_model_slice(device, queue_families, pipeline_cache, helper_resources, slice)
     }
 
     pub fn get_subpass_alpha_modes() -> impl Iterator<Item=AlphaMode> {

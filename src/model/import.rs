@@ -822,15 +822,16 @@ pub fn create_material_descriptor_sets<'a>(device: &Arc<Device>,
     Ok(material_descriptor_set_maps)
 }
 
-pub fn import_model<'a, I, S>(device: &Arc<Device>,
-                              queue_families: I,
-                              pipeline_cache: &GraphicsPipelineSetCache,
-                              helper_resources: &HelperResources,
-                              path: S)
-        -> Result<SimpleUninitializedResource<Model>, Error>
-        where I: IntoIterator<Item = QueueFamily<'a>> + Clone,
-              S: AsRef<Path> {
-    let (document, buffer_data_array, image_data_array) = gltf::import(path)?;
+fn import_model<'a, I>(
+    device: &Arc<Device>,
+    queue_families: I,
+    pipeline_cache: &GraphicsPipelineSetCache,
+    helper_resources: &HelperResources,
+    document: Document,
+    buffer_data_array: Vec<gltf::buffer::Data>,
+    image_data_array: Vec<gltf::image::Data>,
+) -> Result<SimpleUninitializedResource<Model>, Error>
+where I: IntoIterator<Item = QueueFamily<'a>> + Clone {
     let mut initialization_tasks: Vec<InitializationTask> = Vec::with_capacity(
         buffer_data_array.len() + image_data_array.len() + document.accessors().len() + document.nodes().len() + document.materials().len()
     );
@@ -858,4 +859,44 @@ pub fn import_model<'a, I, S>(device: &Arc<Device>,
         material_descriptor_sets,
         scene_subpass_context_less_draw_calls,
     }, initialization_tasks))
+}
+
+pub fn import_model_path<'a, I>(
+    device: &Arc<Device>,
+    queue_families: I,
+    pipeline_cache: &GraphicsPipelineSetCache,
+    helper_resources: &HelperResources,
+    path: impl AsRef<Path>,
+) -> Result<SimpleUninitializedResource<Model>, Error>
+where I: IntoIterator<Item = QueueFamily<'a>> + Clone {
+    let (document, buffer_data_array, image_data_array) = gltf::import(path)?;
+    import_model::<I>(
+        device,
+        queue_families,
+        pipeline_cache,
+        helper_resources,
+        document,
+        buffer_data_array,
+        image_data_array,
+    )
+}
+
+pub fn import_model_slice<'a, I>(
+    device: &Arc<Device>,
+    queue_families: I,
+    pipeline_cache: &GraphicsPipelineSetCache,
+    helper_resources: &HelperResources,
+    slice: impl AsRef<[u8]>,
+) -> Result<SimpleUninitializedResource<Model>, Error>
+where I: IntoIterator<Item = QueueFamily<'a>> + Clone {
+    let (document, buffer_data_array, image_data_array) = gltf::import_slice(slice)?;
+    import_model::<I>(
+        device,
+        queue_families,
+        pipeline_cache,
+        helper_resources,
+        document,
+        buffer_data_array,
+        image_data_array,
+    )
 }

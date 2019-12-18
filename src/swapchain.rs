@@ -136,6 +136,7 @@ impl XrSwapchain {
         usage: ImageUsage,
         sample_count: NonZeroU32,
     ) -> Self {
+        // println!("SWAPCHAIN FORMAT: {:?}", format.format());
         let create_info = openxr::SwapchainCreateInfo {
             create_flags: openxr::SwapchainCreateFlags::EMPTY,
             usage_flags: xr_from_vk_usage(usage),

@@ -1438,15 +1438,41 @@ impl<MD: MediumData> Ammolite<MD> {
     //     self.mediums_mut().flat_map(|m| m.swapchains_mut().into_iter().collect::<Vec<_>>())
     // }
 
-    pub fn load_model<S: AsRef<Path>>(&mut self, path: S) -> Model {
+    pub fn load_model_path(&mut self, path: impl AsRef<Path>) -> Model {
         let init_command_buffer_builder = AutoCommandBufferBuilder::primary_one_time_submit(self.device.clone(), self.vk_queues.graphics.family()).unwrap();
         let (init_command_buffer_builder, model) = {
-            Model::import(
+            Model::import_path(
                 &self.device,
                 self.vk_queues.families(),
                 &self.pipeline_cache,
                 &self.helper_resources,
                 path,
+            ).unwrap().initialize_resource(
+                &self.device,
+                self.vk_queues.graphics.family().clone(),
+                init_command_buffer_builder
+            ).unwrap()
+        };
+        let init_command_buffer = init_command_buffer_builder.build().unwrap();
+
+        self.synchronization = Some(Box::new(self.synchronization.take().unwrap()
+            .then_execute(self.vk_queues.graphics.clone(), init_command_buffer).unwrap()
+            // .then_signal_fence()
+            // .then_execute_same_queue(init_unsafe_command_buffer).unwrap()
+            .then_signal_fence_and_flush().unwrap()));
+
+        model
+    }
+
+    pub fn load_model_slice(&mut self, slice: impl AsRef<[u8]>) -> Model {
+        let init_command_buffer_builder = AutoCommandBufferBuilder::primary_one_time_submit(self.device.clone(), self.vk_queues.graphics.family()).unwrap();
+        let (init_command_buffer_builder, model) = {
+            Model::import_slice(
+                &self.device,
+                self.vk_queues.families(),
+                &self.pipeline_cache,
+                &self.helper_resources,
+                slice,
             ).unwrap().initialize_resource(
                 &self.device,
                 self.vk_queues.graphics.family().clone(),

@@ -2,57 +2,9 @@ use std::mem;
 use std::slice;
 use std::ops::{Deref, DerefMut, Mul, Neg};
 use std::fmt::{Debug, Formatter, Error};
+use serde::{Deserialize, Serialize};
 use typenum::Unsigned;
-use wasm_bindgen::prelude::*;
-use wasm_bindgen::convert::{IntoWasmAbi, WasmSlice};
-use wasm_bindgen::describe::{self, WasmDescribe};
 use crate::vector::*;
-
-// impl WasmDescribe for Mat4 {
-//     fn describe() {
-//         describe::inform(describe::VECTOR);
-//         describe::inform(describe::F32);
-//     }
-// }
-
-// impl IntoWasmAbi for Mat4 {
-//     type Abi = WasmSlice;
-
-//     #[inline]
-//     fn into_abi(self) -> WasmSlice {
-//         let ptr = self.0.as_ptr();
-//         let len = 4 * 4;
-//         mem::forget(self);
-//         WasmSlice {
-//             ptr: ptr.into_abi(),
-//             len: len as u32,
-//         }
-//     }
-// }
-
-// pub struct Mat4Slice(pub Box<[Mat4]>);
-
-// impl WasmDescribe for Mat4Slice {
-//     fn describe() {
-//         describe::inform(describe::VECTOR);
-//         describe::inform(describe::F32);
-//     }
-// }
-
-// impl IntoWasmAbi for Mat4Slice {
-//     type Abi = WasmSlice;
-
-//     #[inline]
-//     fn into_abi(self) -> WasmSlice {
-//         let ptr = self.0.as_ptr();
-//         let len = 4 * 4;
-//         mem::forget(self);
-//         WasmSlice {
-//             ptr: ptr.into_abi(),
-//             len: len as u32,
-//         }
-//     }
-// }
 
 pub trait Matrix: Neg + Mul<Output=Self> + Mul<f32, Output=Self> + PartialEq + Sized + Clone + Debug {
     const DIM: usize;
@@ -127,8 +79,7 @@ pub trait Rotation3<V> where V: Homogeneous {
 
 macro_rules! impl_mat {
     ($ty_name:ident, $lower_dim_ty_name:ty, $dims:expr, $macro_name:ident, $vector_ty_name:ident) => {
-        #[wasm_bindgen]
-        #[derive(Clone, PartialEq)]
+        #[derive(Clone, PartialEq, Deserialize, Serialize)]
         pub struct $ty_name([[f32; $dims]; $dims]);
 
         impl $ty_name {

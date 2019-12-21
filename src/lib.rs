@@ -107,13 +107,13 @@ pub struct WorldSpaceModel<'a> {
     pub matrix: Mat4,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Ray {
     pub origin: Vec3,
     pub direction: Vec3,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct HomogeneousRay {
     pub origin: Vec4,
     pub direction: Vec4,
@@ -437,6 +437,9 @@ pub trait Medium<MD: MediumData> {
     // fn swapchains(&self) -> &[Box<dyn Swapchain>];
     // fn poll_events<T>(&mut self, event_handler: T) where T: FnMut(Self::Event);
 
+    fn views(&self) -> Option<&[View]>;
+    fn views_mut(&mut self) -> &mut Option<Vec<View>>;
+
     /**
      * Waits for a frame to become available. Returns `Some(vec)`, if rendering
      * for this medium should commence. Otherwise, returns `None`, then
@@ -469,6 +472,7 @@ pub trait Medium<MD: MediumData> {
 
 pub struct WindowMedium<MD: MediumData> {
     pub data: MD,
+    pub views: Option<Vec<View>>,
     pub window: Arc<Surface<Window>>,
     // pub window_events_loop: Rc<RefCell<EventsLoop>>,
     swapchain: RefCell<ViewSwapchain>,
@@ -504,6 +508,14 @@ impl<MD: MediumData> Medium<MD> for WindowMedium<MD> {
     //         event_handler(event);
     //     })
     // }
+
+    fn views(&self) -> Option<&[View]> {
+        self.views.as_ref().map(Vec::as_slice)
+    }
+
+    fn views_mut(&mut self) -> &mut Option<Vec<View>> {
+        &mut self.views
+    }
 
     fn wait_for_frame(&mut self) -> Option<Vec<View>> {
         let dimensions = self.get_dimensions();
@@ -544,9 +556,12 @@ impl<MD: MediumData> Medium<MD> for WindowMedium<MD> {
 
 pub struct XrMedium<MD: MediumData> {
     pub data: MD,
+    pub views: Option<Vec<View>>,
     // TODO: Remove Arc
     pub xr_instance: Arc<XrInstance>,
     pub xr_session: XrVkSession,
+    pub xr_reference_space_view: openxr::Space,
+    pub xr_reference_space_local: openxr::Space,
     pub xr_reference_space_stage: openxr::Space,
     pub xr_frame_waiter: XrFrameWaiter,
     pub xr_frame_stream: RefCell<XrVkFrameStream>,
@@ -589,6 +604,14 @@ impl<'a, MD: MediumData> Medium<MD> for XrMedium<MD> {
     //     }
     // }
 
+    fn views(&self) -> Option<&[View]> {
+        self.views.as_ref().map(Vec::as_slice)
+    }
+
+    fn views_mut(&mut self) -> &mut Option<Vec<View>> {
+        &mut self.views
+    }
+
     fn wait_for_frame(&mut self) -> Option<Vec<View>> {
         let state = self.xr_frame_waiter.wait().unwrap();
 
@@ -597,14 +620,23 @@ impl<'a, MD: MediumData> Medium<MD> for XrMedium<MD> {
             return None;
         }
 
-        let (_view_flags, views) = self.xr_session
+        // let (_view_flags, view_views) = self.xr_session
+            // .locate_views(openxr::ViewConfigurationType::PRIMARY_STEREO, state.predicted_display_time, &self.xr_reference_space_view)
+            // .unwrap();
+        // let (_view_flags, local_views) = self.xr_session
+            // .locate_views(openxr::ViewConfigurationType::PRIMARY_STEREO, state.predicted_display_time, &self.xr_reference_space_local)
+            // .unwrap();
+        let (_view_flags, stage_views) = self.xr_session
             .locate_views(openxr::ViewConfigurationType::PRIMARY_STEREO, state.predicted_display_time, &self.xr_reference_space_stage)
             .unwrap();
+        // dbg!(view_views.iter().map(|view| ViewPose::from(view.pose)).collect::<Vec<_>>());
+        // dbg!(local_views.iter().map(|view| ViewPose::from(view.pose)).collect::<Vec<_>>());
+        // dbg!(stage_views.iter().map(|view| ViewPose::from(view.pose)).collect::<Vec<_>>());
         self.frame_state = Some(state);
-        self.frame_views = Some(views.clone());
+        self.frame_views = Some(stage_views.clone());
         let status = self.xr_frame_stream.borrow_mut().begin().unwrap();
 
-        Some(views.into_iter()
+        Some(stage_views.into_iter()
             .map(|mut view| {
                 // Hacky HTC Vive tracking normalization
                 // FIXME: There must be a way to simplify/fix this
@@ -958,6 +990,7 @@ impl<'a, MD: MediumData, A: OpenXrInitializedTrait> AmmoliteBuilder<'a, MD, A, V
 
         let window_medium = WindowMedium {
             data,
+            views: None,
             window,
             swapchain: RefCell::new(view_swapchain),
             // swapchain: Box::new(swapchain) as Box<dyn Swapchain>,
@@ -1217,6 +1250,20 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, Vulkan
         xr_session.begin(openxr::ViewConfigurationType::PRIMARY_STEREO)
                   .unwrap();
 
+        let xr_reference_space_view = xr_session.create_reference_space(
+            openxr::ReferenceSpaceType::VIEW,
+            openxr::Posef {
+                orientation: openxr::Quaternionf { x: 1.0, y: 0.0, z: 0.0, w: 0.0 },
+                position: openxr::Vector3f { x: 0.0, y: 0.0, z: 0.0 },
+            },
+        ).unwrap();
+        let xr_reference_space_local = xr_session.create_reference_space(
+            openxr::ReferenceSpaceType::LOCAL,
+            openxr::Posef {
+                orientation: openxr::Quaternionf { x: 1.0, y: 0.0, z: 0.0, w: 0.0 },
+                position: openxr::Vector3f { x: 0.0, y: 0.0, z: 0.0 },
+            },
+        ).unwrap();
         let xr_reference_space_stage = xr_session.create_reference_space(
             openxr::ReferenceSpaceType::STAGE,
             openxr::Posef {
@@ -1231,8 +1278,11 @@ impl<'a, MD: MediumData> AmmoliteBuilder<'a, MD, OpenXrInitialized::True, Vulkan
 
         let xr_medium = XrMedium {
             data,
+            views: None,
             xr_instance: xr_instance.clone(),
             xr_session: xr_session,
+            xr_reference_space_view,
+            xr_reference_space_local,
             xr_reference_space_stage,
             xr_frame_waiter,
             xr_frame_stream: RefCell::new(xr_frame_stream),
@@ -1427,7 +1477,8 @@ impl<MD: MediumData> Ammolite<MD> {
     // }
     
     pub fn view_swapchains<'a>(stereo_hmd_mediums: &'a ArrayVec<[XrMedium<MD>; 1]>, window_mediums: &'a ArrayVec<[WindowMedium<MD>; 1]>) -> impl Iterator<Item=&'a RefCell<ViewSwapchain>> {
-        Self::mediums(stereo_hmd_mediums, window_mediums).flat_map(|m| m.swapchains().into_iter().collect::<Vec<_>>())
+        Self::mediums(stereo_hmd_mediums, window_mediums)
+            .flat_map(|m| m.swapchains().into_iter().collect::<Vec<_>>())
     }
 
     // pub fn view_swapchains(&self) -> impl Iterator<Item=&RefCell<ViewSwapchain>> {
@@ -1437,6 +1488,11 @@ impl<MD: MediumData> Ammolite<MD> {
     // pub fn view_swapchains_mut(&mut self) -> impl Iterator<Item=&mut ViewSwapchain> {
     //     self.mediums_mut().flat_map(|m| m.swapchains_mut().into_iter().collect::<Vec<_>>())
     // }
+
+    pub fn views<'a>(&'a self) -> impl Iterator<Item=Option<&'a [View]>> {
+        Self::mediums(&self.xr.stereo_hmd_mediums, &self.window_mediums)
+            .map(Medium::views)
+    }
 
     pub fn load_model_path(&mut self, path: impl AsRef<Path>) -> Model {
         let init_command_buffer_builder = AutoCommandBufferBuilder::primary_one_time_submit(self.device.clone(), self.vk_queues.graphics.family()).unwrap();
@@ -1498,13 +1554,14 @@ impl<MD: MediumData> Ammolite<MD> {
         self.synchronization.as_mut().unwrap().cleanup_finished();
 
         let world_space_models = model_provider();
-        let view_swapchains_len = Self::view_swapchains(&mut self.xr.stereo_hmd_mediums,
-                                                       &mut self.window_mediums).count();
+        let view_swapchains_len = Self::view_swapchains(&self.xr.stereo_hmd_mediums,
+                                                       &self.window_mediums).count();
 
         // for stereo_hmd_medium in self.xr.stereo_hmd_mediums.iter_mut() {
         for medium in Self::mediums_mut(&mut self.xr.stereo_hmd_mediums,
                                         &mut self.window_mediums) {
             if let Some(views) = medium.wait_for_frame() {
+                *medium.views_mut() = Some(views.clone());
                 // let view_swapchains = self.view_swapchains().collect::<Vec<_>>();
 
                 for (view_swapchain_index, view_swapchain) in medium.swapchains().iter().enumerate() {

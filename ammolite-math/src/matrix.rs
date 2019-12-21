@@ -1,6 +1,6 @@
 use std::mem;
 use std::slice;
-use std::ops::{Deref, DerefMut, Mul, Neg};
+use std::ops::{Div, Add, Deref, DerefMut, Mul, Neg};
 use std::fmt::{Debug, Formatter, Error};
 use serde::{Deserialize, Serialize};
 use typenum::Unsigned;
@@ -280,6 +280,36 @@ macro_rules! impl_mat {
                 for column in result.iter_mut() {
                     for component in column.iter_mut() {
                         *component *= *rhs;
+                    }
+                }
+
+                result
+            }
+        }
+
+        impl_binary_operator! {
+            operator_type: [Div];
+            inline: [false];
+            operator_fn: div;
+            generics: [];
+            header: ($ty_name, f32) -> $ty_name;
+            |&lhs, &rhs| {
+                lhs * (1.0 / rhs)
+            }
+        }
+
+        impl_binary_operator! {
+            operator_type: [Add];
+            inline: [false];
+            operator_fn: add;
+            generics: [];
+            header: ($ty_name, $ty_name) -> $ty_name;
+            |&lhs, &rhs| {
+                let mut result = lhs.clone();
+
+                for (result_column, rhs_column) in result.iter_mut().zip(rhs.iter()) {
+                    for (result_component, rhs_component) in result_column.iter_mut().zip(rhs_column.iter()) {
+                        *result_component += *rhs_component;
                     }
                 }
 

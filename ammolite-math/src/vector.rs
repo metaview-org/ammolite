@@ -1,6 +1,7 @@
 use std::ops::{Add, Deref, DerefMut, Sub, Neg, AddAssign, SubAssign, Div, Mul, DivAssign, MulAssign};
 use std::fmt::{Debug, Formatter, Error};
 use det::det_copy;
+use serde::{Deserialize, Serialize};
 use typenum::{Unsigned, U1, U2, U3, U4};
 use crate::matrix::Mat4;
 
@@ -47,7 +48,7 @@ pub trait UnitQuaternion {
 
 macro_rules! impl_vec {
     ($ty_name:ident, $dims:expr, $dims_ty:ty) => {
-        #[derive(Clone, PartialEq)]
+        #[derive(Clone, PartialEq, Deserialize, Serialize)]
         pub struct $ty_name(pub [f32; $dims]);
 
         impl $ty_name {

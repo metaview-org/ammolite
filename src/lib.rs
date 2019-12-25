@@ -155,7 +155,7 @@ pub fn intersect_convex_polygon(polygon: &[Vec3], ray: &HomogeneousRay) -> Optio
     let projected_origin = ray.origin.into_projected();
     let projected_direction = Vec3([ray.direction.0[0], ray.direction.0[1], ray.direction.0[2]]);
     let mut sign: Option<bool> = None;
-    let mut intersects_triangle = true;
+    let mut intersects_polygon = true;
     for edge_index in 0..polygon.len() {
         let vertex_from = &polygon[edge_index];
         let vertex_to = &polygon[(edge_index + 1) % polygon.len()];
@@ -168,14 +168,14 @@ pub fn intersect_convex_polygon(polygon: &[Vec3], ray: &HomogeneousRay) -> Optio
         if current_sign != 0.0 {
             let current_sign_bool = current_sign > 0.0;
             if sign.is_some() && *sign.as_ref().unwrap() != current_sign_bool {
-                intersects_triangle = false;
+                intersects_polygon = false;
             }
 
             sign = Some(current_sign_bool)
         }
     }
 
-    if intersects_triangle {
+    if intersects_polygon {
         let normal = (&polygon[1] - &polygon[0]).cross(&(&polygon[2] - &polygon[1])).normalize();
         let distance = -normal.dot(&(projected_origin - &polygon[0])) / normal.dot(&projected_direction);
 
@@ -207,7 +207,7 @@ pub fn raytrace_distance(wsm: &WorldSpaceModel, ray: &Ray) -> Option<RayIntersec
 
         if let Some(mesh) = node.mesh() {
             for primitive in mesh.primitives() {
-                for face in model.primitive_faces_iter(primitive.clone()) {
+                for face in model.primitive_faces_iter(&primitive) {
                     if let Some(distance) = intersect_convex_polygon(&face[..], &transformed_ray) {
                         if closest.is_none() || distance < closest.as_ref().unwrap().distance {
                             closest = Some(RayIntersection {

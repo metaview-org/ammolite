@@ -18,9 +18,6 @@ use vulkano::image::Swizzle;
 use vulkano::image::ImageDimensions;
 use vulkano::image::ImageUsage;
 use vulkano::image::layout::RequiredLayouts;
-
-
-
 use vulkano::image::MipmapsCount;
 use vulkano::image::view::ImageView;
 use vulkano::image::traits::ImageViewAccess;
@@ -47,7 +44,7 @@ use crate::sampler::IntoVulkanEquivalent;
 use crate::pipeline::DescriptorSetMap;
 use crate::pipeline::GltfGraphicsPipeline;
 use crate::pipeline::GraphicsPipelineSetCache;
-use crate::model::{Model, HelperResources};
+use crate::model::{Model, HelperResources, AccessorDetails};
 use crate::model::resource::*;
 
 enum ColorSpace {
@@ -133,8 +130,10 @@ pub fn precompute_missing_normal_buffers<'a, I>(device: &Arc<Device>,
                 continue;
             }
 
-            let positions_accessor = primitive.get(&Semantic::Positions).unwrap();
-            let vertex_count = positions_accessor.count();
+            let position_accessor_details = primitive.get(&Semantic::Positions)
+                .map(|accessor| AccessorDetails::from(&buffer_data_array[..], accessor))
+                .unwrap_or_else(|| panic!("No positions accessor found."));
+            let vertex_count = position_accessor_details.accessor.count();
             // let index_count = primitive.indices()
             //     .map(|index_accessor| index_accessor.count())
             //     .unwrap_or(vertex_count);
@@ -164,9 +163,15 @@ pub fn precompute_missing_normal_buffers<'a, I>(device: &Arc<Device>,
 
             // Sum normals
             while let (Some(index_a), Some(index_b), Some(index_c)) = (index_iter.next(), index_iter.next(), index_iter.next()) {
-                let a = Vec3(Model::index_byte_slice::<GltfVertexPosition>(buffer_data_array, &positions_accessor, index_a).0);
-                let b = Vec3(Model::index_byte_slice::<GltfVertexPosition>(buffer_data_array, &positions_accessor, index_b).0);
-                let c = Vec3(Model::index_byte_slice::<GltfVertexPosition>(buffer_data_array, &positions_accessor, index_c).0);
+                let a = Vec3(unsafe {
+                    Model::index_slice_transmute::<GltfVertexPosition>(&position_accessor_details, index_a).0
+                });
+                let b = Vec3(unsafe {
+                    Model::index_slice_transmute::<GltfVertexPosition>(&position_accessor_details, index_b).0
+                });
+                let c = Vec3(unsafe {
+                    Model::index_slice_transmute::<GltfVertexPosition>(&position_accessor_details, index_c).0
+                });
                 let u = b - &a;
                 let v = c - &a;
                 let normal = u.cross(&v);
@@ -184,7 +189,7 @@ pub fn precompute_missing_normal_buffers<'a, I>(device: &Arc<Device>,
             // Normalize normals
             for normal in &mut normals_data {
                 let mut normal_vec = Vec3(normal.0);
-                normal_vec.normalize();
+                normal_vec.normalize_mut();
                 *normal = GltfVertexNormal(normal_vec.0);
             }
 
@@ -259,29 +264,34 @@ pub fn precompute_missing_tangent_buffers<'a, I>(device: &Arc<Device>,
             // TODO
             let vertices_per_face = 3;
             let face_count = index_count / vertices_per_face;
+            let index_accessor_details = primitive.indices()
+                .map(|accessor| AccessorDetails::from(&buffer_data_array[..], accessor));
 
-            let get_semantic_index: Box<dyn Fn(usize, usize) -> usize> = if let Some(index_accessor) = primitive.indices() {
-                match index_accessor.data_type() {
+            let get_semantic_index: Box<dyn Fn(usize, usize) -> usize> = if let Some(index_accessor_details) = index_accessor_details {
+                match index_accessor_details.accessor.data_type() {
                     DataType::U8 => {
-                        Box::new(move |face_index, vertex_index| *Model::index_byte_slice::<u8>(
-                            &buffer_data_array[..],
-                            &index_accessor,
-                            face_index * vertices_per_face + vertex_index as usize,
-                        ) as usize)
+                        Box::new(move |face_index, vertex_index| *unsafe {
+                            Model::index_slice_transmute::<u8>(
+                                &index_accessor_details,
+                                face_index * vertices_per_face + vertex_index as usize,
+                            )
+                        } as usize)
                     },
                     DataType::U16 => {
-                        Box::new(move |face_index, vertex_index| *Model::index_byte_slice::<u16>(
-                            &buffer_data_array[..],
-                            &index_accessor,
-                            face_index * vertices_per_face + vertex_index as usize,
-                        ) as usize)
+                        Box::new(move |face_index, vertex_index| *unsafe {
+                            Model::index_slice_transmute::<u16>(
+                                &index_accessor_details,
+                                face_index * vertices_per_face + vertex_index as usize,
+                            )
+                        } as usize)
                     },
                     DataType::U32 => {
-                        Box::new(move |face_index, vertex_index| *Model::index_byte_slice::<u32>(
-                            &buffer_data_array[..],
-                            &index_accessor,
-                            face_index * vertices_per_face + vertex_index as usize,
-                        ) as usize)
+                        Box::new(move |face_index, vertex_index| *unsafe {
+                            Model::index_slice_transmute::<u32>(
+                                &index_accessor_details,
+                                face_index * vertices_per_face + vertex_index as usize,
+                            )
+                        } as usize)
                     },
                     _ => unreachable!(),
                 }
@@ -289,44 +299,52 @@ pub fn precompute_missing_tangent_buffers<'a, I>(device: &Arc<Device>,
                 Box::new(|face_index, vertex_index| { face_index * vertices_per_face + vertex_index })
             };
 
-            let position_accessor = primitive.get(&Semantic::Positions).unwrap();
-            let normal_accessor = primitive.get(&Semantic::Normals);
-            let precomputed_normals = if normal_accessor.is_none() {
+            let position_accessor_details = primitive.get(&Semantic::Positions)
+                .map(|accessor| AccessorDetails::from(&buffer_data_array[..], accessor))
+                .unwrap_or_else(|| panic!("No positions accessor found."));
+            let normal_accessor_details = primitive.get(&Semantic::Normals)
+                .map(|accessor| AccessorDetails::from(&buffer_data_array[..], accessor));
+            let precomputed_normals = if normal_accessor_details.is_none() {
                 Some(normal_buffers[mesh_index][primitive_index].as_ref().unwrap())
             } else {
                 None
             };
-            let tex_coord_accessor = primitive.get(&Semantic::TexCoords(0));
+            // FIXME: More indices
+            let tex_coord_accessor_details = primitive.get(&Semantic::TexCoords(0))
+                .map(|accessor| AccessorDetails::from(&buffer_data_array[..], accessor));
             let zero_tex_coord: [f32; 2] = Default::default();
 
             mikktspace::generate_tangents(
                 &|| { vertices_per_face }, // vertices_per_face: &'a Fn() -> usize, 
                 &|| { face_count }, // face_count: &'a Fn() -> usize, 
-                &|face_index, vertex_index| &Model::index_byte_slice::<GltfVertexPosition>(
-                    &buffer_data_array[..],
-                    &position_accessor,
-                    get_semantic_index(face_index, vertex_index),
-                ).0, // position: &'a Fn(usize, usize) -> &'a [f32; 3],
+                &|face_index, vertex_index| unsafe {
+                    &Model::index_slice_transmute::<GltfVertexPosition>(
+                        &position_accessor_details,
+                        get_semantic_index(face_index, vertex_index),
+                    ).0
+                }, // position: &'a Fn(usize, usize) -> &'a [f32; 3],
                 &|face_index, vertex_index| {
                     let semantic_index = get_semantic_index(face_index, vertex_index);
 
-                    if let &Some(ref normal_accessor) = &normal_accessor {
-                        &Model::index_byte_slice::<GltfVertexNormal>(
-                            &buffer_data_array[..],
-                            normal_accessor,
-                            semantic_index,
-                        ).0
+                    if let &Some(ref normal_accessor_details) = &normal_accessor_details {
+                        unsafe {
+                            &Model::index_slice_transmute::<GltfVertexNormal>(
+                                normal_accessor_details,
+                                semantic_index,
+                            ).0
+                        }
                     } else {
                         &precomputed_normals.unwrap()[semantic_index].0
                     }
                 }, // normal: &'a Fn(usize, usize) -> &'a [f32; 3],
                 &|face_index, vertex_index| {
-                    if let &Some(ref tex_coord_accessor) = &tex_coord_accessor {
-                        &Model::index_byte_slice::<GltfVertexTexCoord>(
-                            &buffer_data_array[..],
-                            &tex_coord_accessor,
-                            get_semantic_index(face_index, vertex_index),
-                        ).0
+                    if let &Some(ref tex_coord_accessor_details) = &tex_coord_accessor_details {
+                        unsafe {
+                            &Model::index_slice_transmute::<GltfVertexTexCoord>(
+                                &tex_coord_accessor_details,
+                                get_semantic_index(face_index, vertex_index),
+                            ).0
+                        }
                     } else {
                         &zero_tex_coord
                     }

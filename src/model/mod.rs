@@ -487,6 +487,28 @@ pub struct Model {
     scene_subpass_context_less_draw_calls: Vec<[RwLock<Option<Vec<GltfContextLessDrawCall>>>; 4]>,
 }
 
+pub struct AccessorDetails<'a> {
+    pub accessor: Accessor<'a>,
+    pub stride: usize,
+    pub byte_slice: &'a [u8],
+}
+
+impl<'a> AccessorDetails<'a> {
+    pub fn from(buffer_data: &'a [gltf::buffer::Data], accessor: Accessor<'a>) -> Self {
+        let view = accessor.view();
+        let stride = view.stride().unwrap_or_else(|| accessor.size());
+        let slice_offset = view.offset() + accessor.offset();
+        let slice_len = stride * accessor.count();
+        let byte_slice: &[u8] = &buffer_data[view.buffer().index()][slice_offset..(slice_offset + slice_len)];
+
+        AccessorDetails {
+            accessor,
+            stride,
+            byte_slice,
+        }
+    }
+}
+
 impl Model {
     pub(crate) fn document(&self) -> &Document {
         &self.document
@@ -496,22 +518,17 @@ impl Model {
         &self.node_transform_matrices[..]
     }
 
-    pub(crate) fn index_byte_slice<'a, T: PodTransmutable>(buffer_data_array: &'a [gltf::buffer::Data], accessor: &Accessor, item_index: usize) -> &'a T {
-        let view = accessor.view();
-        let stride = view.stride().unwrap_or_else(|| accessor.size());
-        let slice_offset = view.offset() + accessor.offset();
-        let slice_len = stride * accessor.count();
-        let slice: &[u8] = &buffer_data_array[view.buffer().index()][slice_offset..(slice_offset + slice_len)];
-        let item_slice_start_index = item_index * stride;
+    pub(crate) unsafe fn index_slice_transmute<'a, T: PodTransmutable>(index_accessor_details: &'a AccessorDetails<'a>, item_index: usize) -> &'a T {
+        let item_slice_start_index = item_index * index_accessor_details.stride;
         let item_slice_range = item_slice_start_index..(item_slice_start_index + mem::size_of::<T>());
-        let item_slice = &slice[item_slice_range];
+        let item_slice = &index_accessor_details.byte_slice[item_slice_range];
         let item_ptr = item_slice.as_ptr();
 
         // safe_transmute::guarded_transmute_pod::<&'a T>(item_slice).unwrap()
         unsafe { &*(item_ptr as *const T) }
     }
 
-    pub(crate) fn primitive_positions_iter<'a>(&'a self, primitive: Primitive<'a>) -> impl Iterator<Item=Vec3> + 'a {
+    pub(crate) fn primitive_positions_iter<'a>(&'a self, primitive: &'a Primitive<'a>) -> impl Iterator<Item=Vec3> + 'a {
         let index_count = primitive.indices()
             .map(|index_accessor| index_accessor.count())
             .unwrap_or_else(|| {
@@ -520,31 +537,56 @@ impl Model {
                 position_accessor.as_ref().unwrap().count()
             });
 
-        (0..index_count).into_iter()
-            .map(move |index_index| {
-                let position_accessor = primitive.get(&Semantic::Positions);
-                let position_index = if let Some(index_accessor) = primitive.indices() {
-                    match index_accessor.data_type() {
+        let position_accessor_details = primitive.get(&Semantic::Positions)
+            .map(|accessor| AccessorDetails::from(&self.buffer_data[..], accessor))
+            .unwrap_or_else(|| panic!("No positions accessor found."));
+        let index_accessor_details = primitive.indices()
+            .map(|accessor| AccessorDetails::from(&self.buffer_data[..], accessor));
+
+        struct PositionsIterator<'a> {
+            index_accessor_details: Option<AccessorDetails<'a>>,
+            position_accessor_details: AccessorDetails<'a>,
+            index_iterator: std::ops::Range<usize>,
+        }
+
+        impl<'a> Iterator for PositionsIterator<'a> {
+            type Item = Vec3;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                let index_index = self.index_iterator.next();
+
+                if index_index.is_none() {
+                    return None;
+                }
+
+                let index_index = index_index.unwrap();
+                let position_index = if let &Some(ref index_accessor_details) = &self.index_accessor_details {
+                    // TODO: Get rid of the match arm within this loop, use dynamic dispatch
+                    // instead
+                    match index_accessor_details.accessor.data_type() {
                         DataType::U8 => {
-                            *Model::index_byte_slice::<u8>(
-                                &self.buffer_data[..],
-                                &index_accessor,
-                                index_index,
-                            ) as usize
+                            unsafe {
+                                *Model::index_slice_transmute::<u8>(
+                                    &index_accessor_details,
+                                    index_index,
+                                ) as usize
+                            }
                         },
                         DataType::U16 => {
-                            *Model::index_byte_slice::<u16>(
-                                &self.buffer_data[..],
-                                &index_accessor,
-                                index_index,
-                            ) as usize
+                            unsafe {
+                                *Model::index_slice_transmute::<u16>(
+                                    &index_accessor_details,
+                                    index_index,
+                                ) as usize
+                            }
                         },
                         DataType::U32 => {
-                            *Model::index_byte_slice::<u32>(
-                                &self.buffer_data[..],
-                                &index_accessor,
-                                index_index,
-                            ) as usize
+                            unsafe {
+                                *Model::index_slice_transmute::<u32>(
+                                    &index_accessor_details,
+                                    index_index,
+                                ) as usize
+                            }
                         },
                         _ => unreachable!(),
                     }
@@ -552,17 +594,25 @@ impl Model {
                     index_index as usize
                 };
 
-                let vertex = Model::index_byte_slice::<GltfVertexPosition>(
-                    &self.buffer_data[..],
-                    &position_accessor.as_ref().unwrap(),
-                    position_index,
-                );
+                let vertex = unsafe {
+                    Model::index_slice_transmute::<GltfVertexPosition>(
+                        &self.position_accessor_details,
+                        position_index,
+                    )
+                };
 
-                Vec3(vertex.0)
-            })
+                Some(Vec3(vertex.0))
+            }
+        }
+
+        PositionsIterator {
+            index_accessor_details,
+            position_accessor_details,
+            index_iterator: (0..index_count).into_iter(),
+        }
     }
 
-    pub(crate) fn primitive_faces_iter<'a>(&'a self, primitive: Primitive<'a>) -> impl Iterator<Item=[Vec3; 3]> + 'a {
+    pub(crate) fn primitive_faces_iter<'a>(&'a self, primitive: &'a Primitive<'a>) -> impl Iterator<Item=[Vec3; 3]> + 'a {
         self.primitive_positions_iter(primitive)
             .tuples()
             .map(|(x, y, z)| [x, y, z])

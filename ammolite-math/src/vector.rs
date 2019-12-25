@@ -284,8 +284,8 @@ macro_rules! impl_projected_homogeneous {
             fn into_projected(&self) -> Self::ProjectedVector {
                 let mut result = <Self::ProjectedVector as Vector>::zero();
 
-                let mut last_component = *self.last().expect(
-                    &format!("No last element in vector {}.", stringify!($higher_dim_ty_name)));
+                let mut last_component = *self.last().unwrap_or_else(||
+                    panic!("No last element in vector {}.", stringify!($higher_dim_ty_name)));
 
                 if last_component == 0.0 {
                     last_component = 1.0;

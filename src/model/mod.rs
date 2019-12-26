@@ -91,6 +91,7 @@ pub struct HelperResources {
     pub empty_image: Arc<dyn ImageViewAccess + Send + Sync>,
     pub zero_buffer: Arc<dyn TypedBufferAccess<Content=[u8]> + Send + Sync>,
     pub cheapest_sampler: Arc<Sampler>,
+    pub default_sampler: Arc<Sampler>,
 }
 
 impl HelperResources {
@@ -162,6 +163,21 @@ impl HelperResources {
             0.0,
         )?;
 
+        // Create the default glTF texture sampler with linear interpolation
+        let default_sampler = Sampler::new(
+            device.clone(),
+            Filter::Linear,
+            Filter::Linear,
+            MipmapMode::Linear,
+            SamplerAddressMode::Repeat,
+            SamplerAddressMode::Repeat,
+            SamplerAddressMode::Repeat,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+        )?;
+
         let tasks = vec![
             InitializationTask::Image {
                 data: Arc::new(vec![0]),
@@ -178,6 +194,7 @@ impl HelperResources {
             empty_image: empty_device_image_view,
             zero_buffer: zero_device_buffer,
             cheapest_sampler,
+            default_sampler,
         };
 
         Ok(SimpleUninitializedResource::new(output, tasks))

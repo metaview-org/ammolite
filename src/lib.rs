@@ -1,5 +1,4 @@
 //! TODO:
-//! * Fix texture interpolation, which is currently incorrectly treated as nearest neighbour
 //! * Use a single source of time flow -- the OpenXR runtime
 //! * Window/HMD event handling separation
 //! * Use secondary command buffers to parallelize their creation

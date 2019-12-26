@@ -682,6 +682,7 @@ pub fn create_samplers(device: &Arc<Device>, document: &Document) -> Result<Vec<
         //     .into_vulkan_equivalent();
         let (min_filter, mipmap_mode) = MinFilter::LinearMipmapLinear
             .into_vulkan_equivalent();
+        dbg!(gltf_sampler.mag_filter().unwrap_or(MagFilter::Linear).into_vulkan_equivalent());
         let sampler = Sampler::new(
             device.clone(),
             gltf_sampler.mag_filter().unwrap_or(MagFilter::Linear).into_vulkan_equivalent(),
@@ -795,23 +796,23 @@ pub fn create_material_descriptor_sets<'a>(device: &Arc<Device>,
         let base_color_texture: Arc<dyn ImageViewAccess + Send + Sync> = base_color_texture_option
             .unwrap_or_else(|| helper_resources.empty_image.clone());
         let base_color_sampler: Arc<Sampler> = base_color_sampler_option
-            .unwrap_or_else(|| helper_resources.cheapest_sampler.clone());
+            .unwrap_or_else(|| helper_resources.default_sampler.clone());
         let metallic_roughness_texture: Arc<dyn ImageViewAccess + Send + Sync> = metallic_roughness_texture_option
             .unwrap_or_else(|| helper_resources.empty_image.clone());
         let metallic_roughness_sampler: Arc<Sampler> = metallic_roughness_sampler_option
-            .unwrap_or_else(|| helper_resources.cheapest_sampler.clone());
+            .unwrap_or_else(|| helper_resources.default_sampler.clone());
         let normal_texture: Arc<dyn ImageViewAccess + Send + Sync> = normal_texture_option
             .unwrap_or_else(|| helper_resources.empty_image.clone());
         let normal_sampler: Arc<Sampler> = normal_sampler_option
-            .unwrap_or_else(|| helper_resources.cheapest_sampler.clone());
+            .unwrap_or_else(|| helper_resources.default_sampler.clone());
         let occlusion_texture: Arc<dyn ImageViewAccess + Send + Sync> = occlusion_texture_option
             .unwrap_or_else(|| helper_resources.empty_image.clone());
         let occlusion_sampler: Arc<Sampler> = occlusion_sampler_option
-            .unwrap_or_else(|| helper_resources.cheapest_sampler.clone());
+            .unwrap_or_else(|| helper_resources.default_sampler.clone());
         let emissive_texture: Arc<dyn ImageViewAccess + Send + Sync> = emissive_texture_option
             .unwrap_or_else(|| helper_resources.empty_image.clone());
         let emissive_sampler: Arc<Sampler> = emissive_sampler_option
-            .unwrap_or_else(|| helper_resources.cheapest_sampler.clone());
+            .unwrap_or_else(|| helper_resources.default_sampler.clone());
         let descriptor_set_map: DescriptorSetMap = DescriptorSetMap::custom(&pipelines[..], |pipeline|
             Arc::new(
                 PersistentDescriptorSet::start(pipeline.layout.clone(), 3)

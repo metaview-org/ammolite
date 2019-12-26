@@ -8,7 +8,7 @@ macro_rules! impl_mat_macro {
             } => {{
                 use $crate::{Matrix, $ty_name};
                 let components: [f32; $dims * $dims] = $component_array;
-                let mut result = <$ty_name as Matrix>::zero();
+                let mut result = <$ty_name as Matrix>::ZERO;
 
                 for (index, component) in components.into_iter().enumerate() {
                     let column = index % $dims;

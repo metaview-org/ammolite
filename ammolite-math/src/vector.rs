@@ -8,7 +8,8 @@ use crate::matrix::Mat4;
 pub trait Vector: Neg + Sized + Clone + Debug + PartialEq {
     type Dimensions: Unsigned + Add<U1> + Sub<U1>;
 
-    fn zero() -> Self;
+    const ZERO: Self;
+
     fn dot(&self, other: &Self) -> f32;
     fn norm_squared(&self) -> f32;
 
@@ -68,9 +69,7 @@ macro_rules! impl_vec {
         impl Vector for $ty_name {
             type Dimensions = $dims_ty;
 
-            fn zero() -> Self {
-                $ty_name([0.0; $dims])
-            }
+            const ZERO: Self = Self([0.0; $dims]);
 
             fn dot(&self, other: &Self) -> f32 {
                 let mut result = 0.0;
@@ -101,7 +100,7 @@ macro_rules! impl_vec {
 
         impl Default for $ty_name {
             fn default() -> Self {
-                Self::zero()
+                Self::ZERO
             }
         }
 
@@ -129,7 +128,7 @@ macro_rules! impl_vec {
             generics: [];
             header: ($ty_name, $ty_name) -> $ty_name;
             |&a, &b| {
-                let mut result = $ty_name::zero();
+                let mut result = $ty_name::ZERO;
 
                 for (result_component, (a_component, b_component)) in result.iter_mut().zip(a.iter().zip(b.iter())) {
                     *result_component = *a_component + *b_component;
@@ -146,7 +145,7 @@ macro_rules! impl_vec {
             generics: [];
             header: ($ty_name, $ty_name) -> $ty_name;
             |&a, &b| {
-                let mut result = $ty_name::zero();
+                let mut result = $ty_name::ZERO;
 
                 for (result_component, (a_component, b_component)) in result.iter_mut().zip(a.iter().zip(b.iter())) {
                     *result_component = *a_component - *b_component;
@@ -256,7 +255,7 @@ macro_rules! impl_projected_homogeneous {
             type HomogeneousVector = $higher_dim_ty_name;
 
             fn into_homogeneous_direction(&self) -> Self::HomogeneousVector {
-                let mut result = <Self::HomogeneousVector as Vector>::zero();
+                let mut result = <Self::HomogeneousVector as Vector>::ZERO;
 
                 for (result_component, self_component) in result.iter_mut().zip(self.iter()) {
                     *result_component = *self_component;
@@ -282,7 +281,7 @@ macro_rules! impl_projected_homogeneous {
             type ProjectedVector = $lower_dim_ty_name;
 
             fn into_projected(&self) -> Self::ProjectedVector {
-                let mut result = <Self::ProjectedVector as Vector>::zero();
+                let mut result = <Self::ProjectedVector as Vector>::ZERO;
 
                 let mut last_component = *self.last().unwrap_or_else(||
                     panic!("No last element in vector {}.", stringify!($higher_dim_ty_name)));

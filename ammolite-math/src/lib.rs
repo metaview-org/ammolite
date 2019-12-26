@@ -1,3 +1,6 @@
+#![feature(const_if_match)]
+#![feature(const_loop)]
+
 #[macro_use]
 pub mod ops;
 #[macro_use]

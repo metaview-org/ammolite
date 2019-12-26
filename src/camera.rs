@@ -136,7 +136,7 @@ impl Camera for PitchYawCamera3 {
 
         let forward: Vec3 = (rotation_matrix * Vec3::from([0.0, 0.0, -1.0]).into_homogeneous_direction()).into_projected();
         let right = forward.cross(&Vec3::from([0.0, 1.0, 0.0]));
-        let mut direction: Vec3 = Vec3::zero();
+        let mut direction: Vec3 = Vec3::ZERO;
 
         pressed_keys.contains(&VirtualKeyCode::W).as_option()
             .map(|()| direction += &forward);

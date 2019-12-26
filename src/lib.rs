@@ -1,4 +1,6 @@
 //! TODO:
+//! * Fix texture interpolation, which is currently incorrectly treated as nearest neighbour
+//! * Use a single source of time flow -- the OpenXR runtime
 //! * Window/HMD event handling separation
 //! * Use secondary command buffers to parallelize their creation
 //! * Mip Mapping
@@ -642,7 +644,7 @@ impl<'a, MD: MediumData> Medium<MD> for XrMedium<MD> {
                 // FIXME: There must be a way to simplify/fix this
                 let mut v = View::inverse_from(view);
                 v.pose.orientation = v.pose.orientation * {
-                    let mut normalize = Mat3::identity();
+                    let mut normalize = Mat3::IDENTITY;
                     normalize[1][1] = -1.0;
                     normalize[2][2] = -1.0;
                     normalize
@@ -1393,9 +1395,9 @@ pub struct CameraTransforms {
 impl Default for CameraTransforms {
     fn default() -> Self {
         Self {
-            position: Vec3::zero(),
-            view_matrix: Mat4::identity(),
-            projection_matrix: Mat4::identity(),
+            position: Vec3::ZERO,
+            view_matrix: Mat4::IDENTITY,
+            projection_matrix: Mat4::IDENTITY,
         }
     }
 }

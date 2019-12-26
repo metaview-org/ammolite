@@ -58,8 +58,8 @@ impl Default for SceneUBO {
             0.0,
             [0.0, 0.0].into(),
             [0.0, 0.0, 0.0].into(),
-            Mat4::identity(),
-            Mat4::identity(),
+            Mat4::IDENTITY,
+            Mat4::IDENTITY,
         )
     }
 }
@@ -75,7 +75,7 @@ impl InstanceUBO {
 impl Default for InstanceUBO {
     fn default() -> Self {
         Self::new(
-            Mat4::identity(),
+            Mat4::IDENTITY,
         )
     }
 }
@@ -91,7 +91,7 @@ impl NodeUBO {
 impl Default for NodeUBO {
     fn default() -> Self {
         Self::new(
-            Mat4::identity(),
+            Mat4::IDENTITY,
         )
     }
 }

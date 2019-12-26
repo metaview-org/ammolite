@@ -7,12 +7,12 @@ use typenum::Unsigned;
 use crate::vector::*;
 
 pub trait Matrix: Neg + Mul<Output=Self> + Mul<f32, Output=Self> + PartialEq + Sized + Clone + Debug {
-    const DIM: usize;
     type Vector: Vector;
     type LowerDim: Matrix;
 
-    fn zero() -> Self;
-    fn identity() -> Self;
+    const DIM: usize;
+    const ZERO: Self;
+    const IDENTITY: Self;
 
     /**
      * A matrix with 1 fewer dimensions, with given row and column removed.
@@ -125,28 +125,25 @@ macro_rules! impl_mat {
         }
 
         impl Matrix for $ty_name {
-            const DIM: usize = $dims;
             type Vector = $vector_ty_name;
             type LowerDim = $lower_dim_ty_name;
 
-            #[inline]
-            fn zero() -> Self {
-                $ty_name([[0.0; $dims]; $dims])
-            }
+            const DIM: usize = $dims;
+            const ZERO: Self = Self([[0.0; $dims]; $dims]);
+            const IDENTITY: Self = {
+                let mut result = Self::ZERO;
+                let mut i = 0;
 
-            #[inline]
-            fn identity() -> Self {
-                let mut result = Self::zero();
-
-                for i in 0..$dims {
+                while i < $dims {
                     result.0[i][i] = 1.0;
+                    i += 1;
                 }
 
                 result
-            }
+            };
 
             fn cofactor_matrix(&self) -> Self {
-                let mut result = Self::zero();
+                let mut result = Self::ZERO;
 
                 for column in 0..$dims {
                     for row in 0..$dims {
@@ -176,7 +173,7 @@ macro_rules! impl_mat {
                     panic!("Cannot get a submatrix of a matrix with dimension 1 or lower.");
                 }
 
-                let mut result = Self::LowerDim::zero();
+                let mut result = Self::LowerDim::ZERO;
 
                 for result_col in 0..($dims - 1) {
                     for result_row in 0..($dims - 1) {
@@ -205,7 +202,7 @@ macro_rules! impl_mat {
 
         impl Default for $ty_name {
             fn default() -> Self {
-                Self::identity()
+                Self::IDENTITY
             }
         }
 
@@ -231,7 +228,7 @@ macro_rules! impl_mat {
             generics: [];
             header: ($ty_name, $ty_name) -> $ty_name;
             |&lhs, &rhs| {
-                let mut result = $ty_name::identity();
+                let mut result = $ty_name::IDENTITY;
 
                 for result_row in 0..$dims {
                     for result_column in 0..$dims {
@@ -256,7 +253,7 @@ macro_rules! impl_mat {
             generics: [];
             header: ($ty_name, <$ty_name as Matrix>::Vector) -> <$ty_name as Matrix>::Vector;
             |&lhs, &rhs| {
-                let mut result = <<$ty_name as Matrix>::Vector as Vector>::zero();
+                let mut result = <<$ty_name as Matrix>::Vector as Vector>::ZERO;
 
                 for (result_row, result_component) in result.iter_mut().enumerate() {
                     for result_column in 0..$dims {
@@ -377,7 +374,7 @@ macro_rules! impl_affine_transformation {
         impl AffineTransformation<$vector_ty_name> for $ty_name {
             #[inline]
             fn scale(coefficient: f32) -> Self {
-                let mut result = Self::identity();
+                let mut result = Self::IDENTITY;
                 let dims = <<<$vector_ty_name as Homogeneous>::ProjectedVector as Vector>::Dimensions as Unsigned>::to_usize();
 
                 for i in 0..dims {
@@ -389,7 +386,7 @@ macro_rules! impl_affine_transformation {
 
             #[inline]
             fn translation(translation: &<$vector_ty_name as Homogeneous>::ProjectedVector) -> Self {
-                let mut result = Self::identity();
+                let mut result = Self::IDENTITY;
                 let dims = <<$vector_ty_name as Vector>::Dimensions as Unsigned>::to_usize();
 
                 for (index, component) in translation.iter().enumerate() {
@@ -418,7 +415,7 @@ macro_rules! impl_conversion_to_homogeneous_space {
     ($ty_name_from:ident[$dim_from:expr] -> $ty_name_to:ident) => {
         impl $ty_name_from {
             pub fn to_homogeneous(self) -> $ty_name_to {
-                let mut result = $ty_name_to::identity();
+                let mut result = $ty_name_to::IDENTITY;
 
                 for row in 0..$dim_from {
                     for column in 0..$dim_from {

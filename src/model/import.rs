@@ -635,7 +635,7 @@ fn get_node_matrices(document: &Document) -> Vec<Mat4> {
         }
     }
 
-    results.into_iter().map(|option| option.unwrap_or_else(Mat4::identity)).collect()
+    results.into_iter().map(|option| option.unwrap_or(Mat4::IDENTITY)).collect()
 }
 
 pub fn create_node_descriptor_sets<'a>(device: &Arc<Device>,

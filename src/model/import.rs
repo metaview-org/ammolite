@@ -682,7 +682,6 @@ pub fn create_samplers(device: &Arc<Device>, document: &Document) -> Result<Vec<
         //     .into_vulkan_equivalent();
         let (min_filter, mipmap_mode) = MinFilter::LinearMipmapLinear
             .into_vulkan_equivalent();
-        dbg!(gltf_sampler.mag_filter().unwrap_or(MagFilter::Linear).into_vulkan_equivalent());
         let sampler = Sampler::new(
             device.clone(),
             gltf_sampler.mag_filter().unwrap_or(MagFilter::Linear).into_vulkan_equivalent(),

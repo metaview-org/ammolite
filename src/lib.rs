@@ -1558,6 +1558,8 @@ impl<MD: MediumData> Ammolite<MD> {
         let view_swapchains_len = Self::view_swapchains(&self.xr.stereo_hmd_mediums,
                                                        &self.window_mediums).count();
 
+        let secs_elapsed = ((elapsed.as_secs() as f64) + (elapsed.as_nanos() as f64) / (1_000_000_000f64)) as f32;
+
         // for stereo_hmd_medium in self.xr.stereo_hmd_mediums.iter_mut() {
         for medium in Self::mediums_mut(&mut self.xr.stereo_hmd_mediums,
                                         &mut self.window_mediums) {
@@ -1640,8 +1642,6 @@ impl<MD: MediumData> Ammolite<MD> {
                             },
                             Err(err) => panic!("{:?}", err)
                         };
-
-                        let secs_elapsed = ((elapsed.as_secs() as f64) + (elapsed.as_nanos() as f64) / (1_000_000_000f64)) as f32;
 
                         self.synchronization = Some(Box::new(self.synchronization.take().unwrap()
                             .join(acquire_future)));

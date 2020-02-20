@@ -1,7 +1,7 @@
 use std;
 use std::collections::HashSet;
 use std::time::Duration;
-use winit::{MouseButton, VirtualKeyCode};
+use winit::event::{MouseButton, VirtualKeyCode};
 use boolinator::Boolinator;
 use ammolite_math::*;
 

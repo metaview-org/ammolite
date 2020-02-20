@@ -87,6 +87,16 @@ macro_rules! impl_mat {
                 Self(inner)
             }
 
+            pub fn from_flat(matrix: [f32; $dims * $dims]) -> Self {
+                let mut nested = [[0.0; $dims]; $dims];
+
+                for (index, item) in matrix.into_iter().enumerate() {
+                    nested[index % $dims][index / $dims] = *item;
+                }
+
+                nested.into()
+            }
+
             pub fn as_ref(&self) -> &[[f32; $dims]; $dims] {
                 &self.0
             }
@@ -333,6 +343,18 @@ macro_rules! impl_mat {
         impl From<$ty_name> for [[f32; $dims]; $dims] {
             fn from(matrix: $ty_name) -> Self {
                 *matrix
+            }
+        }
+
+        impl From<[[f32; $dims]; $dims]> for $ty_name {
+            fn from(matrix: [[f32; $dims]; $dims]) -> Self {
+                Self::new(matrix)
+            }
+        }
+
+        impl From<[f32; $dims * $dims]> for $ty_name {
+            fn from(matrix: [f32; $dims * $dims]) -> Self {
+                Self::from_flat(matrix)
             }
         }
 

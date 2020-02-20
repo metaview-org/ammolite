@@ -47,8 +47,10 @@ use vulkano::image::ImageUsage;
 use vulkano::pipeline::viewport::Viewport;
 use vulkano::swapchain::{PresentMode, SurfaceTransform, AcquireError, SwapchainCreationError, Surface};
 use vulkano_win::VkSurfaceBuild;
-use winit::{ElementState, MouseButton, Event, DeviceEvent, WindowEvent, KeyboardInput, VirtualKeyCode, EventsLoop, WindowBuilder, Window};
-use winit::dpi::PhysicalSize;
+use winit::event_loop::EventLoop;
+use winit::window::{WindowBuilder, Window};
+use winit::event::{ElementState, MouseButton, Event, DeviceEvent, WindowEvent, KeyboardInput, VirtualKeyCode};
+use winit::dpi::{PhysicalSize, LogicalPosition};
 use smallvec::SmallVec;
 use openxr::{View as XrView, FrameState as XrFrameState, FrameWaiter as XrFrameWaiter};
 
@@ -475,7 +477,7 @@ pub struct WindowMedium<MD: MediumData> {
     pub data: MD,
     pub views: Option<Vec<View>>,
     pub window: Arc<Surface<Window>>,
-    // pub window_events_loop: Rc<RefCell<EventsLoop>>,
+    // pub window_events_loop: Rc<RefCell<EventLoop<()>>,
     swapchain: RefCell<ViewSwapchain>,
     // swapchain: Box<dyn Swapchain>,
 }
@@ -530,9 +532,7 @@ impl<MD: MediumData> Medium<MD> for WindowMedium<MD> {
     fn finalize_frame(&mut self) {}
 
     fn get_dimensions(&self) -> [NonZeroU32; 2] {
-        let dpi = self.window.window().get_hidpi_factor();
-        let (width, height): (u32, u32) = self.window.window().get_inner_size()
-            .unwrap().to_physical(dpi).into();
+        let (width, height): (u32, u32) = self.window.window().inner_size().into();
 
         [
             NonZeroU32::new(width).expect("The width of the window must not be 0."),
@@ -544,7 +544,7 @@ impl<MD: MediumData> Medium<MD> for WindowMedium<MD> {
         match command {
             CenterCursor => {
                 let dimensions = self.get_dimensions();
-                self.window.window().set_cursor_position(
+                self.window.window().set_cursor_position::<LogicalPosition<f64>>(
                     (dimensions[0].get() as f64 / 2.0, dimensions[1].get() as f64 / 2.0).into()
                 ).expect("Could not center the cursor position.");
             }
@@ -753,7 +753,7 @@ pub struct XrContext<MD: MediumData> {
 }
 
 pub struct UninitializedWindowMedium<MD> {
-    pub events_loop: Rc<RefCell<EventsLoop>>,
+    pub events_loop: Rc<RefCell<EventLoop<()>>>,
     pub window_builder: WindowBuilder,
     pub window_handler: Option<Box<dyn FnOnce(&Arc<Surface<Window>>, &mut MD)>>,
     pub data: MD,
@@ -943,7 +943,7 @@ impl<'a, MD: MediumData, A: OpenXrInitializedTrait> AmmoliteBuilder<'a, MD, A, V
         data: MD,
     ) {
         let mut dimensions: [NonZeroU32; 2] = {
-            let (width, height) = window.window().get_inner_size().unwrap().into();
+            let (width, height) = window.window().inner_size().into();
             [
                 NonZeroU32::new(width).expect("The width of the window must not be 0."),
                 NonZeroU32::new(height).expect("The height of the window must not be 0."),
@@ -1410,7 +1410,7 @@ pub struct Ammolite<MD: MediumData> {
     pub pipeline_cache: GraphicsPipelineSetCache,
     pub helper_resources: HelperResources,
     // pub window: Arc<Surface<Window>>,
-    // pub window_events_loop: Rc<RefCell<EventsLoop>>,
+    // pub window_events_loop: Rc<RefCell<EventLoop<()>>,
     // pub window_dimensions: [NonZeroU32; 2],
     pub window_mediums: ArrayVec<[WindowMedium<MD>; 1]>,
     // pub view_swapchains: Arc<ViewSwapchains>,

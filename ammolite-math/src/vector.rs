@@ -1,44 +1,75 @@
-use std::ops::{Add, Deref, DerefMut, Sub, Neg, AddAssign, SubAssign, Div, Mul, DivAssign, MulAssign};
+use std::ops::{Add, Deref, DerefMut, Sub, Neg, AddAssign, SubAssign, Div, Mul, DivAssign, MulAssign, Index, IndexMut};
 use std::fmt::{Debug, Formatter, Error};
 use det::det_copy;
 use serde::{Deserialize, Serialize};
 use typenum::{Unsigned, U1, U2, U3, U4};
 use crate::matrix::Mat4;
 
-pub trait Vector: Neg + Sized + Clone + Debug + PartialEq {
+pub trait Component {
+    const ZERO: Self;
+
+    fn to_f32(self) -> f32;
+}
+
+macro_rules! impl_component {
+    ($($comp_ty:ty),*$(,)?) => {
+        $(
+            impl Component for $comp_ty {
+                const ZERO: Self = 0 as $comp_ty;
+
+                fn to_f32(self) -> f32 {
+                    self as f32
+                }
+            }
+        )*
+    }
+}
+
+impl_component!(f32, u8, u16, u32, u64, u128, i8, i16, i32, i64, i128);
+
+pub trait Vector<C: Component>: Sized + Clone + Copy + Debug + PartialEq + Index<usize, Output=C> {
     type Dimensions: Unsigned + Add<U1> + Sub<U1>;
 
     const ZERO: Self;
+    const DIMENSIONS: usize;
 
-    fn dot(&self, other: &Self) -> f32;
-    fn norm_squared(&self) -> f32;
+    fn dot(&self, other: &Self) -> C;
+    fn norm_squared(&self) -> C;
 
     fn norm(&self) -> f32 {
-        self.norm_squared().sqrt()
+        self.norm_squared().to_f32().sqrt()
     }
 
-    fn distance_to_squared(&self, other: &Self) -> f32;
+    fn distance_to_squared(&self, other: &Self) -> C;
     fn distance_to(&self, other: &Self) -> f32 {
-        self.distance_to_squared(other).sqrt()
+        self.distance_to_squared(other).to_f32().sqrt()
     }
+}
 
+pub trait FloatVector<C: Component>: Vector<C> {
     fn normalize_mut(&mut self);
     fn normalize(&self) -> Self {
         let mut result = self.clone();
         result.normalize_mut();
         result
     }
+    fn fract_floor_mut(&mut self);
+    fn fract_floor(&self) -> Self {
+        let mut result = self.clone();
+        result.fract_floor_mut();
+        result
+    }
 }
 
-pub trait Projected: Vector {
-    type HomogeneousVector: Vector + Homogeneous<ProjectedVector=Self>;
+pub trait Projected<C: Component>: Vector<C> {
+    type HomogeneousVector: Vector<C> + Homogeneous<C, ProjectedVector=Self>;
 
     fn into_homogeneous_direction(&self) -> Self::HomogeneousVector;
     fn into_homogeneous_position(&self) -> Self::HomogeneousVector;
 }
 
-pub trait Homogeneous: Vector {
-    type ProjectedVector: Vector + Projected<HomogeneousVector=Self>;
+pub trait Homogeneous<C: Component>: Vector<C> {
+    type ProjectedVector: Vector<C> + Projected<C, HomogeneousVector=Self>;
 
     fn into_projected(&self) -> Self::ProjectedVector;
 }
@@ -48,31 +79,32 @@ pub trait UnitQuaternion {
 }
 
 macro_rules! impl_vec {
-    ($ty_name:ident, $dims:expr, $dims_ty:ty) => {
-        #[derive(Clone, PartialEq, Deserialize, Serialize)]
-        pub struct $ty_name(pub [f32; $dims]);
+    ($ty_name:ident, $dims:expr, $dims_ty:ty, $comp_ty:ty) => {
+        #[derive(Clone, Copy, PartialEq, Deserialize, Serialize)]
+        pub struct $ty_name(pub [$comp_ty; $dims]);
 
         impl $ty_name {
-            pub fn inner(&self) -> &[f32; $dims] {
+            pub fn inner(&self) -> &[$comp_ty; $dims] {
                 &self.0
             }
 
-            pub fn inner_mut(&mut self) -> &mut [f32; $dims] {
+            pub fn inner_mut(&mut self) -> &mut [$comp_ty; $dims] {
                 &mut self.0
             }
 
-            pub fn into_inner(self) -> [f32; $dims] {
+            pub fn into_inner(self) -> [$comp_ty; $dims] {
                 self.0
             }
         }
 
-        impl Vector for $ty_name {
+        impl Vector<$comp_ty> for $ty_name {
             type Dimensions = $dims_ty;
 
-            const ZERO: Self = Self([0.0; $dims]);
+            const ZERO: Self = Self([<$comp_ty as Component>::ZERO; $dims]);
+            const DIMENSIONS: usize = $dims;
 
-            fn dot(&self, other: &Self) -> f32 {
-                let mut result = 0.0;
+            fn dot(&self, other: &Self) -> $comp_ty {
+                let mut result = <$comp_ty as Component>::ZERO;
 
                 for (a, b) in self.iter().zip(other.iter()) {
                     result += a * b;
@@ -81,20 +113,12 @@ macro_rules! impl_vec {
                 result
             }
 
-            fn distance_to_squared(&self, other: &Self) -> f32 {
+            fn distance_to_squared(&self, other: &Self) -> $comp_ty {
                 (self - other).norm_squared()
             }
 
-            fn norm_squared(&self) -> f32 {
+            fn norm_squared(&self) -> $comp_ty {
                 self.dot(&self)
-            }
-
-            fn normalize_mut(&mut self) {
-                let norm = self.norm();
-
-                for coord in &mut self.0 {
-                    *coord /= norm;
-                }
             }
         }
 
@@ -104,20 +128,17 @@ macro_rules! impl_vec {
             }
         }
 
-        impl_unary_operator! {
-            operator_type: [Neg];
-            inline: [true];
-            operator_fn: neg;
-            generics: [];
-            header: ($ty_name) -> $ty_name;
-            |&myself| {
-                let mut result = myself.clone();
+        impl Index<usize> for $ty_name {
+            type Output = $comp_ty;
 
-                for (result_component, myself_component) in result.iter_mut().zip(myself.iter()) {
-                    *result_component = -*myself_component;
-                }
+            fn index(&self, idx: usize) -> &Self::Output {
+                &self.0[idx]
+            }
+        }
 
-                result
+        impl IndexMut<usize> for $ty_name {
+            fn index_mut(&mut self, idx: usize) -> &mut Self::Output {
+                &mut self.0[idx]
             }
         }
 
@@ -160,29 +181,12 @@ macro_rules! impl_vec {
             inline: [true];
             operator_fn: mul;
             generics: [];
-            header: ($ty_name, f32) -> $ty_name;
+            header: ($ty_name, $comp_ty) -> $ty_name;
             |&a, &b| {
                 let mut result = a.clone();
 
                 for result_component in result.iter_mut() {
                     *result_component *= b;
-                }
-
-                result
-            }
-        }
-
-        impl_binary_operator! {
-            operator_type: [Div];
-            inline: [true];
-            operator_fn: div;
-            generics: [];
-            header: ($ty_name, f32) -> $ty_name;
-            |&a, &b| {
-                let mut result = a.clone();
-
-                for result_component in result.iter_mut() {
-                    *result_component /= b;
                 }
 
                 result
@@ -213,14 +217,14 @@ macro_rules! impl_vec {
             }
         }
 
-        impl From<$ty_name> for [f32; $dims] {
+        impl From<$ty_name> for [$comp_ty; $dims] {
             fn from(vector: $ty_name) -> Self {
                 *vector
             }
         }
 
-        impl From<[f32; $dims]> for $ty_name {
-            fn from(array: [f32; $dims]) -> Self {
+        impl From<[$comp_ty; $dims]> for $ty_name {
+            fn from(array: [$comp_ty; $dims]) -> Self {
                 $ty_name(array)
             }
         }
@@ -232,7 +236,7 @@ macro_rules! impl_vec {
         }
 
         impl Deref for $ty_name {
-            type Target = [f32; $dims];
+            type Target = [$comp_ty; $dims];
 
             #[inline]
             fn deref(&self) -> &Self::Target {
@@ -249,13 +253,73 @@ macro_rules! impl_vec {
     }
 }
 
+macro_rules! impl_vec_signed {
+    ($ty_name:ident, $dims:expr, $dims_ty:ty) => {
+        impl_unary_operator! {
+            operator_type: [Neg];
+            inline: [true];
+            operator_fn: neg;
+            generics: [];
+            header: ($ty_name) -> $ty_name;
+            |&myself| {
+                let mut result = myself.clone();
+
+                for (result_component, myself_component) in result.iter_mut().zip(myself.iter()) {
+                    *result_component = -*myself_component;
+                }
+
+                result
+            }
+        }
+    }
+}
+
+macro_rules! impl_vec_f32 {
+    ($ty_name:ident, $dims:expr, $dims_ty:ty) => {
+        impl_vec_signed!($ty_name, $dims, $dims_ty);
+
+        impl_binary_operator! {
+            operator_type: [Div];
+            inline: [true];
+            operator_fn: div;
+            generics: [];
+            header: ($ty_name, f32) -> $ty_name;
+            |&a, &b| {
+                let mut result = a.clone();
+
+                for result_component in result.iter_mut() {
+                    *result_component /= b;
+                }
+
+                result
+            }
+        }
+
+        impl FloatVector<f32> for $ty_name {
+            fn normalize_mut(&mut self) {
+                let norm = self.norm();
+
+                for coord in &mut self.0 {
+                    *coord /= norm;
+                }
+            }
+
+            fn fract_floor_mut(&mut self) {
+                for coord in self.inner_mut() {
+                    *coord = *coord - coord.floor();
+                }
+            }
+        }
+    }
+}
+
 macro_rules! impl_projected_homogeneous {
     ($lower_dim_ty_name:ident, $higher_dim_ty_name:ident) => {
-        impl Projected for $lower_dim_ty_name {
+        impl Projected<f32> for $lower_dim_ty_name {
             type HomogeneousVector = $higher_dim_ty_name;
 
             fn into_homogeneous_direction(&self) -> Self::HomogeneousVector {
-                let mut result = <Self::HomogeneousVector as Vector>::ZERO;
+                let mut result = <Self::HomogeneousVector as Vector<f32>>::ZERO;
 
                 for (result_component, self_component) in result.iter_mut().zip(self.iter()) {
                     *result_component = *self_component;
@@ -277,11 +341,11 @@ macro_rules! impl_projected_homogeneous {
             }
         }
 
-        impl Homogeneous for $higher_dim_ty_name {
+        impl Homogeneous<f32> for $higher_dim_ty_name {
             type ProjectedVector = $lower_dim_ty_name;
 
             fn into_projected(&self) -> Self::ProjectedVector {
-                let mut result = <Self::ProjectedVector as Vector>::ZERO;
+                let mut result = <Self::ProjectedVector as Vector<f32>>::ZERO;
 
                 let mut last_component = *self.last().unwrap_or_else(||
                     panic!("No last element in vector {}.", stringify!($higher_dim_ty_name)));
@@ -300,14 +364,165 @@ macro_rules! impl_projected_homogeneous {
     }
 }
 
-impl_vec!(Vec1, 1, U1);
-impl_vec!(Vec2, 2, U2);
-impl_vec!(Vec3, 3, U3);
-impl_vec!(Vec4, 4, U4);
+macro_rules! impl_vec_eq {
+    (
+        $(
+            $float_ty_name:ty :
+            $($ty_name:ty),*$(,)?
+        );*$(;)?
+    ) => {
+        $(
+            $(
+                impl Eq for $ty_name {}
+
+                impl std::hash::Hash for $ty_name {
+                    fn hash<H>(&self, state: &mut H) where H: std::hash::Hasher {
+                        self.inner().hash(state);
+                    }
+                }
+
+                impl $ty_name {
+                    pub fn to_f32(self) -> $float_ty_name {
+                        let mut result = <$float_ty_name as Vector<f32>>::ZERO;
+
+                        for coord in 0..Self::DIMENSIONS {
+                            result[coord] = self[coord] as f32;
+                        }
+
+                        result
+                    }
+                }
+            )*
+        )*
+    }
+}
+
+// impl_vec!(F32Vec1, 1, U1, f32);
+// impl_vec!(F32Vec2, 2, U2, f32);
+// impl_vec!(F32Vec3, 3, U3, f32);
+// impl_vec!(F32Vec4, 4, U4, f32);
+
+// impl_vec_f32!(F32Vec1, 1, U1);
+// impl_vec_f32!(F32Vec2, 2, U2);
+// impl_vec_f32!(F32Vec3, 3, U3);
+// impl_vec_f32!(F32Vec4, 4, U4);
+
+// impl_projected_homogeneous!(F32Vec1, F32Vec2);
+// impl_projected_homogeneous!(F32Vec2, F32Vec3);
+// impl_projected_homogeneous!(F32Vec3, F32Vec4);
+
+// pub type Vec1 = F32Vec1;
+// pub type Vec2 = F32Vec2;
+// pub type Vec3 = F32Vec3;
+// pub type Vec4 = F32Vec4;
+
+impl_vec!(Vec1, 1, U1, f32);
+impl_vec!(Vec2, 2, U2, f32);
+impl_vec!(Vec3, 3, U3, f32);
+impl_vec!(Vec4, 4, U4, f32);
+
+impl_vec_f32!(Vec1, 1, U1);
+impl_vec_f32!(Vec2, 2, U2);
+impl_vec_f32!(Vec3, 3, U3);
+impl_vec_f32!(Vec4, 4, U4);
 
 impl_projected_homogeneous!(Vec1, Vec2);
 impl_projected_homogeneous!(Vec2, Vec3);
 impl_projected_homogeneous!(Vec3, Vec4);
+
+impl_vec!(U8Vec1, 1, U1, u8);
+impl_vec!(U8Vec2, 2, U2, u8);
+impl_vec!(U8Vec3, 3, U3, u8);
+impl_vec!(U8Vec4, 4, U4, u8);
+
+impl_vec!(U16Vec1, 1, U1, u16);
+impl_vec!(U16Vec2, 2, U2, u16);
+impl_vec!(U16Vec3, 3, U3, u16);
+impl_vec!(U16Vec4, 4, U4, u16);
+
+impl_vec!(U32Vec1, 1, U1, u32);
+impl_vec!(U32Vec2, 2, U2, u32);
+impl_vec!(U32Vec3, 3, U3, u32);
+impl_vec!(U32Vec4, 4, U4, u32);
+
+impl_vec!(U64Vec1, 1, U1, u64);
+impl_vec!(U64Vec2, 2, U2, u64);
+impl_vec!(U64Vec3, 3, U3, u64);
+impl_vec!(U64Vec4, 4, U4, u64);
+
+impl_vec!(U128Vec1, 1, U1, u128);
+impl_vec!(U128Vec2, 2, U2, u128);
+impl_vec!(U128Vec3, 3, U3, u128);
+impl_vec!(U128Vec4, 4, U4, u128);
+
+impl_vec_eq!(
+    Vec1: U8Vec1, U16Vec1, U32Vec1, U64Vec1, U128Vec1;
+    Vec2: U8Vec2, U16Vec2, U32Vec2, U64Vec2, U128Vec2;
+    Vec3: U8Vec3, U16Vec3, U32Vec3, U64Vec3, U128Vec3;
+    Vec4: U8Vec4, U16Vec4, U32Vec4, U64Vec4, U128Vec4;
+);
+
+pub type UVec1 = U32Vec1;
+pub type UVec2 = U32Vec2;
+pub type UVec3 = U32Vec3;
+pub type UVec4 = U32Vec4;
+
+impl_vec!(I8Vec1, 1, U1, i8);
+impl_vec!(I8Vec2, 2, U2, i8);
+impl_vec!(I8Vec3, 3, U3, i8);
+impl_vec!(I8Vec4, 4, U4, i8);
+impl_vec_signed!(I8Vec1, 1, U1);
+impl_vec_signed!(I8Vec2, 2, U2);
+impl_vec_signed!(I8Vec3, 3, U3);
+impl_vec_signed!(I8Vec4, 4, U4);
+
+impl_vec!(I16Vec1, 1, U1, i16);
+impl_vec!(I16Vec2, 2, U2, i16);
+impl_vec!(I16Vec3, 3, U3, i16);
+impl_vec!(I16Vec4, 4, U4, i16);
+impl_vec_signed!(I16Vec1, 1, U1);
+impl_vec_signed!(I16Vec2, 2, U2);
+impl_vec_signed!(I16Vec3, 3, U3);
+impl_vec_signed!(I16Vec4, 4, U4);
+
+impl_vec!(I32Vec1, 1, U1, i32);
+impl_vec!(I32Vec2, 2, U2, i32);
+impl_vec!(I32Vec3, 3, U3, i32);
+impl_vec!(I32Vec4, 4, U4, i32);
+impl_vec_signed!(I32Vec1, 1, U1);
+impl_vec_signed!(I32Vec2, 2, U2);
+impl_vec_signed!(I32Vec3, 3, U3);
+impl_vec_signed!(I32Vec4, 4, U4);
+
+impl_vec!(I64Vec1, 1, U1, i64);
+impl_vec!(I64Vec2, 2, U2, i64);
+impl_vec!(I64Vec3, 3, U3, i64);
+impl_vec!(I64Vec4, 4, U4, i64);
+impl_vec_signed!(I64Vec1, 1, U1);
+impl_vec_signed!(I64Vec2, 2, U2);
+impl_vec_signed!(I64Vec3, 3, U3);
+impl_vec_signed!(I64Vec4, 4, U4);
+
+impl_vec!(I128Vec1, 1, U1, i128);
+impl_vec!(I128Vec2, 2, U2, i128);
+impl_vec!(I128Vec3, 3, U3, i128);
+impl_vec!(I128Vec4, 4, U4, i128);
+impl_vec_signed!(I128Vec1, 1, U1);
+impl_vec_signed!(I128Vec2, 2, U2);
+impl_vec_signed!(I128Vec3, 3, U3);
+impl_vec_signed!(I128Vec4, 4, U4);
+
+impl_vec_eq!(
+    Vec1: I8Vec1, I16Vec1, I32Vec1, I64Vec1, I128Vec1;
+    Vec2: I8Vec2, I16Vec2, I32Vec2, I64Vec2, I128Vec2;
+    Vec3: I8Vec3, I16Vec3, I32Vec3, I64Vec3, I128Vec3;
+    Vec4: I8Vec4, I16Vec4, I32Vec4, I64Vec4, I128Vec4;
+);
+
+pub type IVec1 = I32Vec1;
+pub type IVec2 = I32Vec2;
+pub type IVec3 = I32Vec3;
+pub type IVec4 = I32Vec4;
 
 impl UnitQuaternion for Vec4 {
     fn to_matrix(&self) -> Option<Mat4> {

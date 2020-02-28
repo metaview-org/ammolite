@@ -7,7 +7,7 @@ use typenum::Unsigned;
 use crate::vector::*;
 
 pub trait Matrix: Neg + Mul<Output=Self> + Mul<f32, Output=Self> + PartialEq + Sized + Clone + Debug {
-    type Vector: Vector;
+    type Vector: Vector<f32>;
     type LowerDim: Matrix;
 
     const DIM: usize;
@@ -66,12 +66,12 @@ pub trait Matrix: Neg + Mul<Output=Self> + Mul<f32, Output=Self> + PartialEq + S
     }
 }
 
-pub trait AffineTransformation<V>: Matrix<Vector=V> where V: Homogeneous {
+pub trait AffineTransformation<V>: Matrix<Vector=V> where V: Homogeneous<f32> {
     fn scale(coefficient: f32) -> Self;
-    fn translation(translation: &<V as Homogeneous>::ProjectedVector) -> Self;
+    fn translation(translation: &<V as Homogeneous<f32>>::ProjectedVector) -> Self;
 }
 
-pub trait Rotation3<V> where V: Homogeneous {
+pub trait Rotation3<V> where V: Homogeneous<f32> {
     fn rotation_yaw(yaw: f32) -> Self;
     fn rotation_pitch(pitch: f32) -> Self;
     fn rotation_roll(roll: f32) -> Self;
@@ -263,7 +263,7 @@ macro_rules! impl_mat {
             generics: [];
             header: ($ty_name, <$ty_name as Matrix>::Vector) -> <$ty_name as Matrix>::Vector;
             |&lhs, &rhs| {
-                let mut result = <<$ty_name as Matrix>::Vector as Vector>::ZERO;
+                let mut result = <<$ty_name as Matrix>::Vector as Vector<f32>>::ZERO;
 
                 for (result_row, result_component) in result.iter_mut().enumerate() {
                     for result_column in 0..$dims {
@@ -397,7 +397,7 @@ macro_rules! impl_affine_transformation {
             #[inline]
             fn scale(coefficient: f32) -> Self {
                 let mut result = Self::IDENTITY;
-                let dims = <<<$vector_ty_name as Homogeneous>::ProjectedVector as Vector>::Dimensions as Unsigned>::to_usize();
+                let dims = <<<$vector_ty_name as Homogeneous<f32>>::ProjectedVector as Vector<f32>>::Dimensions as Unsigned>::to_usize();
 
                 for i in 0..dims {
                     result[i][i] = coefficient;
@@ -407,9 +407,9 @@ macro_rules! impl_affine_transformation {
             }
 
             #[inline]
-            fn translation(translation: &<$vector_ty_name as Homogeneous>::ProjectedVector) -> Self {
+            fn translation(translation: &<$vector_ty_name as Homogeneous<f32>>::ProjectedVector) -> Self {
                 let mut result = Self::IDENTITY;
-                let dims = <<$vector_ty_name as Vector>::Dimensions as Unsigned>::to_usize();
+                let dims = <<$vector_ty_name as Vector<f32>>::Dimensions as Unsigned>::to_usize();
 
                 for (index, component) in translation.iter().enumerate() {
                     result[dims - 1][index] = *component;

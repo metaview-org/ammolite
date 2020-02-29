@@ -1,3 +1,17 @@
+/// Euclidean division.
+/// See `i32::div_euclid`.
+pub trait DivEuclid<RHS> {
+    type Output;
+
+    fn div_euclid(self, rhs: RHS) -> Self::Output;
+}
+
+pub trait RemEuclid<RHS> {
+    type Output;
+
+    fn rem_euclid(self, rhs: RHS) -> Self::Output;
+}
+
 /// Implements a binary operator on owned types
 macro_rules! impl_binary_operator_owned {
     (operator_type: [$($operator_type:tt)+];

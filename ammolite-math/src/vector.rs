@@ -1,9 +1,12 @@
 use std::ops::{Add, Deref, DerefMut, Sub, Neg, AddAssign, SubAssign, Div, Mul, DivAssign, MulAssign, Index, IndexMut};
+use std::convert::TryFrom;
+use std::num::TryFromIntError;
 use std::fmt::{Debug, Formatter, Error};
 use det::det_copy;
 use serde::{Deserialize, Serialize};
 use typenum::{Unsigned, U1, U2, U3, U4};
 use crate::matrix::Mat4;
+use crate::ops::{DivEuclid, RemEuclid};
 
 pub trait Component {
     const ZERO: Self;
@@ -53,10 +56,11 @@ pub trait FloatVector<C: Component>: Vector<C> {
         result.normalize_mut();
         result
     }
-    fn fract_floor_mut(&mut self);
-    fn fract_floor(&self) -> Self {
+
+    fn floor_mut(&mut self);
+    fn floor(&self) -> Self {
         let mut result = self.clone();
-        result.fract_floor_mut();
+        result.floor_mut();
         result
     }
 }
@@ -160,6 +164,23 @@ macro_rules! impl_vec {
         }
 
         impl_binary_operator! {
+            operator_type: [Add];
+            inline: [true];
+            operator_fn: add;
+            generics: [];
+            header: ($ty_name, $comp_ty) -> $ty_name;
+            |&a, &b| {
+                let mut result = $ty_name::ZERO;
+
+                for (result_component, a_component) in result.iter_mut().zip(a.iter()) {
+                    *result_component = *a_component + *b;
+                }
+
+                result
+            }
+        }
+
+        impl_binary_operator! {
             operator_type: [Sub];
             inline: [true];
             operator_fn: sub;
@@ -177,16 +198,220 @@ macro_rules! impl_vec {
         }
 
         impl_binary_operator! {
+            operator_type: [Sub];
+            inline: [true];
+            operator_fn: sub;
+            generics: [];
+            header: ($ty_name, $comp_ty) -> $ty_name;
+            |&a, &b| {
+                let mut result = $ty_name::ZERO;
+
+                for (result_component, a_component) in result.iter_mut().zip(a.iter()) {
+                    *result_component = *a_component - *b;
+                }
+
+                result
+            }
+        }
+
+        impl_binary_operator! {
+            operator_type: [Mul];
+            inline: [true];
+            operator_fn: mul;
+            generics: [];
+            header: ($ty_name, $ty_name) -> $ty_name;
+            |&a, &b| {
+                let mut result = $ty_name::ZERO;
+
+                for (result_component, (a_component, b_component)) in result.iter_mut().zip(a.iter().zip(b.iter())) {
+                    *result_component = *a_component * *b_component;
+                }
+
+                result
+            }
+        }
+
+        impl_binary_operator! {
             operator_type: [Mul];
             inline: [true];
             operator_fn: mul;
             generics: [];
             header: ($ty_name, $comp_ty) -> $ty_name;
             |&a, &b| {
-                let mut result = a.clone();
+                let mut result = $ty_name::ZERO;
 
-                for result_component in result.iter_mut() {
-                    *result_component *= b;
+                for (result_component, a_component) in result.iter_mut().zip(a.iter()) {
+                    *result_component = *a_component * *b;
+                }
+
+                result
+            }
+        }
+
+        impl_binary_operator! {
+            operator_type: [Mul];
+            inline: [true];
+            operator_fn: mul;
+            generics: [];
+            header: ($comp_ty, $ty_name) -> $ty_name;
+            |&a, &b| {
+                let mut result = $ty_name::ZERO;
+
+                for (result_component, b_component) in result.iter_mut().zip(b.iter()) {
+                    *result_component = *a * *b_component;
+                }
+
+                result
+            }
+        }
+
+        impl_binary_operator! {
+            operator_type: [Div];
+            inline: [true];
+            operator_fn: div;
+            generics: [];
+            header: ($ty_name, $ty_name) -> $ty_name;
+            |&a, &b| {
+                let mut result = $ty_name::ZERO;
+
+                for (result_component, (a_component, b_component)) in result.iter_mut().zip(a.iter().zip(b.iter())) {
+                    *result_component = *a_component / *b_component;
+                }
+
+                result
+            }
+        }
+
+        impl_binary_operator! {
+            operator_type: [Div];
+            inline: [true];
+            operator_fn: div;
+            generics: [];
+            header: ($ty_name, $comp_ty) -> $ty_name;
+            |&a, &b| {
+                let mut result = $ty_name::ZERO;
+
+                for (result_component, a_component) in result.iter_mut().zip(a.iter()) {
+                    *result_component = *a_component / *b;
+                }
+
+                result
+            }
+        }
+
+        impl_binary_operator! {
+            operator_type: [Div];
+            inline: [true];
+            operator_fn: div;
+            generics: [];
+            header: ($comp_ty, $ty_name) -> $ty_name;
+            |&a, &b| {
+                let mut result = $ty_name::ZERO;
+
+                for (result_component, b_component) in result.iter_mut().zip(b.iter()) {
+                    *result_component = *a / *b_component;
+                }
+
+                result
+            }
+        }
+
+        impl_binary_operator! {
+            operator_type: [DivEuclid];
+            inline: [true];
+            operator_fn: div_euclid;
+            generics: [];
+            header: ($ty_name, $ty_name) -> $ty_name;
+            |&a, &b| {
+                let mut result = <$ty_name as Vector<_>>::ZERO;
+
+                for (result_component, (a_component, b_component)) in result.iter_mut().zip(a.iter().zip(b.iter())) {
+                    *result_component = (*a_component).div_euclid(*b_component);
+                }
+
+                result
+            }
+        }
+
+        impl_binary_operator! {
+            operator_type: [DivEuclid];
+            inline: [true];
+            operator_fn: div_euclid;
+            generics: [];
+            header: ($ty_name, $comp_ty) -> $ty_name;
+            |&a, &b| {
+                let mut result = <$ty_name as Vector<_>>::ZERO;
+
+                for (result_component, a_component) in result.iter_mut().zip(a.iter()) {
+                    *result_component = (*a_component).div_euclid(*b);
+                }
+
+                result
+            }
+        }
+
+        impl_binary_operator! {
+            operator_type: [DivEuclid];
+            inline: [true];
+            operator_fn: div_euclid;
+            generics: [];
+            header: ($comp_ty, $ty_name) -> $ty_name;
+            |&a, &b| {
+                let mut result = <$ty_name as Vector<_>>::ZERO;
+
+                for (result_component, b_component) in result.iter_mut().zip(b.iter()) {
+                    *result_component = (*a).div_euclid(*b_component);
+                }
+
+                result
+            }
+        }
+
+        impl_binary_operator! {
+            operator_type: [RemEuclid];
+            inline: [true];
+            operator_fn: rem_euclid;
+            generics: [];
+            header: ($ty_name, $ty_name) -> $ty_name;
+            |&a, &b| {
+                let mut result = <$ty_name as Vector<_>>::ZERO;
+
+                for (result_component, (a_component, b_component)) in result.iter_mut().zip(a.iter().zip(b.iter())) {
+                    *result_component = (*a_component).rem_euclid(*b_component);
+                }
+
+                result
+            }
+        }
+
+        impl_binary_operator! {
+            operator_type: [RemEuclid];
+            inline: [true];
+            operator_fn: rem_euclid;
+            generics: [];
+            header: ($ty_name, $comp_ty) -> $ty_name;
+            |&a, &b| {
+                let mut result = <$ty_name as Vector<_>>::ZERO;
+
+                for (result_component, a_component) in result.iter_mut().zip(a.iter()) {
+                    *result_component = (*a_component).rem_euclid(*b);
+                }
+
+                result
+            }
+        }
+
+        impl_binary_operator! {
+            operator_type: [RemEuclid];
+            inline: [true];
+            operator_fn: rem_euclid;
+            generics: [];
+            header: ($comp_ty, $ty_name) -> $ty_name;
+            |&a, &b| {
+                let mut result = <$ty_name as Vector<_>>::ZERO;
+
+                for (result_component, b_component) in result.iter_mut().zip(b.iter()) {
+                    *result_component = (*a).rem_euclid(*b_component);
                 }
 
                 result
@@ -257,7 +482,7 @@ macro_rules! impl_vec_signed {
     ($ty_name:ident, $dims:expr, $dims_ty:ty) => {
         impl_unary_operator! {
             operator_type: [Neg];
-            inline: [true];
+            inline: [false];
             operator_fn: neg;
             generics: [];
             header: ($ty_name) -> $ty_name;
@@ -271,29 +496,25 @@ macro_rules! impl_vec_signed {
                 result
             }
         }
-    }
-}
 
-macro_rules! impl_vec_f32 {
-    ($ty_name:ident, $dims:expr, $dims_ty:ty) => {
-        impl_vec_signed!($ty_name, $dims, $dims_ty);
+        impl $ty_name {
+            pub fn abs(&self) -> Self {
+                let mut result = self.clone();
 
-        impl_binary_operator! {
-            operator_type: [Div];
-            inline: [true];
-            operator_fn: div;
-            generics: [];
-            header: ($ty_name, f32) -> $ty_name;
-            |&a, &b| {
-                let mut result = a.clone();
-
-                for result_component in result.iter_mut() {
-                    *result_component /= b;
+                for coord in result.iter_mut() {
+                    *coord = coord.abs();
                 }
 
                 result
             }
         }
+    }
+}
+
+macro_rules! impl_vec_f32 {
+    ($ty_name:ident, $dims:expr, $dims_ty:ty) => {
+        impl_vec!($ty_name, $dims, $dims_ty, f32);
+        impl_vec_signed!($ty_name, $dims, $dims_ty);
 
         impl FloatVector<f32> for $ty_name {
             fn normalize_mut(&mut self) {
@@ -304,9 +525,9 @@ macro_rules! impl_vec_f32 {
                 }
             }
 
-            fn fract_floor_mut(&mut self) {
+            fn floor_mut(&mut self) {
                 for coord in self.inner_mut() {
-                    *coord = *coord - coord.floor();
+                    *coord = coord.floor();
                 }
             }
         }
@@ -364,43 +585,124 @@ macro_rules! impl_projected_homogeneous {
     }
 }
 
-macro_rules! impl_vec_eq {
+macro_rules! impl_vec_integer {
     (
-        $(
-            $float_ty_name:ty :
-            $($ty_name:ty),*$(,)?
-        );*$(;)?
+        $ty_name:ident, $float_ty_name:ident, $dims:expr, $dims_ty:ty, $comp_ty:ty
+        $(; $($lesser_comp_ty:ident),* $(,)? < $($greater_comp_ty:ident),* $(,)?)?
     ) => {
-        $(
-            $(
-                impl Eq for $ty_name {}
+        impl_vec!($ty_name, $dims, $dims_ty, $comp_ty);
 
-                impl std::hash::Hash for $ty_name {
-                    fn hash<H>(&self, state: &mut H) where H: std::hash::Hasher {
-                        self.inner().hash(state);
-                    }
+        impl Eq for $ty_name {}
+
+        impl std::hash::Hash for $ty_name {
+            fn hash<H>(&self, state: &mut H) where H: std::hash::Hasher {
+                self.inner().hash(state);
+            }
+        }
+
+        impl $ty_name {
+            pub fn to_f32(self) -> $float_ty_name {
+                let mut result = <$float_ty_name as Vector<f32>>::ZERO;
+
+                for coord in 0..Self::DIMENSIONS {
+                    result[coord] = self[coord] as f32;
                 }
 
-                impl $ty_name {
-                    pub fn to_f32(self) -> $float_ty_name {
-                        let mut result = <$float_ty_name as Vector<f32>>::ZERO;
+                result
+            }
 
-                        for coord in 0..Self::DIMENSIONS {
-                            result[coord] = self[coord] as f32;
+            pub fn from_f32(other: $float_ty_name) -> Self {
+                let mut result = <$ty_name as Vector<_>>::ZERO;
+
+                for coord in 0..Self::DIMENSIONS {
+                    result[coord] = other[coord] as $comp_ty;
+                }
+
+                result
+            }
+        }
+
+        $(
+            $(
+                impl From<$ty_name> for [$greater_comp_ty; $dims] {
+                    fn from(vector: $ty_name) -> Self {
+                        let mut result = [<$greater_comp_ty as Component>::ZERO; $dims];
+
+                        for (result_component, vector_component) in result.iter_mut().zip(vector.iter()) {
+                            *result_component = *vector_component as $greater_comp_ty;
                         }
 
                         result
                     }
                 }
+
+                impl TryFrom<[$greater_comp_ty; $dims]> for $ty_name {
+                    type Error = TryFromIntError;
+
+                    fn try_from(array: [$greater_comp_ty; $dims]) -> Result<Self, Self::Error> {
+                        let mut result = <$ty_name as Vector<_>>::ZERO;
+
+                        for (result_component, array_component) in result.iter_mut().zip(array.iter()) {
+                            *result_component = <$comp_ty>::try_from(*array_component)?;
+                        }
+
+                        Ok(result)
+                    }
+                }
+
+                // impl From<$ty_name> for $greater_ty {
+                //     fn from(vector: $ty_name) -> Self {
+                //         $greater_ty(<[$greater_comp_ty; $dims]>::from(vector))
+                //     }
+                // }
             )*
-        )*
+
+            $(
+                impl From<[$lesser_comp_ty; $dims]> for $ty_name {
+                    fn from(array: [$lesser_comp_ty; $dims]) -> Self {
+                        let mut result = <$ty_name as Vector<_>>::ZERO;
+
+                        for (result_component, array_component) in result.iter_mut().zip(array.iter()) {
+                            *result_component = *array_component as $comp_ty;
+                        }
+
+                        result
+                    }
+                }
+
+                impl TryFrom<$ty_name> for [$lesser_comp_ty; $dims] {
+                    type Error = TryFromIntError;
+
+                    fn try_from(vector: $ty_name) -> Result<Self, Self::Error> {
+                        let mut result = [<$lesser_comp_ty as Component>::ZERO; $dims];
+
+                        for (result_component, vector_component) in result.iter_mut().zip(vector.iter()) {
+                            *result_component = <$lesser_comp_ty>::try_from(*vector_component)?;
+                        }
+
+                        Ok(result)
+                    }
+                }
+
+                // impl From<$lesser_ty> for $ty_name {
+                //     fn from(other: $lesser_ty) -> Self {
+                //         <$ty_name>::from(other.0)
+                //     }
+                // }
+            )*
+        )?
     }
 }
 
-// impl_vec!(F32Vec1, 1, U1, f32);
-// impl_vec!(F32Vec2, 2, U2, f32);
-// impl_vec!(F32Vec3, 3, U3, f32);
-// impl_vec!(F32Vec4, 4, U4, f32);
+macro_rules! impl_vec_integer_signed {
+    (
+        $ty_name:ident, $float_ty_name:ident, $dims:expr, $dims_ty:ty, $comp_ty:ty $(,)?
+        $(; $($lesser_comp_ty:ident),* $(,)? < $($greater_comp_ty:ident),* $(,)?)?
+    ) => {
+        impl_vec_integer!($ty_name, $float_ty_name, $dims, $dims_ty, $comp_ty$(; $($lesser_comp_ty),* < $($greater_comp_ty),*)?);
+        impl_vec_signed!($ty_name, $dims, $dims_ty);
+    }
+}
 
 // impl_vec_f32!(F32Vec1, 1, U1);
 // impl_vec_f32!(F32Vec2, 2, U2);
@@ -416,11 +718,6 @@ macro_rules! impl_vec_eq {
 // pub type Vec3 = F32Vec3;
 // pub type Vec4 = F32Vec4;
 
-impl_vec!(Vec1, 1, U1, f32);
-impl_vec!(Vec2, 2, U2, f32);
-impl_vec!(Vec3, 3, U3, f32);
-impl_vec!(Vec4, 4, U4, f32);
-
 impl_vec_f32!(Vec1, 1, U1);
 impl_vec_f32!(Vec2, 2, U2);
 impl_vec_f32!(Vec3, 3, U3);
@@ -430,94 +727,60 @@ impl_projected_homogeneous!(Vec1, Vec2);
 impl_projected_homogeneous!(Vec2, Vec3);
 impl_projected_homogeneous!(Vec3, Vec4);
 
-impl_vec!(U8Vec1, 1, U1, u8);
-impl_vec!(U8Vec2, 2, U2, u8);
-impl_vec!(U8Vec3, 3, U3, u8);
-impl_vec!(U8Vec4, 4, U4, u8);
+impl_vec_integer!(  U8Vec1, Vec1, 1, U1,   u8; < u16, i16, u32, i32, u64, i64, u128, i128);
+impl_vec_integer!(  U8Vec2, Vec2, 2, U2,   u8; < u16, i16, u32, i32, u64, i64, u128, i128);
+impl_vec_integer!(  U8Vec3, Vec3, 3, U3,   u8; < u16, i16, u32, i32, u64, i64, u128, i128);
+impl_vec_integer!(  U8Vec4, Vec4, 4, U4,   u8; < u16, i16, u32, i32, u64, i64, u128, i128);
 
-impl_vec!(U16Vec1, 1, U1, u16);
-impl_vec!(U16Vec2, 2, U2, u16);
-impl_vec!(U16Vec3, 3, U3, u16);
-impl_vec!(U16Vec4, 4, U4, u16);
+impl_vec_integer!( U16Vec1, Vec1, 1, U1,  u16; u8, i8, < u32, i32, u64, i64, u128, i128);
+impl_vec_integer!( U16Vec2, Vec2, 2, U2,  u16; u8, i8, < u32, i32, u64, i64, u128, i128);
+impl_vec_integer!( U16Vec3, Vec3, 3, U3,  u16; u8, i8, < u32, i32, u64, i64, u128, i128);
+impl_vec_integer!( U16Vec4, Vec4, 4, U4,  u16; u8, i8, < u32, i32, u64, i64, u128, i128);
 
-impl_vec!(U32Vec1, 1, U1, u32);
-impl_vec!(U32Vec2, 2, U2, u32);
-impl_vec!(U32Vec3, 3, U3, u32);
-impl_vec!(U32Vec4, 4, U4, u32);
+impl_vec_integer!( U32Vec1, Vec1, 1, U1,  u32; u8, i8, u16, i16, < u64, i64, u128, i128);
+impl_vec_integer!( U32Vec2, Vec2, 2, U2,  u32; u8, i8, u16, i16, < u64, i64, u128, i128);
+impl_vec_integer!( U32Vec3, Vec3, 3, U3,  u32; u8, i8, u16, i16, < u64, i64, u128, i128);
+impl_vec_integer!( U32Vec4, Vec4, 4, U4,  u32; u8, i8, u16, i16, < u64, i64, u128, i128);
 
-impl_vec!(U64Vec1, 1, U1, u64);
-impl_vec!(U64Vec2, 2, U2, u64);
-impl_vec!(U64Vec3, 3, U3, u64);
-impl_vec!(U64Vec4, 4, U4, u64);
+impl_vec_integer!( U64Vec1, Vec1, 1, U1,  u64; u8, i8, u16, i16, u32, i32, < u128, i128);
+impl_vec_integer!( U64Vec2, Vec2, 2, U2,  u64; u8, i8, u16, i16, u32, i32, < u128, i128);
+impl_vec_integer!( U64Vec3, Vec3, 3, U3,  u64; u8, i8, u16, i16, u32, i32, < u128, i128);
+impl_vec_integer!( U64Vec4, Vec4, 4, U4,  u64; u8, i8, u16, i16, u32, i32, < u128, i128);
 
-impl_vec!(U128Vec1, 1, U1, u128);
-impl_vec!(U128Vec2, 2, U2, u128);
-impl_vec!(U128Vec3, 3, U3, u128);
-impl_vec!(U128Vec4, 4, U4, u128);
-
-impl_vec_eq!(
-    Vec1: U8Vec1, U16Vec1, U32Vec1, U64Vec1, U128Vec1;
-    Vec2: U8Vec2, U16Vec2, U32Vec2, U64Vec2, U128Vec2;
-    Vec3: U8Vec3, U16Vec3, U32Vec3, U64Vec3, U128Vec3;
-    Vec4: U8Vec4, U16Vec4, U32Vec4, U64Vec4, U128Vec4;
-);
+impl_vec_integer!(U128Vec1, Vec1, 1, U1, u128; u8, i8, u16, i16, u32, i32, u64, i64 <);
+impl_vec_integer!(U128Vec2, Vec2, 2, U2, u128; u8, i8, u16, i16, u32, i32, u64, i64 <);
+impl_vec_integer!(U128Vec3, Vec3, 3, U3, u128; u8, i8, u16, i16, u32, i32, u64, i64 <);
+impl_vec_integer!(U128Vec4, Vec4, 4, U4, u128; u8, i8, u16, i16, u32, i32, u64, i64 <);
 
 pub type UVec1 = U32Vec1;
 pub type UVec2 = U32Vec2;
 pub type UVec3 = U32Vec3;
 pub type UVec4 = U32Vec4;
 
-impl_vec!(I8Vec1, 1, U1, i8);
-impl_vec!(I8Vec2, 2, U2, i8);
-impl_vec!(I8Vec3, 3, U3, i8);
-impl_vec!(I8Vec4, 4, U4, i8);
-impl_vec_signed!(I8Vec1, 1, U1);
-impl_vec_signed!(I8Vec2, 2, U2);
-impl_vec_signed!(I8Vec3, 3, U3);
-impl_vec_signed!(I8Vec4, 4, U4);
+impl_vec_integer_signed!(  I8Vec1, Vec1, 1, U1,   i8; < u16, i16, u32, i32, u64, i64, u128, i128);
+impl_vec_integer_signed!(  I8Vec2, Vec2, 2, U2,   i8; < u16, i16, u32, i32, u64, i64, u128, i128);
+impl_vec_integer_signed!(  I8Vec3, Vec3, 3, U3,   i8; < u16, i16, u32, i32, u64, i64, u128, i128);
+impl_vec_integer_signed!(  I8Vec4, Vec4, 4, U4,   i8; < u16, i16, u32, i32, u64, i64, u128, i128);
 
-impl_vec!(I16Vec1, 1, U1, i16);
-impl_vec!(I16Vec2, 2, U2, i16);
-impl_vec!(I16Vec3, 3, U3, i16);
-impl_vec!(I16Vec4, 4, U4, i16);
-impl_vec_signed!(I16Vec1, 1, U1);
-impl_vec_signed!(I16Vec2, 2, U2);
-impl_vec_signed!(I16Vec3, 3, U3);
-impl_vec_signed!(I16Vec4, 4, U4);
+impl_vec_integer_signed!( I16Vec1, Vec1, 1, U1,  i16; u8, i8, < u32, i32, u64, i64, u128, i128);
+impl_vec_integer_signed!( I16Vec2, Vec2, 2, U2,  i16; u8, i8, < u32, i32, u64, i64, u128, i128);
+impl_vec_integer_signed!( I16Vec3, Vec3, 3, U3,  i16; u8, i8, < u32, i32, u64, i64, u128, i128);
+impl_vec_integer_signed!( I16Vec4, Vec4, 4, U4,  i16; u8, i8, < u32, i32, u64, i64, u128, i128);
 
-impl_vec!(I32Vec1, 1, U1, i32);
-impl_vec!(I32Vec2, 2, U2, i32);
-impl_vec!(I32Vec3, 3, U3, i32);
-impl_vec!(I32Vec4, 4, U4, i32);
-impl_vec_signed!(I32Vec1, 1, U1);
-impl_vec_signed!(I32Vec2, 2, U2);
-impl_vec_signed!(I32Vec3, 3, U3);
-impl_vec_signed!(I32Vec4, 4, U4);
+impl_vec_integer_signed!( I32Vec1, Vec1, 1, U1,  i32; u8, i8, u16, i16, < u64, i64, u128, i128);
+impl_vec_integer_signed!( I32Vec2, Vec2, 2, U2,  i32; u8, i8, u16, i16, < u64, i64, u128, i128);
+impl_vec_integer_signed!( I32Vec3, Vec3, 3, U3,  i32; u8, i8, u16, i16, < u64, i64, u128, i128);
+impl_vec_integer_signed!( I32Vec4, Vec4, 4, U4,  i32; u8, i8, u16, i16, < u64, i64, u128, i128);
 
-impl_vec!(I64Vec1, 1, U1, i64);
-impl_vec!(I64Vec2, 2, U2, i64);
-impl_vec!(I64Vec3, 3, U3, i64);
-impl_vec!(I64Vec4, 4, U4, i64);
-impl_vec_signed!(I64Vec1, 1, U1);
-impl_vec_signed!(I64Vec2, 2, U2);
-impl_vec_signed!(I64Vec3, 3, U3);
-impl_vec_signed!(I64Vec4, 4, U4);
+impl_vec_integer_signed!( I64Vec1, Vec1, 1, U1,  i64; u8, i8, u16, i16, u32, i32, < u128, i128);
+impl_vec_integer_signed!( I64Vec2, Vec2, 2, U2,  i64; u8, i8, u16, i16, u32, i32, < u128, i128);
+impl_vec_integer_signed!( I64Vec3, Vec3, 3, U3,  i64; u8, i8, u16, i16, u32, i32, < u128, i128);
+impl_vec_integer_signed!( I64Vec4, Vec4, 4, U4,  i64; u8, i8, u16, i16, u32, i32, < u128, i128);
 
-impl_vec!(I128Vec1, 1, U1, i128);
-impl_vec!(I128Vec2, 2, U2, i128);
-impl_vec!(I128Vec3, 3, U3, i128);
-impl_vec!(I128Vec4, 4, U4, i128);
-impl_vec_signed!(I128Vec1, 1, U1);
-impl_vec_signed!(I128Vec2, 2, U2);
-impl_vec_signed!(I128Vec3, 3, U3);
-impl_vec_signed!(I128Vec4, 4, U4);
-
-impl_vec_eq!(
-    Vec1: I8Vec1, I16Vec1, I32Vec1, I64Vec1, I128Vec1;
-    Vec2: I8Vec2, I16Vec2, I32Vec2, I64Vec2, I128Vec2;
-    Vec3: I8Vec3, I16Vec3, I32Vec3, I64Vec3, I128Vec3;
-    Vec4: I8Vec4, I16Vec4, I32Vec4, I64Vec4, I128Vec4;
-);
+impl_vec_integer_signed!(I128Vec1, Vec1, 1, U1, i128; u8, i8, u16, i16, u32, i32, u64, i64 <);
+impl_vec_integer_signed!(I128Vec2, Vec2, 2, U2, i128; u8, i8, u16, i16, u32, i32, u64, i64 <);
+impl_vec_integer_signed!(I128Vec3, Vec3, 3, U3, i128; u8, i8, u16, i16, u32, i32, u64, i64 <);
+impl_vec_integer_signed!(I128Vec4, Vec4, 4, U4, i128; u8, i8, u16, i16, u32, i32, u64, i64 <);
 
 pub type IVec1 = I32Vec1;
 pub type IVec2 = I32Vec2;

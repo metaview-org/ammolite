@@ -99,6 +99,26 @@ macro_rules! impl_vec {
             pub fn into_inner(self) -> [$comp_ty; $dims] {
                 self.0
             }
+
+            pub fn min(&self, other: &Self) -> Self {
+                let mut result = <$ty_name as Vector<_>>::ZERO;
+
+                for (result_component, (a_component, b_component)) in result.iter_mut().zip(self.iter().zip(other.iter())) {
+                    *result_component = (*a_component).min(*b_component);
+                }
+
+                result
+            }
+
+            pub fn max(&self, other: &Self) -> Self {
+                let mut result = <$ty_name as Vector<_>>::ZERO;
+
+                for (result_component, (a_component, b_component)) in result.iter_mut().zip(self.iter().zip(other.iter())) {
+                    *result_component = (*a_component).max(*b_component);
+                }
+
+                result
+            }
         }
 
         impl Vector<$comp_ty> for $ty_name {

@@ -475,6 +475,99 @@ impl Mat3 {
     }
 }
 
+#[cfg(feature = "nalgebra-interop")]
+impl<'a> From<&'a na::base::MatrixN<f32, na::base::dimension::U3>> for Mat3 {
+    fn from(other: &'a na::base::MatrixN<f32, na::base::dimension::U3>) -> Self {
+        let mut result = Mat3::ZERO;
+
+        for (column_index, column) in other.column_iter().enumerate() {
+            for (row_index, component) in column.iter().enumerate() {
+                result[column_index][row_index] = *component;
+            }
+        }
+
+        result
+    }
+}
+
+#[cfg(feature = "nalgebra-interop")]
+impl<'a> From<&'a na::base::MatrixN<f32, na::base::dimension::U4>> for Mat4 {
+    fn from(other: &'a na::base::MatrixN<f32, na::base::dimension::U4>) -> Self {
+        let mut result = Mat4::ZERO;
+
+        for (column_index, column) in other.column_iter().enumerate() {
+            for (row_index, component) in column.iter().enumerate() {
+                result[column_index][row_index] = *component;
+            }
+        }
+
+        result
+    }
+}
+
+#[cfg(feature = "nalgebra-interop")]
+impl<'a> From<&'a na::base::MatrixN<f32, na::base::dimension::U3>> for Mat4 {
+    fn from(other: &'a na::base::MatrixN<f32, na::base::dimension::U3>) -> Self {
+        (&other.to_homogeneous()).into()
+    }
+}
+
+#[cfg(feature = "nalgebra-interop")]
+impl<'a> From<&'a na::geometry::Rotation<f32, na::base::dimension::U3>> for Mat3 {
+    fn from(other: &'a na::geometry::Rotation<f32, na::base::dimension::U3>) -> Self {
+        other.matrix().into()
+    }
+}
+
+#[cfg(feature = "nalgebra-interop")]
+impl<'a> From<&'a na::geometry::Rotation<f32, na::base::dimension::U3>> for Mat4 {
+    fn from(other: &'a na::geometry::Rotation<f32, na::base::dimension::U3>) -> Self {
+        other.matrix().into()
+    }
+}
+
+#[cfg(feature = "nalgebra-interop")]
+impl<'a, C: na::geometry::TCategory> From<&'a na::geometry::Transform<f32, na::base::dimension::U3, C>> for Mat4 {
+    fn from(other: &'a na::geometry::Transform<f32, na::base::dimension::U3, C>) -> Self {
+        other.matrix().into()
+    }
+}
+
+#[cfg(feature = "nalgebra-interop")]
+impl<'a> From<&'a na::geometry::UnitQuaternion<f32>> for Mat3 {
+    fn from(other: &'a na::geometry::UnitQuaternion<f32>) -> Self {
+        (&other.clone().to_rotation_matrix()).into()
+    }
+}
+
+#[cfg(feature = "nalgebra-interop")]
+impl<'a> From<&'a na::geometry::UnitQuaternion<f32>> for Mat4 {
+    fn from(other: &'a na::geometry::UnitQuaternion<f32>) -> Self {
+        (&other.clone().to_rotation_matrix()).into()
+    }
+}
+
+#[cfg(feature = "nalgebra-interop")]
+impl<'a> From<&'a na::geometry::Translation<f32, na::base::dimension::U3>> for Mat4 {
+    fn from(other: &'a na::geometry::Translation<f32, na::base::dimension::U3>) -> Self {
+        Mat4::translation(&other.vector.into())
+    }
+}
+
+#[cfg(feature = "nalgebra-interop")]
+impl<'a> From<&'a na::geometry::Isometry<f32, na::base::dimension::U3, na::geometry::UnitQuaternion<f32>>> for Mat4 {
+    fn from(other: &'a na::geometry::Isometry<f32, na::base::dimension::U3, na::geometry::UnitQuaternion<f32>>) -> Self {
+        (&other.clone().to_homogeneous()).into()
+    }
+}
+
+#[cfg(feature = "nalgebra-interop")]
+impl<'a> From<&'a na::geometry::Isometry<f32, na::base::dimension::U3, na::geometry::Rotation<f32, na::base::dimension::U3>>> for Mat4 {
+    fn from(other: &'a na::geometry::Isometry<f32, na::base::dimension::U3, na::geometry::Rotation<f32, na::base::dimension::U3>>) -> Self {
+        (&other.clone().to_homogeneous()).into()
+    }
+}
+
 impl Rotation3<Vec4> for Mat3 {
     #[inline]
     fn rotation_pitch(pitch: f32) -> Self {

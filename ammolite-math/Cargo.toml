@@ -4,8 +4,14 @@ version = "0.1.0"
 authors = ["Jakub Hlusička <limeth@protonmail.com>"]
 edition = "2018"
 
+[features]
+default = [ "nalgebra-interop" ]
+nalgebra-interop = [ "na" ]
+
 [dependencies]
 typenum = "1.10.0"
 det = "0.1.0"
 generic-array = "0.13.2"
 serde = { version = "1.0", features = ["derive"] }
+na = { version = "0.20", package = "nalgebra", optional = true }
+paste = "0.1"

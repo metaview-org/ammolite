@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use typenum::{Unsigned, U1, U2, U3, U4};
 use crate::matrix::Mat4;
 use crate::ops::{DivEuclid, RemEuclid};
+use paste::{item, expr};
 
 pub trait Component {
     const ZERO: Self;
@@ -548,6 +549,46 @@ macro_rules! impl_vec_f32 {
             fn floor_mut(&mut self) {
                 for coord in self.inner_mut() {
                     *coord = coord.floor();
+                }
+            }
+        }
+
+        item! {
+            use na::base::dimension::{
+                $dims_ty as [< Na $dims_ty >],
+            };
+
+            #[cfg(feature = "nalgebra-interop")]
+            impl From<na::base::VectorN<f32, [< Na $dims_ty >]>> for $ty_name {
+                fn from(other: na::base::VectorN<f32, [< Na $dims_ty >]>) -> $ty_name {
+                    (&other).into()
+                }
+            }
+
+            #[cfg(feature = "nalgebra-interop")]
+            impl<'a> From<&'a na::base::VectorN<f32, [< Na $dims_ty >]>> for $ty_name {
+                fn from(other: &'a na::base::VectorN<f32, [< Na $dims_ty >]>) -> $ty_name {
+                    let mut result = <$ty_name as Vector<f32>>::ZERO;
+
+                    for (result_component, other_component) in result.iter_mut().zip(other.iter()) {
+                        *result_component = *other_component;
+                    }
+
+                    result
+                }
+            }
+
+            #[cfg(feature = "nalgebra-interop")]
+            impl From<na::geometry::Point<f32, [< Na $dims_ty >]>> for $ty_name {
+                fn from(other: na::geometry::Point<f32, [< Na $dims_ty >]>) -> $ty_name {
+                    (&other.coords).into()
+                }
+            }
+
+            #[cfg(feature = "nalgebra-interop")]
+            impl<'a> From<&'a na::geometry::Point<f32, [< Na $dims_ty >]>> for $ty_name {
+                fn from(other: &'a na::geometry::Point<f32, [< Na $dims_ty >]>) -> $ty_name {
+                    (&other.coords).into()
                 }
             }
         }

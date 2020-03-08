@@ -64,6 +64,16 @@ pub trait FloatVector<C: Component>: Vector<C> {
         result.floor_mut();
         result
     }
+
+    fn ceil_mut(&mut self);
+    fn ceil(&self) -> Self {
+        let mut result = self.clone();
+        result.ceil_mut();
+        result
+    }
+
+    fn floor_to_i32(&self) -> I32Vec3;
+    fn ceil_to_i32(&self) -> I32Vec3;
 }
 
 pub trait Projected<C: Component>: Vector<C> {
@@ -550,6 +560,34 @@ macro_rules! impl_vec_f32 {
                 for coord in self.inner_mut() {
                     *coord = coord.floor();
                 }
+            }
+
+            fn ceil_mut(&mut self) {
+                for coord in self.inner_mut() {
+                    *coord = coord.ceil();
+                }
+            }
+
+            fn floor_to_i32(&self) -> I32Vec3 {
+                let floored = self.floor();
+                let mut result = I32Vec3::ZERO;
+
+                for (result_component, floored_component) in result.iter_mut().zip(floored.iter()) {
+                    *result_component = *floored_component as i32;
+                }
+
+                result
+            }
+
+            fn ceil_to_i32(&self) -> I32Vec3 {
+                let ceiled = self.ceil();
+                let mut result = I32Vec3::ZERO;
+
+                for (result_component, ceiled_component) in result.iter_mut().zip(ceiled.iter()) {
+                    *result_component = *ceiled_component as i32;
+                }
+
+                result
             }
         }
 

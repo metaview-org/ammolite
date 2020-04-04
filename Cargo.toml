@@ -5,7 +5,7 @@ authors = ["Jakub Hlusička <limeth@protonmail.com>"]
 edition = "2018"
 
 [dependencies]
-ammolite-math = { path = "ammolite-math" }
+ammolite-math = { path = "ammolite-math", default-features = false }
 # vulkano = "0.11.1"
 # vulkano-shaders = "0.11.0"
 # vulkano-win = "0.11.0"

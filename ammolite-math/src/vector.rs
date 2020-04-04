@@ -51,6 +51,8 @@ pub trait Vector<C: Component>: Sized + Clone + Copy + Debug + PartialEq + Index
 }
 
 pub trait FloatVector<C: Component>: Vector<C> {
+    type I32Vector: IntegerVector<i32>;
+
     fn normalize_mut(&mut self);
     fn normalize(&self) -> Self {
         let mut result = self.clone();
@@ -72,8 +74,15 @@ pub trait FloatVector<C: Component>: Vector<C> {
         result
     }
 
-    fn floor_to_i32(&self) -> I32Vec3;
-    fn ceil_to_i32(&self) -> I32Vec3;
+    fn floor_to_i32(&self) -> Self::I32Vector;
+    fn ceil_to_i32(&self) -> Self::I32Vector;
+}
+
+pub trait IntegerVector<C: Component>: Vector<C> {
+    type FVector: FloatVector<f32>;
+
+    fn to_f32(self) -> Self::FVector;
+    fn from_f32(other: Self::FVector) -> Self;
 }
 
 pub trait Projected<C: Component>: Vector<C> {
@@ -548,6 +557,10 @@ macro_rules! impl_vec_f32 {
         impl_vec_signed!($ty_name, $dims, $dims_ty);
 
         impl FloatVector<f32> for $ty_name {
+            paste::item! {
+                type I32Vector = [< I32 $ty_name >];
+            }
+
             fn normalize_mut(&mut self) {
                 let norm = self.norm();
 
@@ -568,9 +581,9 @@ macro_rules! impl_vec_f32 {
                 }
             }
 
-            fn floor_to_i32(&self) -> I32Vec3 {
+            fn floor_to_i32(&self) -> Self::I32Vector {
                 let floored = self.floor();
-                let mut result = I32Vec3::ZERO;
+                let mut result = Self::I32Vector::ZERO;
 
                 for (result_component, floored_component) in result.iter_mut().zip(floored.iter()) {
                     *result_component = *floored_component as i32;
@@ -579,9 +592,9 @@ macro_rules! impl_vec_f32 {
                 result
             }
 
-            fn ceil_to_i32(&self) -> I32Vec3 {
+            fn ceil_to_i32(&self) -> Self::I32Vector {
                 let ceiled = self.ceil();
-                let mut result = I32Vec3::ZERO;
+                let mut result = Self::I32Vector::ZERO;
 
                 for (result_component, ceiled_component) in result.iter_mut().zip(ceiled.iter()) {
                     *result_component = *ceiled_component as i32;
@@ -592,6 +605,7 @@ macro_rules! impl_vec_f32 {
         }
 
         item! {
+            #[cfg(feature = "nalgebra-interop")]
             use na::base::dimension::{
                 $dims_ty as [< Na $dims_ty >],
             };
@@ -699,9 +713,11 @@ macro_rules! impl_vec_integer {
             }
         }
 
-        impl $ty_name {
-            pub fn to_f32(self) -> $float_ty_name {
-                let mut result = <$float_ty_name as Vector<f32>>::ZERO;
+        impl IntegerVector<$comp_ty> for $ty_name {
+            type FVector = $float_ty_name;
+
+            fn to_f32(self) -> Self::FVector {
+                let mut result = <Self::FVector as Vector<f32>>::ZERO;
 
                 for coord in 0..Self::DIMENSIONS {
                     result[coord] = self[coord] as f32;
@@ -710,7 +726,7 @@ macro_rules! impl_vec_integer {
                 result
             }
 
-            pub fn from_f32(other: $float_ty_name) -> Self {
+            fn from_f32(other: Self::FVector) -> Self {
                 let mut result = <$ty_name as Vector<_>>::ZERO;
 
                 for coord in 0..Self::DIMENSIONS {

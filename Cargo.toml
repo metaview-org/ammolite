@@ -25,12 +25,13 @@ openxr = { path = "../openxrs/openxr", features = ["static"] }
 rayon = "1.0.2"
 safe-transmute = "0.10.1"
 tyenum = "0.1.0"
-typenum = "1.10.0"
+typenum = "1.11.0"
 vulkano = { path = "../vulkano/vulkano" }
 vulkano-shaders = { path = "../vulkano/vulkano-shaders" }
 vulkano-win = { path = "../vulkano/vulkano-win" }
 weak-table = "0.2.3"
-winit = "0.21.0"
+# winit = "0.22.0"
+winit = { git = "https://github.com/rust-windowing/winit.git" }
 paste = "0.1"
 smallvec = "0.6.10"
 itertools = "0.8.1"

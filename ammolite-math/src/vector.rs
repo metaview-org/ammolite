@@ -52,6 +52,7 @@ pub trait Vector<C: Component>: Sized + Clone + Copy + Debug + PartialEq + Index
 
 pub trait FloatVector<C: Component>: Vector<C> {
     type I32Vector: IntegerVector<i32>;
+    type I64Vector: IntegerVector<i64>;
 
     fn normalize_mut(&mut self);
     fn normalize(&self) -> Self {
@@ -76,6 +77,9 @@ pub trait FloatVector<C: Component>: Vector<C> {
 
     fn floor_to_i32(&self) -> Self::I32Vector;
     fn ceil_to_i32(&self) -> Self::I32Vector;
+
+    fn floor_to_i64(&self) -> Self::I64Vector;
+    fn ceil_to_i64(&self) -> Self::I64Vector;
 }
 
 pub trait IntegerVector<C: Component>: Vector<C> {
@@ -559,6 +563,7 @@ macro_rules! impl_vec_f32 {
         impl FloatVector<f32> for $ty_name {
             paste::item! {
                 type I32Vector = [< I32 $ty_name >];
+                type I64Vector = [< I64 $ty_name >];
             }
 
             fn normalize_mut(&mut self) {
@@ -598,6 +603,28 @@ macro_rules! impl_vec_f32 {
 
                 for (result_component, ceiled_component) in result.iter_mut().zip(ceiled.iter()) {
                     *result_component = *ceiled_component as i32;
+                }
+
+                result
+            }
+
+            fn floor_to_i64(&self) -> Self::I64Vector {
+                let floored = self.floor();
+                let mut result = Self::I64Vector::ZERO;
+
+                for (result_component, floored_component) in result.iter_mut().zip(floored.iter()) {
+                    *result_component = *floored_component as i64;
+                }
+
+                result
+            }
+
+            fn ceil_to_i64(&self) -> Self::I64Vector {
+                let ceiled = self.ceil();
+                let mut result = Self::I64Vector::ZERO;
+
+                for (result_component, ceiled_component) in result.iter_mut().zip(ceiled.iter()) {
+                    *result_component = *ceiled_component as i64;
                 }
 
                 result

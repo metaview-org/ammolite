@@ -33,7 +33,7 @@ dependencies = [
  "vulkano-shaders 0.11.1",
  "vulkano-win 0.11.1",
  "weak-table 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
- "winit 0.22.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "winit 0.22.0 (git+https://github.com/rust-windowing/winit.git)",
 ]
 
 [[package]]
@@ -661,6 +661,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "maybe-uninit"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
 name = "memmap"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1278,7 +1283,7 @@ dependencies = [
  "metal 0.13.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "objc 0.2.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "vulkano 0.11.1",
- "winit 0.22.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "winit 0.22.0 (git+https://github.com/rust-windowing/winit.git)",
 ]
 
 [[package]]
@@ -1391,7 +1396,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "winit"
 version = "0.22.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
+source = "git+https://github.com/rust-windowing/winit.git#28023d9f5bb74b66a9b294b4c8fef6c46a9d9b92"
 dependencies = [
  "android_glue 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "bitflags 1.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1413,7 +1418,7 @@ dependencies = [
  "smithay-client-toolkit 0.6.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "wayland-client 0.23.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "winapi 0.3.6 (registry+https://github.com/rust-lang/crates.io-index)",
- "x11-dl 2.18.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "x11-dl 2.18.5 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -1427,11 +1432,12 @@ dependencies = [
 
 [[package]]
 name = "x11-dl"
-version = "2.18.3"
+version = "2.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
  "lazy_static 1.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc 0.2.66 (registry+https://github.com/rust-lang/crates.io-index)",
+ "maybe-uninit 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "pkg-config 0.3.14 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -1522,6 +1528,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 "checksum log 0.4.6 (registry+https://github.com/rust-lang/crates.io-index)" = "c84ec4b527950aa83a329754b01dbe3f58361d1c5efacd1f6d68c494d08a17c6"
 "checksum lzw 0.10.0 (registry+https://github.com/rust-lang/crates.io-index)" = "7d947cbb889ed21c2a84be6ffbaebf5b4e0f4340638cba0444907e38b56be084"
 "checksum malloc_buf 0.0.6 (registry+https://github.com/rust-lang/crates.io-index)" = "62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb"
+"checksum maybe-uninit 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)" = "60302e4db3a61da70c0cb7991976248362f30319e88850c487b9b95bbf059e00"
 "checksum memmap 0.7.0 (registry+https://github.com/rust-lang/crates.io-index)" = "6585fd95e7bb50d6cc31e20d4cf9afb4e2ba16c5846fc76793f11218da9c475b"
 "checksum memoffset 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)" = "0f9dc261e2b62d7a622bf416ea3c5245cdd5d9a7fcc428c0d06804dfce1775b3"
 "checksum metal 0.13.1 (registry+https://github.com/rust-lang/crates.io-index)" = "7de9c2b83c946ab01c9942928388f911d93486b97636d9927541345905fea65d"
@@ -1601,8 +1608,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 "checksum winapi-i686-pc-windows-gnu 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)" = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
 "checksum winapi-util 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)" = "7168bab6e1daee33b4557efd0e95d5ca70a03706d39fa5f3fe7a236f584b03c9"
 "checksum winapi-x86_64-pc-windows-gnu 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)" = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
-"checksum winit 0.22.0 (registry+https://github.com/rust-lang/crates.io-index)" = "02e9092b71b48ad6a0d98835a786308d10760cc09369d02e4a166608327f1f26"
+"checksum winit 0.22.0 (git+https://github.com/rust-windowing/winit.git)" = "<none>"
 "checksum ws2_32-sys 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)" = "d59cefebd0c892fa2dd6de581e937301d8552cb44489cdff035c6187cb63fa5e"
-"checksum x11-dl 2.18.3 (registry+https://github.com/rust-lang/crates.io-index)" = "940586acb859ea05c53971ac231685799a7ec1dee66ac0bccc0e6ad96e06b4e3"
+"checksum x11-dl 2.18.5 (registry+https://github.com/rust-lang/crates.io-index)" = "2bf981e3a5b3301209754218f962052d4d9ee97e478f4d26d4a6eced34c1fef8"
 "checksum xdg 2.2.0 (registry+https://github.com/rust-lang/crates.io-index)" = "d089681aa106a86fade1b0128fb5daf07d5867a509ab036d99988dec80429a57"
 "checksum xml-rs 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)" = "541b12c998c5b56aa2b4e6f18f03664eef9a4fd0a246a55594efae6cc2d964b5"
